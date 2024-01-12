@@ -1,0 +1,9 @@
+[package]
+name = "archive-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.79"
+datafusion = "34.0.0"
+duckdb = { version = "0.9.2", features = ["bundled", "parquet"] }
