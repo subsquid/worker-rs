@@ -100,6 +100,9 @@ dependencies = [
  "anyhow",
  "datafusion",
  "duckdb",
+ "itertools 0.12.0",
+ "lazy_static",
+ "regex",
 ]
 
 [[package]]

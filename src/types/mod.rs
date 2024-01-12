@@ -4,8 +4,8 @@ pub type Dataset = String;
 
 // Inclusive range
 pub struct Range {
-    begin: u32,
-    end: u32,
+    begin: u64,
+    end: u64,
 }
 
 pub type RangeSet = Vec<Range>;

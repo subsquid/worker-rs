@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -6,7 +7,15 @@ use anyhow::Context;
 use super::Filesystem;
 use super::Result;
 
-struct LocalFs {}
+pub struct LocalFs {
+    root: PathBuf,
+}
+
+impl Default for LocalFs {
+    fn default() -> Self {
+        Self { root: ".".into() }
+    }
+}
 
 impl Filesystem for LocalFs {
     fn ls(&self, path: &str) -> Result<Vec<String>> {
@@ -14,6 +23,10 @@ impl Filesystem for LocalFs {
             .with_context(|| format!("Couldn't open dir {}", path))?
             .map(|entry| try_into_string(entry?.file_name()))
             .collect()
+    }
+
+    fn ls_root(&self) -> Result<Vec<String>> {
+        self.ls(&try_into_string(self.root.as_os_str().to_owned())?)
     }
 }
 
