@@ -192,9 +192,15 @@ pub fn validate_layout(fs: &impl Filesystem) -> Result<()> {
 mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
-    use crate::storage::tests::TestFilesystem;
+    use anyhow::Result;
 
-    use super::{BlockNumber, DataChunk, validate_layout};
+    use crate::storage::{local_fs::LocalFs, tests::TestFilesystem};
+
+    use super::{iter_chunks, validate_layout, BlockNumber, DataChunk};
+
+    fn tests_data() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
+    }
 
     #[test]
     fn test_block_number_conversion() {
@@ -223,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_layout() {
+    fn test_validate_layout() {
         let fs = TestFilesystem {
             files: HashMap::from([
                 (
@@ -244,5 +250,17 @@ mod tests {
             ]),
         };
         validate_layout(&fs).unwrap()
+    }
+
+    #[test]
+    fn test_sample() {
+        let fs = LocalFs { root: tests_data() };
+        validate_layout(&fs).unwrap();
+        let chunks: Vec<_> = iter_chunks(&fs, Some(&17881400.into()), None)
+            .unwrap()
+            .collect::<Result<_>>().unwrap();
+        assert_eq!(chunks, vec![
+            DataChunk::parse_range(17881390, "0017881390-0017882786-32ee9457").unwrap()
+        ]);
     }
 }

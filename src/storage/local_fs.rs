@@ -8,7 +8,7 @@ use super::Filesystem;
 use super::Result;
 
 pub struct LocalFs {
-    root: PathBuf,
+    pub root: PathBuf,
 }
 
 impl Default for LocalFs {
@@ -19,7 +19,7 @@ impl Default for LocalFs {
 
 impl Filesystem for LocalFs {
     fn ls(&self, path: &str) -> Result<Vec<String>> {
-        std::fs::read_dir(path)
+        std::fs::read_dir(self.root.join(path))
             .with_context(|| format!("Couldn't open dir {}", path))?
             .map(|entry| try_into_string(entry?.file_name()))
             .collect()
