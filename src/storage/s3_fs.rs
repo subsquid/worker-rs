@@ -34,6 +34,7 @@ impl S3Filesystem {
 
     #[instrument(err, skip(self))]
     pub async fn download_one(&self, path: &str, dst_path: &Path) -> Result<()> {
+        // TODO: check resulting file size
         let mut writer = tokio::fs::File::create(dst_path)
             .await
             .with_context(|| format!("Couldn't create file '{}'", dst_path.to_string_lossy()))?;
@@ -53,7 +54,7 @@ impl S3Filesystem {
                     .into_iter()
                     .map(|x| {
                         x.prefix
-                            .strip_suffix("/")
+                            .strip_suffix('/')
                             .unwrap_or_else(|| panic!("Unexpected S3 prefix name: '{}'", x.prefix))
                             .to_owned()
                     });
