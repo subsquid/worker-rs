@@ -7,6 +7,7 @@ use anyhow::Context;
 use super::Filesystem;
 use super::Result;
 
+#[derive(Debug)]
 pub struct LocalFs {
     pub root: PathBuf,
 }
@@ -18,15 +19,15 @@ impl Default for LocalFs {
 }
 
 impl Filesystem for LocalFs {
-    fn ls(&self, path: &str) -> Result<Vec<String>> {
+    async fn ls(&self, path: &str) -> Result<Vec<String>> {
         std::fs::read_dir(self.root.join(path))
             .with_context(|| format!("Couldn't open dir {}", path))?
-            .map(|entry| try_into_string(entry?.file_name()))
+            .map(|entry| try_into_string(entry?.path().into_os_string()))
             .collect()
     }
 
-    fn ls_root(&self) -> Result<Vec<String>> {
-        self.ls(&try_into_string(self.root.as_os_str().to_owned())?)
+    async fn ls_root(&self) -> Result<Vec<String>> {
+        self.ls(&try_into_string(self.root.as_os_str().to_owned())?).await
     }
 }
 

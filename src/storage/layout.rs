@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::util::iterator::WithLookahead;
 use anyhow::{anyhow, bail, Result};
+use async_stream::try_stream;
+use futures::Stream;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -36,75 +38,86 @@ impl From<u64> for BlockNumber {
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct DataChunk {
-    first_block: BlockNumber,
-    last_block: BlockNumber,
-    last_hash: String,
-    top: BlockNumber,
+    pub first_block: BlockNumber,
+    pub last_block: BlockNumber,
+    pub last_hash: String,
+    pub top: BlockNumber,
 }
 
 impl DataChunk {
-    pub fn path(&self) -> PathBuf {
+    pub fn path(&self) -> String {
         format!(
             "{}/{}-{}-{}",
             self.top, self.first_block, self.last_block, self.last_hash
         )
-        .into()
     }
 
-    pub fn parse_range(top: impl Into<BlockNumber>, dirname: &str) -> Result<Self> {
+    pub fn parse_range(dirname: &str) -> Result<Self> {
         lazy_static! {
-            static ref RE: Regex = Regex::new(r"^(\d{10})-(\d{10})-(\w{8})$").unwrap();
+            static ref RE: Regex = Regex::new(r"(\d{10})/(\d{10})-(\d{10})-(\w{8})$").unwrap();
         }
-        let (beg, end, hash) = RE
+        let (top, beg, end, hash) = RE
             .captures(dirname)
-            .and_then(|cap| match (cap.get(1), cap.get(2), cap.get(3)) {
-                (Some(beg), Some(end), Some(hash)) => {
-                    Some((beg.as_str(), end.as_str(), hash.as_str()))
-                }
-                _ => None,
-            })
-            .ok_or_else(|| anyhow!("Could not parse chunk dirname {}", dirname))?;
+            .and_then(
+                |cap| match (cap.get(1), cap.get(2), cap.get(3), cap.get(4)) {
+                    (Some(top), Some(beg), Some(end), Some(hash)) => {
+                        Some((top.as_str(), beg.as_str(), end.as_str(), hash.as_str()))
+                    }
+                    _ => None,
+                },
+            )
+            .ok_or_else(|| anyhow!("Could not parse chunk dirname '{}'", dirname))?;
         Ok(Self {
             first_block: BlockNumber::try_from(beg)?,
             last_block: BlockNumber::try_from(end)?,
             last_hash: hash.into(),
-            top: top.into(),
+            top: BlockNumber::try_from(top)?,
         })
     }
 }
 
 impl std::fmt::Display for DataChunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.path().to_string_lossy())
+        write!(f, "{}", self.path())
     }
 }
 
-pub fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
+pub fn filename(str: &str) -> String {
+    PathBuf::from(str)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| panic!("Couldn't parse filename from '{}'", str))
+        .to_owned()
+}
+
+async fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
     let mut entries: Vec<_> = fs
-        .ls_root()?
+        .ls_root()
+        .await?
         .into_iter()
-        .flat_map(|name| BlockNumber::try_from(name.as_str()))
+        .flat_map(|name| BlockNumber::try_from(PathBuf::from(name).file_name()?.to_str()?).ok())
         .collect();
     entries.sort_unstable();
     Ok(entries)
 }
 
-fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<DataChunk>> {
+async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<DataChunk>> {
     let mut entries: Vec<_> = fs
-        .ls(&top.to_string())?
+        .ls(&format!("{}", top))
+        .await?
         .into_iter()
-        .map(|dirname| DataChunk::parse_range(*top, &dirname))
+        .map(|dirname| DataChunk::parse_range(&dirname))
         .collect::<Result<_>>()?;
     entries.sort_unstable();
     Ok(entries)
 }
 
 // TODO: test it
-pub fn iter_chunks<'a>(
+pub fn stream_chunks<'a>(
     fs: &'a impl Filesystem,
     first_block: Option<&BlockNumber>,
     last_block: Option<&BlockNumber>,
-) -> Result<impl DoubleEndedIterator<Item = Result<DataChunk>> + 'a> {
+) -> impl Stream<Item = Result<DataChunk>> + 'a {
     let first_block = match first_block {
         Some(&block) => block,
         None => 0.into(),
@@ -113,26 +126,16 @@ pub fn iter_chunks<'a>(
         Some(&block) => block,
         None => u64::MAX.into(),
     };
-    let tops = list_top_dirs(fs)?;
-    let mut filtered = Vec::new();
-    for (i, &top) in tops.iter().enumerate() {
-        if i + 1 < tops.len() && tops[i + 1] <= first_block {
-            continue;
-        }
-        if last_block < top {
-            break;
-        }
-        filtered.push(top);
-    }
-    let iter = filtered
-        .into_iter()
-        .map(move |top| {
-            let chunks = match list_chunks(fs, &top) {
-                Ok(chunks) => chunks,
-                Err(e) => return vec![Err(e)],
-            };
-            // Pre-collect into vec because TakeWhile<SkipWhile<_>> is not a DoubleEndedIterator
-            let mut result = Vec::new();
+    try_stream! {
+        let tops = list_top_dirs(fs).await?;
+        for (i, &top) in tops.iter().enumerate() {
+            if i + 1 < tops.len() && tops[i + 1] <= first_block {
+                continue;
+            }
+            if last_block < top {
+                break;
+            }
+            let chunks = list_chunks(fs, &top).await?;
             for chunk in chunks {
                 if last_block < chunk.first_block {
                     break;
@@ -140,52 +143,57 @@ pub fn iter_chunks<'a>(
                 if first_block > chunk.last_block {
                     continue;
                 }
-                result.push(Ok(chunk));
-            }
-            result
-        })
-        .flatten();
-    Ok(iter)
-}
-
-pub fn validate_layout(fs: &impl Filesystem) -> Result<()> {
-    let tops = list_top_dirs(fs)?;
-    for (&top, next_top) in tops.iter().lookahead() {
-        let chunks = list_chunks(fs, &top)?;
-        for chunk in &chunks {
-            if chunk.first_block > chunk.last_block {
-                bail!(
-                    "Invalid data chunk {}: {} > {}",
-                    chunk,
-                    chunk.first_block,
-                    chunk.last_block
-                );
-            }
-            if chunk.first_block < top {
-                bail!(
-                    "Invalid data chunk {}: {} < {}",
-                    chunk,
-                    chunk.first_block,
-                    top
-                );
-            }
-            if let Some(&next) = next_top {
-                if next <= chunk.last_block {
-                    bail!(
-                        "Invalid data chunk {}: range overlaps with {} top dir",
-                        chunk,
-                        next
-                    );
-                }
-            }
-        }
-        for (cur, next) in chunks.iter().tuple_windows() {
-            if cur.last_block >= next.first_block {
-                bail!("Overlapping ranges: {} and {}", cur, next);
+                yield chunk;
             }
         }
     }
-    Ok(())
+}
+
+pub async fn validate_layout(fs: &impl Filesystem) -> Result<()> {
+    let tops = list_top_dirs(fs).await?;
+    let mut handles = Vec::new();
+    for (&top, next_top) in tops.iter().lookahead() {
+        handles.push(async move {
+            let chunks = list_chunks(fs, &top).await?;
+            for chunk in &chunks {
+                if chunk.first_block > chunk.last_block {
+                    bail!(
+                        "Invalid data chunk {}: {} > {}",
+                        chunk,
+                        chunk.first_block,
+                        chunk.last_block
+                    );
+                }
+                if chunk.first_block < top {
+                    bail!(
+                        "Invalid data chunk {}: {} < {}",
+                        chunk,
+                        chunk.first_block,
+                        top
+                    );
+                }
+                if let Some(&next) = next_top {
+                    if next <= chunk.last_block {
+                        bail!(
+                            "Invalid data chunk {}: range overlaps with {} top dir",
+                            chunk,
+                            next
+                        );
+                    }
+                }
+            }
+            for (cur, next) in chunks.iter().tuple_windows() {
+                if cur.last_block >= next.first_block {
+                    bail!("Overlapping ranges: {} and {}", cur, next);
+                }
+            }
+            Ok(())
+        });
+    }
+    futures::future::join_all(handles.into_iter())
+        .await
+        .into_iter()
+        .try_collect()
 }
 
 #[cfg(test)]
@@ -193,10 +201,11 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
     use anyhow::Result;
+    use futures::StreamExt;
 
     use crate::storage::{local_fs::LocalFs, tests::TestFilesystem};
 
-    use super::{iter_chunks, validate_layout, BlockNumber, DataChunk};
+    use super::{stream_chunks, validate_layout, BlockNumber, DataChunk};
 
     fn tests_data() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -221,46 +230,47 @@ mod tests {
             last_hash: "0xabcdef".into(),
             top: 1000.into(),
         };
-        let filename = "0000001024-0000002047-0xabcdef";
-        let path = PathBuf::from_iter(["0000001000", filename].iter());
+        let path = "0000001000/0000001024-0000002047-0xabcdef";
         assert_eq!(chunk.path(), path);
 
-        assert_eq!(DataChunk::parse_range(1000, filename).unwrap(), chunk);
+        assert_eq!(DataChunk::parse_range(&path).unwrap(), chunk);
     }
 
-    #[test]
-    fn test_validate_layout() {
+    #[tokio::test]
+    async fn test_validate_layout() {
         let fs = TestFilesystem {
             files: HashMap::from([
                 (
                     "0000001000".into(),
                     vec![
-                        "0000001000-0000001999-0xabcdef".into(),
-                        "0000002000-0000002999-0x191919".into(),
-                        "0000003000-0000003999-0xdedede".into(),
+                        "0000001000/0000001000-0000001999-0xabcdef".into(),
+                        "0000001000/0000002000-0000002999-0x191919".into(),
+                        "0000001000/0000003000-0000003999-0xdedede".into(),
                     ],
                 ),
                 (
                     "0000004000".into(),
                     vec![
-                        "0000004000-0000004999-0xaaaaaa".into(),
-                        "1000000000-1000999999-0xbbbbbb".into(),
+                        "0000004000/0000004000-0000004999-0xaaaaaa".into(),
+                        "0000004000/1000000000-1000999999-0xbbbbbb".into(),
                     ],
                 ),
             ]),
         };
-        validate_layout(&fs).unwrap()
+        validate_layout(&fs).await.unwrap()
     }
 
-    #[test]
-    fn test_sample() {
+    #[tokio::test]
+    async fn test_sample() {
         let fs = LocalFs { root: tests_data() };
-        validate_layout(&fs).unwrap();
-        let chunks: Vec<_> = iter_chunks(&fs, Some(&17881400.into()), None)
-            .unwrap()
-            .collect::<Result<_>>().unwrap();
-        assert_eq!(chunks, vec![
-            DataChunk::parse_range(17881390, "0017881390-0017882786-32ee9457").unwrap()
-        ]);
+        validate_layout(&fs).await.unwrap();
+
+        let stream = stream_chunks(&fs, Some(&17881400.into()), None);
+        let results: Vec<Result<DataChunk>> = stream.collect().await;
+        let chunks = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            chunks,
+            vec![DataChunk::parse_range("0017881390/0017881390-0017882786-32ee9457").unwrap()]
+        );
     }
 }
