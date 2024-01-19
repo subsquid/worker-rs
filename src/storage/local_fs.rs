@@ -12,6 +12,12 @@ pub struct LocalFs {
     pub root: PathBuf,
 }
 
+impl LocalFs {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
 impl Default for LocalFs {
     fn default() -> Self {
         Self { root: ".".into() }
@@ -27,7 +33,8 @@ impl Filesystem for LocalFs {
     }
 
     async fn ls_root(&self) -> Result<Vec<String>> {
-        self.ls(&try_into_string(self.root.as_os_str().to_owned())?).await
+        self.ls(&try_into_string(self.root.as_os_str().to_owned())?)
+            .await
     }
 }
 

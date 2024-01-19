@@ -36,7 +36,7 @@ impl From<u64> for BlockNumber {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
 pub struct DataChunk {
     pub first_block: BlockNumber,
     pub last_block: BlockNumber,
@@ -149,7 +149,7 @@ pub fn stream_chunks<'a>(
     }
 }
 
-pub async fn validate_layout(fs: &impl Filesystem) -> Result<()> {
+pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     let tops = list_top_dirs(fs).await?;
     let mut handles = Vec::new();
     for (&top, next_top) in tops.iter().lookahead() {
@@ -187,13 +187,14 @@ pub async fn validate_layout(fs: &impl Filesystem) -> Result<()> {
                     bail!("Overlapping ranges: {} and {}", cur, next);
                 }
             }
-            Ok(())
+            Ok(chunks)
         });
     }
-    futures::future::join_all(handles.into_iter())
+    let nested_chunks: Vec<_> = futures::future::join_all(handles.into_iter())
         .await
         .into_iter()
-        .try_collect()
+        .try_collect()?;
+    Ok(nested_chunks.into_iter().flatten().collect())
 }
 
 #[cfg(test)]
@@ -205,7 +206,7 @@ mod tests {
 
     use crate::storage::{local_fs::LocalFs, tests::TestFilesystem};
 
-    use super::{stream_chunks, validate_layout, BlockNumber, DataChunk};
+    use super::{read_all_chunks, stream_chunks, BlockNumber, DataChunk};
 
     fn tests_data() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -237,7 +238,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_layout() {
+    async fn test_read_all_chunks() {
         let fs = TestFilesystem {
             files: HashMap::from([
                 (
@@ -257,20 +258,58 @@ mod tests {
                 ),
             ]),
         };
-        validate_layout(&fs).await.unwrap()
+        let chunks = read_all_chunks(&fs).await.unwrap();
+        assert_eq!(
+            chunks,
+            vec![
+                DataChunk {
+                    top: 1000.into(),
+                    first_block: 1000.into(),
+                    last_block: 1999.into(),
+                    last_hash: "0xabcdef".to_owned()
+                },
+                DataChunk {
+                    top: 1000.into(),
+                    first_block: 2000.into(),
+                    last_block: 2999.into(),
+                    last_hash: "0x191919".to_owned()
+                },
+                DataChunk {
+                    top: 1000.into(),
+                    first_block: 3000.into(),
+                    last_block: 3999.into(),
+                    last_hash: "0xdedede".to_owned()
+                },
+                DataChunk {
+                    top: 4000.into(),
+                    first_block: 4000.into(),
+                    last_block: 4999.into(),
+                    last_hash: "0xaaaaaa".to_owned()
+                },
+                DataChunk {
+                    top: 4000.into(),
+                    first_block: 1000000000.into(),
+                    last_block: 1000999999.into(),
+                    last_hash: "0xbbbbbb".to_owned()
+                },
+            ]
+        );
     }
 
     #[tokio::test]
     async fn test_sample() {
         let fs = LocalFs { root: tests_data() };
-        validate_layout(&fs).await.unwrap();
+        read_all_chunks(&fs).await.unwrap();
 
         let stream = stream_chunks(&fs, Some(&17881400.into()), None);
         let results: Vec<Result<DataChunk>> = stream.collect().await;
-        let chunks = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        let from_stream = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(
-            chunks,
+            from_stream,
             vec![DataChunk::parse_range("0017881390/0017881390-0017882786-32ee9457").unwrap()]
         );
+
+        let from_read = read_all_chunks(&fs).await.unwrap();
+        assert_eq!(from_stream, from_read);
     }
 }
