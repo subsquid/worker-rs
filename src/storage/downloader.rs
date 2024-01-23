@@ -7,9 +7,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, instrument, Instrument};
 
 use super::{s3_fs::S3Filesystem, Filesystem};
+use super::local_fs::add_temp_prefix;
 
 /// Handles limited background download pool and allows scheduling new chunk downloads
-// TODO: prioritize short jobs over long ones
 #[derive(Debug)]
 pub struct Downloader {
     tx: tokio::sync::mpsc::Sender<Job>,
@@ -50,8 +50,9 @@ impl Downloader {
     }
 
     /// Starts download in the background pool and completes when it's done
-    #[instrument(err, ret, skip(self, rfs))]
-    pub async fn download_dir(&self, rfs: &S3Filesystem, src: String, dst: PathBuf) -> Result<()> {
+    #[instrument(err, ret, skip(self))]
+    pub async fn download_dir(&self, bucket: &str, src: String, dst: PathBuf) -> Result<()> {
+        let rfs = &S3Filesystem::with_bucket(bucket)?;
         let tmp = &add_temp_prefix(&dst)?;
         tokio::fs::create_dir_all(&tmp).await?;
         let files = rfs.ls(&src).await?;
@@ -82,15 +83,3 @@ impl Downloader {
     }
 }
 
-fn add_temp_prefix(path: &Path) -> Result<PathBuf> {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Invalid system time")
-        .as_millis();
-    let result: Option<_> = (|| {
-        let name = path.file_name()?.to_str()?;
-        let new_name = format!("temp-{}-{}", timestamp, name);
-        Some(path.parent()?.join(new_name))
-    })();
-    result.ok_or_else(|| anyhow!("Invalid chunk path: {}", path.to_string_lossy()))
-}

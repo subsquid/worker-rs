@@ -10,7 +10,7 @@ use regex::Regex;
 
 use super::Filesystem;
 
-#[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy)]
+#[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
 pub struct BlockNumber(u64);
 
 impl std::fmt::Display for BlockNumber {
@@ -36,7 +36,7 @@ impl From<u64> for BlockNumber {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub struct DataChunk {
     pub first_block: BlockNumber,
     pub last_block: BlockNumber,

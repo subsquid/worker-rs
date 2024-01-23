@@ -1,4 +1,4 @@
-use crate::types::State;
+use crate::types::state::State;
 
 trait Transport {
     fn send_ping(&self);

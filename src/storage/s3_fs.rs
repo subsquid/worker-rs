@@ -42,7 +42,7 @@ impl S3Filesystem {
         Ok(())
     }
 
-    #[instrument(err, ret, skip(self), name = "ls")]
+    #[instrument(err, ret, skip(self), name = "ls", level = "debug")]
     async fn ls_raw(&self, path: String) -> Result<Vec<String>> {
         let list = self.bucket.list(path, Some("/".to_owned())).await?;
         Ok(list

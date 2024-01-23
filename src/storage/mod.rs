@@ -3,12 +3,15 @@ use anyhow::Result;
 pub mod downloader;
 pub mod layout;
 pub mod local_fs;
+pub mod manager;
 pub mod s3_fs;
 
 pub trait Filesystem {
     // Returning a collection instead of iterator because partial results are useless
     async fn ls(&self, path: &str) -> Result<Vec<String>>;
-    async fn ls_root(&self) -> Result<Vec<String>>;
+    async fn ls_root(&self) -> Result<Vec<String>> {
+        self.ls("").await
+    }
 }
 
 #[cfg(test)]
