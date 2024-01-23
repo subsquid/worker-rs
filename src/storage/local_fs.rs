@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -25,11 +24,11 @@ impl Default for LocalFs {
 }
 
 impl Filesystem for LocalFs {
-    async fn ls(&self, path: &str) -> Result<Vec<String>> {
+    async fn ls(&self, path: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
         let dir = self.root.join(path);
         std::fs::read_dir(&dir)
             .with_context(|| format!("Couldn't open dir {}", dir.display()))?
-            .map(|entry| try_into_string(entry?.path().into_os_string()))
+            .map(|entry| Ok(entry?.path()))
             .collect()
     }
 }
@@ -50,12 +49,40 @@ pub fn add_temp_prefix(path: &Path) -> Result<PathBuf> {
     let result: Option<_> = (|| {
         let name = path.file_name()?.to_str()?;
         let new_name = format!("temp-{}-{}", timestamp, name);
-        Some(path.parent()?.join(new_name))
+        Some(path.with_file_name(new_name))
     })();
     result.ok_or_else(|| anyhow!("Invalid chunk path: {}", path.to_string_lossy()))
 }
 
-fn try_into_string(s: OsString) -> Result<String> {
-    s.into_string()
-        .map_err(|os_str| anyhow!("Couldn't convert filename {:?} into utf-8 string", os_str))
+#[cfg(test)]
+mod tests {
+    use super::LocalFs;
+    use crate::storage::{tests::tests_data, Filesystem};
+
+    #[tokio::test]
+    async fn test_fs() {
+        let tests_data = tests_data();
+        let fs = LocalFs::new(tests_data.clone());
+        assert_eq!(fs.ls_root().await.unwrap(), [tests_data.join("0017881390")]);
+        assert_eq!(
+            fs.ls("0017881390").await.unwrap(),
+            [tests_data.join("0017881390/0017881390-0017882786-32ee9457")]
+        );
+        assert_eq!(
+            fs.cd("0017881390")
+                .ls("0017881390-0017882786-32ee9457")
+                .await
+                .unwrap()
+                .iter()
+                .map(|p| p.file_name().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "blocks.parquet",
+                "statediffs.parquet",
+                "traces.parquet",
+                "transactions.parquet",
+                "logs.parquet"
+            ]
+        );
+    }
 }

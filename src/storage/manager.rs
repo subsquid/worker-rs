@@ -13,7 +13,10 @@ use super::{
 };
 use crate::{
     storage::Filesystem,
-    types::state::{self, ChunkRef, Dataset, State},
+    types::{
+        os_str::try_into_str,
+        state::{self, ChunkRef, Dataset, State},
+    },
 };
 
 pub struct StateManager {
@@ -214,17 +217,12 @@ impl StateManager {
     async fn load_state(fs: &LocalFs) -> Result<State> {
         let mut result = State::new();
         for dir in fs.ls_root().await? {
-            let dirname = PathBuf::from(&dir)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-            if let Some(dataset) = state::decode_dataset(&dirname) {
+            let dirname = dir.file_name().unwrap();
+            if let Some(dataset) = state::decode_dataset(try_into_str(&dirname)?) {
                 let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname)).await?;
                 result.insert(dataset, chunks.into_iter().collect());
             } else {
-                warn!("Invalid dataset in workdir: {}", dir);
+                warn!("Invalid dataset in workdir: {}", dir.display());
             }
         }
         Ok(result)

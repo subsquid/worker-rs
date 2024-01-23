@@ -1,6 +1,4 @@
-use std::path::PathBuf;
-
-use crate::util::iterator::WithLookahead;
+use crate::{types::os_str::try_into_str, util::iterator::WithLookahead};
 use anyhow::{anyhow, bail, Result};
 use async_stream::try_stream;
 use futures::Stream;
@@ -82,20 +80,12 @@ impl std::fmt::Display for DataChunk {
     }
 }
 
-pub fn filename(str: &str) -> String {
-    PathBuf::from(str)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_else(|| panic!("Couldn't parse filename from '{}'", str))
-        .to_owned()
-}
-
 async fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
     let mut entries: Vec<_> = fs
         .ls_root()
         .await?
         .into_iter()
-        .flat_map(|name| BlockNumber::try_from(PathBuf::from(name).file_name()?.to_str()?).ok())
+        .flat_map(|name| BlockNumber::try_from(name.file_name()?.to_str()?).ok())
         .collect();
     entries.sort_unstable();
     Ok(entries)
@@ -103,10 +93,10 @@ async fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
 
 async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<DataChunk>> {
     let mut entries: Vec<_> = fs
-        .ls(&format!("{}", top))
+        .ls(&top.to_string())
         .await?
         .into_iter()
-        .map(|dirname| DataChunk::parse_range(&dirname))
+        .map(|dirname| DataChunk::parse_range(try_into_str(dirname.as_os_str())?))
         .collect::<Result<_>>()?;
     entries.sort_unstable();
     Ok(entries)
@@ -199,18 +189,17 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::collections::HashMap;
 
     use anyhow::Result;
     use futures::StreamExt;
 
-    use crate::storage::{local_fs::LocalFs, tests::TestFilesystem};
+    use crate::storage::{
+        local_fs::LocalFs,
+        tests::{tests_data, TestFilesystem},
+    };
 
     use super::{read_all_chunks, stream_chunks, BlockNumber, DataChunk};
-
-    fn tests_data() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
-    }
 
     #[test]
     fn test_block_number_conversion() {
@@ -298,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sample() {
-        let fs = LocalFs { root: tests_data() };
+        let fs = LocalFs::new(tests_data());
         read_all_chunks(&fs).await.unwrap();
 
         let stream = stream_chunks(&fs, Some(&17881400.into()), None);

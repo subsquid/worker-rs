@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use s3::{creds::Credentials, Bucket};
-use std::{env, path::Path, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tracing::instrument;
 
 use super::Filesystem;
@@ -43,22 +47,21 @@ impl S3Filesystem {
     }
 
     #[instrument(err, ret, skip(self), name = "ls", level = "debug")]
-    async fn ls_raw(&self, path: String) -> Result<Vec<String>> {
+    async fn ls_raw(&self, path: String) -> Result<Vec<PathBuf>> {
         let list = self.bucket.list(path, Some("/".to_owned())).await?;
         Ok(list
             .into_iter()
             .flat_map(|item| {
-                let dirs = item
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|x| {
-                        x.prefix
-                            .strip_suffix('/')
-                            .unwrap_or_else(|| panic!("Unexpected S3 prefix name: '{}'", x.prefix))
-                            .to_owned()
-                    });
-                let files = item.contents.into_iter().map(|x| x.key);
+                let dirs =
+                    item.common_prefixes
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|x| {
+                            PathBuf::from(x.prefix.strip_suffix('/').unwrap_or_else(|| {
+                                panic!("Unexpected S3 prefix name: '{}'", x.prefix)
+                            }))
+                        });
+                let files = item.contents.into_iter().map(|x| PathBuf::from(x.key));
                 dirs.chain(files)
             })
             .collect())
@@ -66,11 +69,11 @@ impl S3Filesystem {
 }
 
 impl Filesystem for S3Filesystem {
-    async fn ls(&self, path: &str) -> Result<Vec<String>> {
-        self.ls_raw(format!("{}/", path)).await
+    async fn ls(&self, path: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+        self.ls_raw(format!("{}/", path.as_ref().display())).await
     }
 
-    async fn ls_root(&self) -> Result<Vec<String>> {
+    async fn ls_root(&self) -> Result<Vec<PathBuf>> {
         self.ls_raw(String::from("")).await
     }
 }

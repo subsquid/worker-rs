@@ -1,13 +1,15 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use futures::StreamExt;
 use itertools::Itertools;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, instrument, Instrument};
 
-use super::{s3_fs::S3Filesystem, Filesystem};
+use crate::types::os_str::try_into_string;
+
 use super::local_fs::add_temp_prefix;
+use super::{s3_fs::S3Filesystem, Filesystem};
 
 /// Handles limited background download pool and allows scheduling new chunk downloads
 #[derive(Debug)]
@@ -59,15 +61,14 @@ impl Downloader {
         info!("Scheduling download: {:?}", files);
         let results = futures::future::join_all(files.into_iter().map(|file| async move {
             let (resp_tx, resp_rx) = oneshot::channel();
-            let dst_file = tmp.join(
-                PathBuf::from(&file)
-                    .file_name()
-                    .unwrap_or_else(|| panic!("Couldn't parse S3 file name: '{}'", &file)),
-            );
+            let dst_file = tmp
+                .join(file.file_name().unwrap_or_else(|| {
+                    panic!("Couldn't parse S3 file name: '{}'", file.display())
+                }));
             self.tx
                 .send(Job {
                     connection: rfs.clone(),
-                    from: file,
+                    from: try_into_string(file.into_os_string())?,
                     to: dst_file,
                     resp_tx,
                     parent_span: tracing::Span::current(),
@@ -82,4 +83,3 @@ impl Downloader {
         Ok(())
     }
 }
-
