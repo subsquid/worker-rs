@@ -1,6 +1,5 @@
 use anyhow::Result;
 use futures::StreamExt;
-use itertools::Itertools;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
@@ -56,9 +55,9 @@ impl Downloader {
     pub async fn download_dir(&self, bucket: &str, src: String, dst: PathBuf) -> Result<()> {
         let rfs = &S3Filesystem::with_bucket(bucket)?;
         let tmp = &add_temp_prefix(&dst)?;
-        tokio::fs::create_dir_all(&tmp).await?;
         let files = rfs.ls(&src).await?;
         info!("Scheduling download: {:?}", files);
+        tokio::fs::create_dir_all(&tmp).await?;
         let results = futures::future::join_all(files.into_iter().map(|file| async move {
             let (resp_tx, resp_rx) = oneshot::channel();
             let dst_file = tmp
@@ -78,8 +77,15 @@ impl Downloader {
             resp_rx.await.expect("Downloader dropped without returning")
         }))
         .await;
-        results.into_iter().try_collect()?;
-        tokio::fs::rename(tmp, dst).await?;
+        match results.into_iter().collect::<Result<Vec<()>>>() {
+            Ok(_) => tokio::fs::rename(tmp, dst).await?,
+            Err(e) => {
+                tokio::fs::remove_dir_all(tmp)
+                    .await
+                    .expect("Couldn't clean up temp dir");
+                return Err(e);
+            }
+        }
         Ok(())
     }
 }

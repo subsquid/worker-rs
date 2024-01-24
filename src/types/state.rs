@@ -17,10 +17,16 @@ pub fn decode_dataset(str: &str) -> Option<Dataset> {
         .and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChunkRef {
     pub dataset: Dataset,
     pub chunk: DataChunk,
+}
+
+impl std::fmt::Debug for ChunkRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.dataset, self.chunk)
+    }
 }
 
 pub fn has(state: &State, chunk: &ChunkRef) -> bool {

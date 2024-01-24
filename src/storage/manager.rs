@@ -40,6 +40,7 @@ pub struct Status {
 
 // TODO: prioritize short jobs over long ones
 impl StateManager {
+    #[instrument(name = "state_manager", skip(downloader))]
     pub async fn new(
         workdir: PathBuf,
         downloader: Downloader,
@@ -66,7 +67,7 @@ impl StateManager {
             async move {
                 UnboundedReceiverStream::new(rx)
                     .for_each_concurrent(concurrency, |notification| async {
-                        this.process_notification(notification).await.unwrap();
+                        this.process_notification(notification).await;
                     })
                     .await;
             }
@@ -138,8 +139,7 @@ impl StateManager {
             .expect("State manager routine died");
     }
 
-    #[instrument(err, skip(self))]
-    async fn process_notification(&self, chunk: ChunkRef) -> Result<()> {
+    async fn process_notification(&self, chunk: ChunkRef) {
         let mut state = self.state.lock().await;
         let available = state::has(&state.available, &chunk);
         let downloading = state::has(&state.downloading, &chunk);
@@ -152,15 +152,20 @@ impl StateManager {
         if desired {
             if available || downloading {
                 // Chunk is already being processed. Do nothing.
-                return Ok(());
+                return;
             }
             state::add(&mut state.downloading, &chunk);
             drop(state); // unlock before awaiting
 
-            self.download_chunk(&chunk).await?;
+            let download_result = self.download_chunk(&chunk).await;
 
             let mut state = self.state.lock().await;
             state::remove(&mut state.downloading, &chunk);
+            if download_result.is_err() {
+                warn!("Failed to download chunk '{:?}', retrying", chunk);
+                self.notify(&chunk.dataset, &chunk.chunk);
+                return;
+            }
             state::add(&mut state.available, &chunk);
             let desired_now = state::has(&state.desired, &chunk);
             if !desired_now {
@@ -169,7 +174,7 @@ impl StateManager {
                     chunk
                 );
                 self.notify(&chunk.dataset, &chunk.chunk);
-                return Ok(());
+                return;
             }
             if state.available == state.desired {
                 info!("State is in sync");
@@ -181,7 +186,8 @@ impl StateManager {
                 state::remove(&mut state.available, &chunk);
                 self.drop_chunk(&chunk)
                     .await
-                    .with_context(|| format!("Could not remove chunk {:?}", chunk))?;
+                    .with_context(|| format!("Could not remove chunk {:?}", chunk))
+                    .unwrap();
                 if state.available == state.desired {
                     info!("State is in sync");
                     self.notify_sync.notify_waiters();
@@ -196,9 +202,9 @@ impl StateManager {
                 );
             }
         }
-        Ok(())
     }
 
+    #[instrument(err)]
     fn remove_temps(fs: &LocalFs) -> Result<()> {
         for entry in glob::glob(fs.root.join("**/temp-*").to_str().unwrap())? {
             match entry {
@@ -235,7 +241,6 @@ impl StateManager {
             .join(chunk.chunk.path())
     }
 
-    #[instrument(err, skip(self))]
     async fn download_chunk(&self, chunk: &ChunkRef) -> Result<()> {
         self.downloader
             .download_dir(&chunk.dataset, chunk.chunk.path(), self.chunk_path(chunk))
