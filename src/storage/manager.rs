@@ -76,6 +76,7 @@ impl StateManager {
         Ok(result)
     }
 
+    // TODO: prevent accidental massive removals
     #[instrument(skip(self))]
     pub async fn set_desired_state(&self, desired: State) {
         debug!("Set desired state: {:?}", desired);
@@ -224,7 +225,7 @@ impl StateManager {
         let mut result = State::new();
         for dir in fs.ls_root().await? {
             let dirname = dir.file_name().unwrap();
-            if let Some(dataset) = state::decode_dataset(try_into_str(&dirname)?) {
+            if let Some(dataset) = state::decode_dataset(try_into_str(dirname)?) {
                 let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname)).await?;
                 result.insert(dataset, chunks.into_iter().collect());
             } else {
@@ -249,6 +250,7 @@ impl StateManager {
         Ok(())
     }
 
+    // TODO: lock used chunks
     #[instrument(err, skip(self))]
     async fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
         let path = self.chunk_path(chunk);

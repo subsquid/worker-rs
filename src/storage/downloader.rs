@@ -77,6 +77,7 @@ impl Downloader {
             resp_rx.await.expect("Downloader dropped without returning")
         }))
         .await;
+        // TODO(hard): cancel running downloads if at least one file download has failed
         match results.into_iter().collect::<Result<Vec<()>>>() {
             Ok(_) => tokio::fs::rename(tmp, dst).await?,
             Err(e) => {
