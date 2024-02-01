@@ -1,10 +1,11 @@
 use crate::storage::layout::DataChunk;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use std::collections::{HashMap, HashSet};
+use subsquid_messages::{Range, RangeSet};
 
 pub type Dataset = String;
-pub type RangeSet = HashSet<DataChunk>;
-pub type State = HashMap<Dataset, RangeSet>;
+pub type ChunkSet = HashMap<Dataset, HashSet<DataChunk>>;
+pub type Ranges = HashMap<Dataset, RangeSet>;
 
 pub fn encode_dataset(dataset: &str) -> String {
     base64.encode(dataset.as_bytes())
@@ -29,17 +30,36 @@ impl std::fmt::Debug for ChunkRef {
     }
 }
 
-pub fn has(state: &State, chunk: &ChunkRef) -> bool {
+pub fn has(state: &ChunkSet, chunk: &ChunkRef) -> bool {
     match state.get(&chunk.dataset) {
         Some(set) => set.contains(&chunk.chunk),
         None => false,
     }
 }
 
-pub fn add(state: &mut State, chunk: &ChunkRef) {
-    state.entry(chunk.dataset.clone()).or_default().insert(chunk.chunk.clone());
+pub fn add(state: &mut ChunkSet, chunk: &ChunkRef) {
+    state
+        .entry(chunk.dataset.clone())
+        .or_default()
+        .insert(chunk.chunk.clone());
 }
 
-pub fn remove(state: &mut State, chunk: &ChunkRef) {
-    state.entry(chunk.dataset.clone()).or_default().remove(&chunk.chunk);
+pub fn remove(state: &mut ChunkSet, chunk: &ChunkRef) {
+    state
+        .entry(chunk.dataset.clone())
+        .or_default()
+        .remove(&chunk.chunk);
+}
+
+pub fn to_ranges(state: ChunkSet) -> Ranges {
+    state
+        .into_iter()
+        .map(|(dataset, chunks)| {
+            let range: RangeSet = chunks
+                .into_iter()
+                .map(|chunk| Range::new(*chunk.first_block, *chunk.last_block))
+                .into();
+            (dataset, range)
+        })
+        .collect()
 }

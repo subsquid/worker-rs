@@ -1,21 +1,26 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{future, StreamExt};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, info, instrument, warn, Instrument};
+use tracing::{info, instrument, warn, Instrument};
 
 use super::{
     downloader::Downloader,
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
+    s3_fs::S3Filesystem,
 };
 use crate::{
     storage::Filesystem,
     types::{
         os_str::try_into_str,
-        state::{self, ChunkRef, Dataset, State},
+        state::{self, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
     },
 };
 
@@ -28,14 +33,15 @@ pub struct StateManager {
 }
 
 struct Inner {
-    available: State,
-    downloading: State,
-    desired: State,
+    available: ChunkSet,
+    downloading: ChunkSet,
+    desired: ChunkSet,
 }
 
 pub struct Status {
-    available: State,
-    downloading: State,
+    pub available: Ranges,
+    pub downloading: Ranges,
+    // TODO: add stored_bytes
 }
 
 // TODO: prioritize short jobs over long ones
@@ -55,7 +61,7 @@ impl StateManager {
             fs,
             state: Mutex::new(Inner {
                 available: state.clone(),
-                downloading: State::default(),
+                downloading: ChunkSet::default(),
                 desired: state,
             }),
             tx,
@@ -76,11 +82,16 @@ impl StateManager {
         Ok(result)
     }
 
-    // TODO: prevent accidental massive removals
     #[instrument(skip(self))]
-    pub async fn set_desired_state(&self, desired: State) {
-        debug!("Set desired state: {:?}", desired);
+    pub async fn set_desired_ranges(&self, desired: Ranges) -> Result<()> {
+        let chunks = find_all_chunks(desired).await?;
+        self.set_desired_chunks(chunks).await;
+        Ok(())
+    }
 
+    // TODO: prevent accidental massive removals
+    #[instrument(skip_all)]
+    pub async fn set_desired_chunks(&self, desired: ChunkSet) {
         let mut state = self.state.lock().await;
         let previous = &mut state.desired;
 
@@ -125,9 +136,12 @@ impl StateManager {
 
     pub async fn current_status(&self) -> Status {
         let state = self.state.lock().await;
+        let available = state.available.clone();
+        let downloading = state.downloading.clone();
+        drop(state); // release mutex
         Status {
-            available: state.available.clone(),
-            downloading: state.downloading.clone(),
+            available: to_ranges(available),
+            downloading: to_ranges(downloading),
         }
     }
 
@@ -221,8 +235,8 @@ impl StateManager {
     }
 
     #[instrument(err, ret, skip(fs))]
-    async fn load_state(fs: &LocalFs) -> Result<State> {
-        let mut result = State::new();
+    async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
+        let mut result = ChunkSet::new();
         for dir in fs.ls_root().await? {
             let dirname = dir.file_name().unwrap();
             if let Some(dataset) = state::decode_dataset(try_into_str(dirname)?) {
@@ -259,6 +273,36 @@ impl StateManager {
         tokio::fs::remove_dir_all(tmp).await?;
         Ok(())
     }
+}
+
+#[instrument(err)]
+async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
+    let mut items = Vec::new();
+    for (dataset, ranges) in desired {
+        let rfs = S3Filesystem::with_bucket(&dataset)?;
+        let mut streams = Vec::new();
+        for range in ranges.ranges {
+            let rfs = rfs.clone();
+            let stream_fut = async move {
+                let results =
+                    layout::stream_chunks(&rfs, Some(&range.begin.into()), Some(&range.end.into()))
+                        .collect::<Vec<_>>()
+                        .await;
+                results.into_iter().collect::<Result<Vec<_>>>()
+            };
+            streams.push(stream_fut);
+        }
+        items.push(async {
+            future::try_join_all(streams.into_iter())
+                .await
+                .map(|x| (dataset, x.into_iter().flatten().collect::<HashSet<_>>()))
+        });
+    }
+    let chunks: ChunkSet = futures::future::try_join_all(items.into_iter())
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    Ok(chunks)
 }
 
 #[cfg(test)]

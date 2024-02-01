@@ -1,35 +1,20 @@
-mod controller;
+mod cli;
 mod query;
 mod storage;
 mod transport;
 mod types;
 mod util;
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
+use clap::Parser;
+use cli::Args;
 use futures::StreamExt;
-use itertools::Itertools;
-use lazy_static::lazy_static;
-use storage::{
-    downloader::Downloader, layout, layout::DataChunk, manager::StateManager, s3_fs::S3Filesystem,
-};
-use tracing::instrument;
+use storage::{downloader::Downloader, manager::StateManager};
+use tracing::warn;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
-
-lazy_static! {
-    static ref CONCURRENCY: usize = std::env::var("CONCURRENT_DOWNLOADS")
-        .ok()
-        .and_then(|x| x.parse().ok())
-        .unwrap_or(3);
-    static ref CHUNKS: usize = std::env::var("CHUNKS")
-        .ok()
-        .and_then(|x| x.parse().ok())
-        .unwrap_or(5);
-}
+use transport::{http::HttpTransport, Transport};
 
 fn setup_tracing() -> Result<()> {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
@@ -48,30 +33,42 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
-#[instrument(ret)]
-async fn run() -> Result<()> {
-    let downloader = Downloader::new(CONCURRENCY.to_owned() * 4);
-    let rfs = S3Filesystem::with_bucket("arbitrum-goerli")?;
-    // eprintln!("{:?}", rfs.ls("0000000000/").await);
-    let chunks: Vec<DataChunk> = layout::stream_chunks(&rfs, None, None)
-        .take(CHUNKS.to_owned())
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .try_collect()?;
-    let state = StateManager::new(PathBuf::from("tmp"), downloader, CONCURRENCY.to_owned()).await?;
-    state
-        .set_desired_state(HashMap::from_iter([(
-            "arbitrum-goerli".to_owned(),
-            HashSet::from_iter(chunks),
-        )]))
-        .await;
-    state.wait_sync().await;
-    Ok(())
+fn ping_forever(
+    state_manager: Arc<StateManager>,
+    transport: impl Transport + 'static,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        loop {
+            let status = state_manager.current_status().await;
+            let result = transport
+                .send_ping(transport::State {
+                    ranges: status.available,
+                })
+                .await;
+            if let Err(err) = result {
+                warn!("Couldn't send ping: {:?}", err);
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
     setup_tracing()?;
-    run().await
+
+    let downloader = Downloader::new(args.concurrent_downloads * 4);
+    let state_manager =
+        StateManager::new(args.data_dir, downloader, args.concurrent_downloads).await?;
+    let mut transport = HttpTransport::new(args.worker_id, args.worker_url, args.router);
+    let mut state_updates = transport.subscribe_to_updates();
+
+    ping_forever(state_manager.clone(), transport, args.ping_interval_sec);
+
+    while let Some(ranges) = state_updates.next().await {
+        state_manager.set_desired_ranges(ranges).await?;
+    }
+    unreachable!("Updates receiver closed unexpectedly");
 }

@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use crate::{types::os_str::try_into_str, util::iterator::WithLookahead};
 use anyhow::{anyhow, bail, Result};
 use async_stream::try_stream;
@@ -9,7 +11,7 @@ use regex::Regex;
 use super::Filesystem;
 
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
-pub struct BlockNumber(u64);
+pub struct BlockNumber(u32);
 
 impl std::fmt::Display for BlockNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -28,9 +30,16 @@ impl TryFrom<&str> for BlockNumber {
     }
 }
 
-impl From<u64> for BlockNumber {
-    fn from(value: u64) -> Self {
+impl From<u32> for BlockNumber {
+    fn from(value: u32) -> Self {
         BlockNumber(value)
+    }
+}
+
+impl Deref for BlockNumber {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -114,7 +123,7 @@ pub fn stream_chunks<'a>(
     };
     let last_block = match last_block {
         Some(&block) => block,
-        None => u64::MAX.into(),
+        None => u32::MAX.into(),
     };
     try_stream! {
         let tops = list_top_dirs(fs).await?;

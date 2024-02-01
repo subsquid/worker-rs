@@ -1,6 +1,16 @@
-use crate::types::state::State;
+pub mod http;
 
-trait Transport {
-    fn send_ping(&self);
-    fn subscribe_to_updates(&self) -> impl Iterator<Item = State>;
+use anyhow::Result;
+use serde::Serialize;
+
+use crate::types::state::Ranges;
+
+#[derive(Serialize)]
+pub struct State {
+    pub ranges: Ranges,
+}
+
+pub trait Transport: Send {
+    fn send_ping(&self, state: State) -> impl futures::Future<Output=Result<()>> + Send;
+    fn subscribe_to_updates(&mut self) -> impl futures::Stream<Item = Ranges>;
 }
