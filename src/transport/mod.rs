@@ -12,5 +12,5 @@ pub struct State {
 
 pub trait Transport: Send {
     fn send_ping(&self, state: State) -> impl futures::Future<Output=Result<()>> + Send;
-    fn subscribe_to_updates(&mut self) -> impl futures::Stream<Item = Ranges>;
+    fn subscribe_to_updates(&mut self) -> impl futures::Stream<Item = Ranges> + 'static;
 }

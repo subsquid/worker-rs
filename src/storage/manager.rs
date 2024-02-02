@@ -12,7 +12,7 @@ use tracing::{info, instrument, warn, Instrument};
 
 use super::{
     downloader::Downloader,
-    layout::{self, DataChunk},
+    layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
     s3_fs::S3Filesystem,
 };
@@ -122,6 +122,21 @@ impl StateManager {
         }
 
         state.desired = desired;
+    }
+
+    // TODO: protect dir from removing while in use
+    pub async fn find_chunk(&self, encoded_dataset: &str, block_number: BlockNumber) -> Option<PathBuf> {
+        let fs = self.fs.cd(encoded_dataset);
+        let stream = layout::stream_chunks(&fs, Some(&block_number), None);
+        tokio::pin!(stream);
+        match stream.next().await {
+            Some(Ok(first)) => Some(self.fs.root.join(encoded_dataset).join(first.path())),
+            Some(Err(e)) => {
+                warn!("Couldn't get first chunk: {:?}", e);
+                None
+            },
+            None => None,
+        }
     }
 
     pub async fn wait_sync(&self) {

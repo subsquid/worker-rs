@@ -1,5 +1,5 @@
-mod eth;
+pub mod eth;
 #[allow(dead_code)]
-mod processor;
+pub mod processor;
 #[cfg(test)]
 mod tests;

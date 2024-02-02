@@ -28,7 +28,7 @@ pub struct Args {
 
     /// Port to listen on
     #[clap(short, long, default_value_t = 8000)]
-    pub port: u32,
+    pub port: u16,
 
     #[clap(env, hide(true))]
     pub aws_access_key_id: Option<String>,
