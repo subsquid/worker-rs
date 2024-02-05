@@ -77,7 +77,8 @@ impl Server {
             .with_state(Arc::new(AppState {
                 state_manager,
                 args,
-            }));
+            }))
+            .layer(tower_http::catch_panic::CatchPanicLayer::new());
         Self { router, port }
     }
 
