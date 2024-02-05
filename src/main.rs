@@ -45,7 +45,7 @@ async fn ping_forever(
         let status = state_manager.current_status().await;
         let result = transport
             .send_ping(transport::State {
-                ranges: status.available,
+                datasets: status.available,
             })
             .await;
         if let Err(err) = result {

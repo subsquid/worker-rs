@@ -31,6 +31,7 @@ pub struct S3Filesystem {
 
 impl S3Filesystem {
     pub fn with_bucket(name: &str) -> Result<Self> {
+        let name = name.strip_prefix("s3://").unwrap_or(name);
         let bucket = Bucket::new(name, REGION.to_owned(), Credentials::from_env()?)?
             .with_request_timeout(Duration::from_secs(TIMEOUT.to_owned()));
         Ok(Self { bucket })

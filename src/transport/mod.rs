@@ -1,13 +1,13 @@
 pub mod http;
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::state::Ranges;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct State {
-    pub ranges: Ranges,
+    pub datasets: Ranges,
 }
 
 pub trait Transport: Send {

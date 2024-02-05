@@ -29,8 +29,8 @@ impl HttpTransport {
 
 impl Transport for HttpTransport {
     async fn send_ping(&self, state: State) -> Result<()> {
-        let resp: Ranges = reqwest::Client::new()
-            .post(&self.router_url)
+        let resp: State = reqwest::Client::new()
+            .post([&self.router_url, "/ping"].join(""))
             .json(&serde_json::json!({
                 "worker_id": self.worker_id,
                 "worker_url": self.worker_url,
@@ -39,9 +39,10 @@ impl Transport for HttpTransport {
             }))
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
-        self.updates_tx.send(resp).await?;
+        self.updates_tx.send(resp.datasets).await?;
         Ok(())
     }
 
