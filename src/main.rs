@@ -32,6 +32,7 @@ fn setup_tracing() -> Result<()> {
     tracing_subscriber::registry()
         .with(fmt)
         .with(opentelemetry)
+        .with(sentry::integrations::tracing::layer())
         .try_init()?;
     Ok(())
 }
@@ -87,6 +88,15 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     setup_tracing()?;
 
+    let _sentry_guard;
+    if let Some(sentry_dsn) = &args.sentry_dsn {
+        _sentry_guard = sentry::init((sentry_dsn.as_str(), sentry::ClientOptions {
+                release: sentry::release_name!(),
+                traces_sample_rate: 1.0,
+            ..Default::default()
+        }));
+    }
+
     let downloader = Downloader::new(args.concurrent_downloads * 4);
     let state_manager =
         StateManager::new(args.data_dir.clone(), downloader, args.concurrent_downloads).await?;
@@ -103,7 +113,5 @@ async fn main() -> anyhow::Result<()> {
         args.ping_interval_sec,
     ));
 
-    Server::new(state_manager, args).run().await?;
-
-    loop {}
+    Server::new(state_manager, args).run().await
 }

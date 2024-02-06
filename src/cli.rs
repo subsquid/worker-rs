@@ -47,6 +47,9 @@ pub struct Args {
 
     #[clap(env, hide(true), value_parser=parse_seconds, default_value = "3")]
     pub ping_interval_sec: Duration,
+
+    #[clap(env, hide(true))]
+    pub sentry_dsn: Option<String>,
 }
 
 fn parse_seconds(s: &str) -> Result<Duration> {
