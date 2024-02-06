@@ -20,7 +20,7 @@ use crate::{
     storage::Filesystem,
     types::{
         os_str::try_into_str,
-        state::{self, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
+        state::{self, difference, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
     },
 };
 
@@ -155,9 +155,10 @@ impl StateManager {
 
     pub async fn current_status(&self) -> Status {
         let state = self.state.lock().await;
+        let desired = state.desired.clone();
         let available = state.available.clone();
-        let downloading = state.downloading.clone();
         drop(state); // release mutex
+        let downloading = difference(desired, &available);
         Status {
             available: to_ranges(available),
             downloading: to_ranges(downloading),

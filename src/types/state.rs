@@ -55,6 +55,19 @@ pub fn remove(state: &mut ChunkSet, chunk: &ChunkRef) {
     }
 }
 
+pub fn difference(first: ChunkSet, second: &ChunkSet) -> ChunkSet {
+    first.into_iter().filter_map(|(key, mut chunks)| {
+        if let Some(removed) = second.get(&key) {
+            chunks.retain(|x| !removed.contains(x));
+        }
+        if chunks.is_empty() {
+            None
+        } else {
+            Some((key, chunks))
+        }
+    }).collect()
+}
+
 pub fn to_ranges(state: ChunkSet) -> Ranges {
     state
         .into_iter()
