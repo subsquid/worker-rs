@@ -14,6 +14,7 @@ use axum::{
     Json,
 };
 use datafusion::execution::{context::SessionContext, options::ParquetReadOptions};
+use prometheus::{gather, TextEncoder};
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let status = state.state_manager.current_status().await;
@@ -58,6 +59,13 @@ async fn run_query(
     }
 }
 
+async fn get_metrics() -> String {
+    let encoder = TextEncoder::new();
+    encoder
+        .encode_to_string(&gather())
+        .expect("Failed to encode metrics")
+}
+
 pub struct Server {
     router: axum::Router,
     port: u16,
@@ -74,6 +82,7 @@ impl Server {
         let router = axum::Router::new()
             .route("/status", get(get_status))
             .route("/query/:dataset", post(run_query))
+            .route("/metrics", get(get_metrics))
             .with_state(Arc::new(AppState {
                 state_manager,
                 args,
