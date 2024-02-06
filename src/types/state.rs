@@ -45,10 +45,14 @@ pub fn add(state: &mut ChunkSet, chunk: &ChunkRef) {
 }
 
 pub fn remove(state: &mut ChunkSet, chunk: &ChunkRef) {
-    state
-        .entry(chunk.dataset.clone())
-        .or_default()
-        .remove(&chunk.chunk);
+    let mut drained = false;
+    if let Some(chunks) = state.get_mut(&chunk.dataset) {
+        chunks.remove(&chunk.chunk);
+        drained = chunks.is_empty();
+    };
+    if drained {
+        state.remove(&chunk.dataset);
+    }
 }
 
 pub fn to_ranges(state: ChunkSet) -> Ranges {

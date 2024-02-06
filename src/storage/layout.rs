@@ -1,12 +1,13 @@
-use std::ops::Deref;
+use std::{ops::Deref, path::Path};
 
 use crate::{types::os_str::try_into_str, util::iterator::WithLookahead};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_stream::try_stream;
 use futures::Stream;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
+use tracing::info;
 
 use super::Filesystem;
 
@@ -194,6 +195,24 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
         .into_iter()
         .try_collect()?;
     Ok(nested_chunks.into_iter().flatten().collect())
+}
+
+pub fn clean_chunk_ancestors(path: impl AsRef<Path>) -> Result<()> {
+    // take(2) limits it to removing range dir and dataset dir but not the workdir itself
+    for dir in path.as_ref().ancestors().skip(1).take(2) {
+        if is_dir_empty(dir) {
+            info!("Removing empty dir {}", dir.display());
+            std::fs::remove_dir(dir).context(format!("Couldn't remove dir {}", dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn is_dir_empty(path: impl AsRef<Path>) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(entries) => entries.count() == 0,
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

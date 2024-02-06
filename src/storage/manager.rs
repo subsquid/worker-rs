@@ -125,7 +125,11 @@ impl StateManager {
     }
 
     // TODO: protect dir from removing while in use
-    pub async fn find_chunk(&self, encoded_dataset: &str, block_number: BlockNumber) -> Option<PathBuf> {
+    pub async fn find_chunk(
+        &self,
+        encoded_dataset: &str,
+        block_number: BlockNumber,
+    ) -> Option<PathBuf> {
         let fs = self.fs.cd(encoded_dataset);
         let stream = layout::stream_chunks(&fs, Some(&block_number), None);
         tokio::pin!(stream);
@@ -134,7 +138,7 @@ impl StateManager {
             Some(Err(e)) => {
                 warn!("Couldn't get first chunk: {:?}", e);
                 None
-            },
+            }
             None => None,
         }
     }
@@ -242,6 +246,7 @@ impl StateManager {
                     info!("Removing temp dir {}", path.display());
                     std::fs::remove_dir_all(&path)
                         .context(format!("Couldn't remove dir {}", path.display()))?;
+                    layout::clean_chunk_ancestors(path)?;
                 }
                 Err(e) => warn!("Couldn't read dir: {}", e),
             };
@@ -251,11 +256,14 @@ impl StateManager {
 
     #[instrument(err, ret, skip(fs))]
     async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
+        tokio::fs::create_dir_all(&fs.root).await?;
         let mut result = ChunkSet::new();
         for dir in fs.ls_root().await? {
             let dirname = dir.file_name().unwrap();
             if let Some(dataset) = state::decode_dataset(try_into_str(dirname)?) {
-                let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname)).await?;
+                let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
+                    .await
+                    .context(format!("Invalid layout in {:?}", dirname))?;
                 result.insert(dataset, chunks.into_iter().collect());
             } else {
                 warn!("Invalid dataset in workdir: {}", dir.display());
@@ -286,6 +294,7 @@ impl StateManager {
         let tmp = add_temp_prefix(&path)?;
         tokio::fs::rename(&path, &tmp).await?;
         tokio::fs::remove_dir_all(tmp).await?;
+        layout::clean_chunk_ancestors(path)?;
         Ok(())
     }
 }
