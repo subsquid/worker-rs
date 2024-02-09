@@ -2,27 +2,32 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::types::state::Ranges;
+use crate::{types::state::Ranges, util::UseOnce};
 
-use super::{State, Transport};
+use super::{QueryTask, State, Transport};
 
 pub struct HttpTransport {
     worker_id: String,
     worker_url: String,
     router_url: String,
-    updates_rx: Option<mpsc::Receiver<Ranges>>,
-    updates_tx: mpsc::Sender<Ranges>,
+    assignments_rx: UseOnce<mpsc::Receiver<Ranges>>,
+    assignments_tx: mpsc::Sender<Ranges>,
+    queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
+    queries_tx: mpsc::Sender<QueryTask>,
 }
 
 impl HttpTransport {
     pub fn new(worker_id: String, worker_url: String, router_url: String) -> Self {
-        let (tx, rx) = mpsc::channel(1);
+        let (assignments_tx, assignments_rx) = mpsc::channel(1);
+        let (queries_tx, queries_rx) = mpsc::channel(16);
         Self {
             worker_id,
             worker_url,
             router_url,
-            updates_rx: Some(rx),
-            updates_tx: tx,
+            assignments_rx: UseOnce::new(assignments_rx),
+            assignments_tx,
+            queries_rx: UseOnce::new(queries_rx),
+            queries_tx,
         }
     }
 }
@@ -42,15 +47,17 @@ impl Transport for HttpTransport {
             .error_for_status()?
             .json()
             .await?;
-        self.updates_tx.send(resp.datasets).await?;
+        self.assignments_tx.send(resp.datasets).await?;
         Ok(())
     }
 
-    fn subscribe_to_updates(&mut self) -> impl futures::Stream<Item = Ranges> + 'static {
-        let rx = self
-            .updates_rx
-            .take()
-            .expect("Attempted to subscribe to transport updates twice");
+    fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static {
+        let rx = self.assignments_rx.take().unwrap();
+        ReceiverStream::new(rx)
+    }
+
+    fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {
+        let rx = self.queries_rx.take().unwrap();
         ReceiverStream::new(rx)
     }
 }

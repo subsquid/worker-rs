@@ -12,5 +12,8 @@ Currently implemented features include:
 - [x] Handling chunk reassignments
 - [ ] Ethereum query execution — partially implemented (supports `transactions` and `logs` querying, but not `traces` and `stateDiffs`)
 - [ ] Substrate query execution
+- [ ] Weighting queries
 - [x] HTTP transport
-- [ ] P2P transport
+- [x] P2P transport
+- [ ] Sending logs
+- [ ] Checking gateway allocations

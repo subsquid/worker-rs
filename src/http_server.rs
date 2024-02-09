@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    cli::Args,
+    cli::HttpArgs,
     query::{self, eth::BatchRequest},
-    storage::manager::StateManager,
+    storage::manager::StateManager, types::state::Dataset,
 };
 
 use axum::{
@@ -32,7 +32,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Valu
 // TODO: process all chunks, not only the first one
 async fn run_query(
     State(state): State<Arc<AppState>>,
-    Path(dataset): Path<String>,
+    Path(dataset): Path<Dataset>,
     Json(query): Json<BatchRequest>,
 ) -> Response {
     let path = state
@@ -73,11 +73,11 @@ pub struct Server {
 
 pub struct AppState {
     state_manager: Arc<StateManager>,
-    args: Args,
+    args: HttpArgs,
 }
 
 impl Server {
-    pub fn new(state_manager: Arc<StateManager>, args: Args) -> Self {
+    pub fn new(state_manager: Arc<StateManager>, args: HttpArgs) -> Self {
         let port = args.port;
         let router = axum::Router::new()
             .route("/status", get(get_status))

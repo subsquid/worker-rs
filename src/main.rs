@@ -16,7 +16,7 @@ use http_server::Server;
 use storage::{downloader::Downloader, manager::StateManager};
 use tracing::{instrument, warn};
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
-use transport::{http::HttpTransport, Transport};
+use transport::{http::HttpTransport, p2p::P2PTransport, Transport};
 use types::state::Ranges;
 
 fn setup_tracing() -> Result<()> {
@@ -39,7 +39,7 @@ fn setup_tracing() -> Result<()> {
 
 async fn ping_forever(
     state_manager: Arc<StateManager>,
-    transport: impl Transport,
+    transport: Arc<impl Transport>,
     interval: Duration,
 ) {
     loop {
@@ -72,10 +72,10 @@ async fn handle_updates_forever(
 #[instrument(skip(state_manager, transport))]
 async fn process_assignments(
     state_manager: Arc<StateManager>,
-    mut transport: impl Transport + 'static,
+    transport: Arc<impl Transport>,
     interval: Duration,
 ) {
-    let state_updates = transport.subscribe_to_updates();
+    let state_updates = transport.stream_assignments();
     tokio::pin!(state_updates);
     futures::join!(
         ping_forever(state_manager.clone(), transport, interval),
@@ -100,18 +100,35 @@ async fn main() -> anyhow::Result<()> {
     let downloader = Downloader::new(args.concurrent_downloads * 4);
     let state_manager =
         StateManager::new(args.data_dir.clone(), downloader, args.concurrent_downloads).await?;
-    let transport = HttpTransport::new(
-        args.worker_id.clone(),
-        args.worker_url.clone(),
-        args.router.clone(),
-    );
 
-    // return test_download(state_manager).await;
-    tokio::spawn(process_assignments(
-        state_manager.clone(),
-        transport,
-        args.ping_interval_sec,
-    ));
-
-    Server::new(state_manager, args).run().await
+    match args.mode {
+        cli::Mode::Http(http_args) => {
+            let transport = Arc::new(HttpTransport::new(
+                http_args.worker_id.clone(),
+                http_args.worker_url.clone(),
+                http_args.router.clone(),
+            ));
+            tokio::spawn(process_assignments(
+                state_manager.clone(),
+                transport,
+                args.ping_interval_sec,
+            ));
+            // TODO: move it to HttpTransport
+            Server::new(state_manager, http_args).run().await?;
+        }
+        cli::Mode::P2P {
+            scheduler_id,
+            transport: transport_args,
+        } => {
+            let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
+            let copy = transport.clone();
+            tokio::spawn(process_assignments(
+                state_manager.clone(),
+                copy,
+                args.ping_interval_sec,
+            ));
+            transport.run().await;
+        }
+    };
+    Ok(())
 }

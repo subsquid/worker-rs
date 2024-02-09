@@ -143,6 +143,7 @@ impl StateManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn wait_sync(&self) {
         let state = self.state.lock().await;
         if state.available == state.desired {
