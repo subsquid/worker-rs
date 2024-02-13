@@ -5015,7 +5015,7 @@ dependencies = [
 [[package]]
 name = "subsquid-messages"
 version = "0.1.0"
-source = "git+ssh://git@github.com/subsquid/archive-router.git#f5e0a84e7577414f7d68bc33aa39d3538e37647f"
+source = "git+ssh://git@github.com/subsquid/archive-router.git?rev=f5e0a84#f5e0a84e7577414f7d68bc33aa39d3538e37647f"
 dependencies = [
  "anyhow",
  "hex",
@@ -5023,13 +5023,13 @@ dependencies = [
  "prost-build",
  "serde",
  "sha3",
- "subsquid-network-transport 0.1.0 (git+ssh://git@github.com/subsquid/archive-router.git)",
+ "subsquid-network-transport 0.1.0 (git+ssh://git@github.com/subsquid/archive-router.git?rev=f5e0a84)",
 ]
 
 [[package]]
 name = "subsquid-network-transport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/subsquid/archive-router.git#f5e0a84e7577414f7d68bc33aa39d3538e37647f"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=06b0ac9#06b0ac90e97526137489493eb78af345309e104b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5055,7 +5055,7 @@ dependencies = [
 [[package]]
 name = "subsquid-network-transport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git#06b0ac90e97526137489493eb78af345309e104b"
+source = "git+ssh://git@github.com/subsquid/archive-router.git?rev=f5e0a84#f5e0a84e7577414f7d68bc33aa39d3538e37647f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5168,18 +5168,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.56"
+version = "1.0.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d54378c645627613241d077a3a79db965db602882668f9136ac42af9ecb730ad"
+checksum = "1e45bcbe8ed29775f228095caf2cd67af7a4ccf756ebff23a306bf3e8b47b24b"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.56"
+version = "1.0.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa0faa943b50f3db30a20aa7e265dbc66076993efed8463e8de414e5d06d3471"
+checksum = "a953cb265bef375dae3de6663da4d3804eee9682ea80d8e2542529b73c531c81"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6146,7 +6146,8 @@ dependencies = [
  "serde_json",
  "sha3",
  "subsquid-messages",
- "subsquid-network-transport 0.1.0 (git+ssh://git@github.com/subsquid/subsquid-network.git)",
+ "subsquid-network-transport 0.1.0 (git+ssh://git@github.com/subsquid/subsquid-network.git?rev=06b0ac9)",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-util",

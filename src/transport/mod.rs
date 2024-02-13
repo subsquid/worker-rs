@@ -3,11 +3,10 @@ pub mod p2p;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use tokio::sync::oneshot;
 
 use crate::{
-    query::eth::BatchRequest,
+    query::{error::QueryError, eth::BatchRequest, processor::QueryResult},
     types::state::{Dataset, Ranges},
 };
 
@@ -17,13 +16,16 @@ pub struct State {
 }
 
 pub struct QueryTask {
-    dataset: Dataset,
-    query: BatchRequest,
-    response_sender: oneshot::Sender<Result<Vec<JsonValue>>>,
+    pub dataset: Dataset,
+    pub query: BatchRequest,
+    pub response_sender: oneshot::Sender<std::result::Result<QueryResult, QueryError>>,
 }
 
-pub trait Transport: Send {
+pub trait Transport: Send + Sync {
     fn send_ping(&self, state: State) -> impl futures::Future<Output = Result<()>> + Send;
-    fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static;
-    fn stream_queries(&self) -> impl futures::Stream<Item = QueryTask> + 'static;
+    fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static + Send;
+    fn stream_queries(&self) -> impl futures::Stream<Item = QueryTask> + 'static + Send;
+    fn run(&self) -> impl futures::Future<Output = ()> + Send {
+        futures::future::pending()
+    }
 }

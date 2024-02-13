@@ -23,6 +23,7 @@ type MsgContent = Vec<u8>;
 type Message = subsquid_network_transport::Message<MsgContent>;
 const PING_TOPIC: &str = "worker_ping";
 const LOGS_TOPIC: &str = "worker_query_logs";
+const SERVICE_QUEUE_SIZE: usize = 16;
 
 pub struct P2PTransport {
     raw_msg_receiver: UseOnce<mpsc::Receiver<Message>>,
@@ -43,8 +44,8 @@ impl P2PTransport {
         let keypair = transport_builder.keypair();
         info!("Local peer ID: {worker_id}");
 
-        let (assignments_tx, assignments_rx) = mpsc::channel(16);
-        let (queries_tx, queries_rx) = mpsc::channel(16);
+        let (assignments_tx, assignments_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
+        let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
         let (msg_receiver, transport_handle) = transport_builder.run().await?;
         transport_handle.subscribe(PING_TOPIC).await?;
         transport_handle.subscribe(LOGS_TOPIC).await?;
@@ -62,7 +63,7 @@ impl P2PTransport {
         })
     }
 
-    pub async fn run(&self) {
+    async fn run(&self) {
         let msg_receiver = self.raw_msg_receiver.take().unwrap();
         ReceiverStream::new(msg_receiver)
             .for_each_concurrent(None, |msg| async move {
@@ -190,6 +191,7 @@ impl P2PTransport {
         resp_rx
             .await
             .expect("Query processor didn't produce a result")
+            .map_err(From::from)
     }
 
     async fn send_query_result(
@@ -257,6 +259,10 @@ impl super::Transport for P2PTransport {
     fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {
         let rx = self.queries_rx.take().unwrap();
         ReceiverStream::new(rx)
+    }
+
+    async fn run(&self) {
+        self.run().await
     }
 }
 

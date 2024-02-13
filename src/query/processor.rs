@@ -15,13 +15,16 @@ use serde_json::{map::Map as JsonMap, Value};
 use serde_rename_rule::RenameRule;
 use tracing::instrument;
 
+
+pub type QueryResult = Vec<Value>;
+
 // TODO:
 // - optimize queries
 // - support traces and state diffs querying
 // - support substrate networks
 // - generalize this code
 
-pub async fn process_query(ctx: &SessionContext, query: BatchRequest) -> Result<Vec<Value>> {
+pub async fn process_query(ctx: &SessionContext, query: BatchRequest) -> Result<QueryResult> {
     anyhow::ensure!(
         query.r#type == NetworkType::Eth,
         "only eth queries are supported"
@@ -212,7 +215,7 @@ fn build_response(
     headers: Vec<JsonMap<String, Value>>,
     transactions: Option<Vec<JsonMap<String, Value>>>,
     logs: Option<Vec<JsonMap<String, Value>>>,
-) -> Result<Vec<Value>> {
+) -> Result<QueryResult> {
     let include_tx = transactions.is_some();
     let include_logs = logs.is_some();
     let block_txs = transactions
