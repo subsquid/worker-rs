@@ -12,6 +12,7 @@ use axum::{
     Json,
 };
 use prometheus::{gather, TextEncoder};
+use tokio_util::sync::CancellationToken;
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let status = state.state_manager.current_status().await;
@@ -69,9 +70,11 @@ impl Server {
         Self { router, port }
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", self.port)).await?;
-        axum::serve(listener, self.router).await?;
+        axum::serve(listener, self.router)
+            .with_graceful_shutdown(cancellation_token.cancelled_owned())
+            .await?;
         Ok(())
     }
 }

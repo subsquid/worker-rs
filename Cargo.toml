@@ -28,7 +28,7 @@ serde-rename-rule = "0.2.2"
 serde_json = { version = "1.0.111", features = ["preserve_order"] }
 sha3 = "0.10.8"
 subsquid-messages = { git = "ssh://git@github.com/subsquid/archive-router.git", rev = "f5e0a84", features = ["signatures"] }
-subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "06b0ac9", features = ["metrics"] }
+subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "d721986", features = ["metrics"] }
 thiserror = "1.0.57"
 tokio = { version = "1.35.1", features = ["full", "tracing"] }
 tokio-stream = "0.1.14"

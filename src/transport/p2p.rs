@@ -13,6 +13,7 @@ use subsquid_network_transport::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{types::state::Ranges, util::UseOnce};
@@ -63,9 +64,14 @@ impl P2PTransport {
         })
     }
 
-    async fn run(&self) {
+    pub async fn stop(&self) -> Result<()> {
+        Ok(self.transport_handle.stop().await?)
+    }
+
+    async fn run(&self, cancellation_token: CancellationToken) {
         let msg_receiver = self.raw_msg_receiver.take().unwrap();
         ReceiverStream::new(msg_receiver)
+            .take_until(cancellation_token.cancelled_owned())
             .for_each_concurrent(None, |msg| async move {
                 let envelope = match subsquid_messages::Envelope::decode(msg.content.as_slice()) {
                     Ok(envelope) => envelope,
@@ -179,10 +185,10 @@ impl P2PTransport {
             }) {
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     bail!("Service overloaded");
-                },
+                }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     panic!("Query subscriber dropped");
-                },
+                }
                 _ => {}
             }
         } else {
@@ -261,8 +267,8 @@ impl super::Transport for P2PTransport {
         ReceiverStream::new(rx)
     }
 
-    async fn run(&self) {
-        self.run().await
+    async fn run(&self, cancellation_token: CancellationToken) {
+        self.run(cancellation_token).await
     }
 }
 

@@ -1,14 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use futures::{future, StreamExt};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{info, instrument, warn, Instrument};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, instrument, warn};
 
 use super::{
     downloader::Downloader,
@@ -22,14 +22,17 @@ use crate::{
         os_str::try_into_str,
         state::{self, difference, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
     },
+    util::UseOnce,
 };
 
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<Inner>,
     tx: tokio::sync::mpsc::UnboundedSender<state::ChunkRef>,
+    rx: UseOnce<tokio::sync::mpsc::UnboundedReceiver<state::ChunkRef>>,
     notify_sync: tokio::sync::Notify,
     downloader: Downloader,
+    concurrency: usize,
 }
 
 struct Inner {
@@ -51,13 +54,13 @@ impl StateManager {
         workdir: PathBuf,
         downloader: Downloader,
         concurrency: usize,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Self> {
         let fs = LocalFs::new(workdir);
         Self::remove_temps(&fs)?;
         let state = Self::load_state(&fs).await?;
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let result = Arc::new(Self {
+        Ok(Self {
             fs,
             state: Mutex::new(Inner {
                 available: state.clone(),
@@ -65,21 +68,22 @@ impl StateManager {
                 desired: state,
             }),
             tx,
+            rx: UseOnce::new(rx),
             notify_sync: tokio::sync::Notify::new(),
             downloader,
-        });
-        let this = result.clone();
-        tokio::spawn(
-            async move {
-                UnboundedReceiverStream::new(rx)
-                    .for_each_concurrent(concurrency, |notification| async {
-                        this.process_notification(notification).await;
-                    })
-                    .await;
-            }
-            .in_current_span(),
-        );
-        Ok(result)
+            concurrency,
+        })
+    }
+
+    #[instrument(name = "state_manager", skip_all)]
+    pub async fn run(&self, cancellation_token: CancellationToken) {
+        UnboundedReceiverStream::new(self.rx.take().unwrap())
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each_concurrent(self.concurrency, |notification| async {
+                // TODO: cancel running downloads
+                self.process_notification(notification).await;
+            })
+            .await;
     }
 
     #[instrument(skip(self))]
@@ -167,12 +171,11 @@ impl StateManager {
     }
 
     fn notify(&self, dataset: &Dataset, chunk: &DataChunk) {
-        self.tx
+        let _ = self.tx
             .send(ChunkRef {
                 dataset: dataset.clone(),
                 chunk: chunk.clone(),
-            })
-            .expect("State manager routine died");
+            });
     }
 
     async fn process_notification(&self, chunk: ChunkRef) {

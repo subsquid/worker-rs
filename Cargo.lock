@@ -5029,7 +5029,7 @@ dependencies = [
 [[package]]
 name = "subsquid-network-transport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=06b0ac9#06b0ac90e97526137489493eb78af345309e104b"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=d721986#d721986bee8f7a6e0d0d3a5b47a79c85b5077ca6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6146,7 +6146,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "subsquid-messages",
- "subsquid-network-transport 0.1.0 (git+ssh://git@github.com/subsquid/subsquid-network.git?rev=06b0ac9)",
+ "subsquid-network-transport 0.1.0 (git+ssh://git@github.com/subsquid/subsquid-network.git?rev=d721986)",
  "thiserror",
  "tokio",
  "tokio-stream",

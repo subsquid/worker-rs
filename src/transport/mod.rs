@@ -4,6 +4,7 @@ pub mod p2p;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     query::{error::QueryError, eth::BatchRequest, processor::QueryResult},
@@ -25,7 +26,7 @@ pub trait Transport: Send + Sync {
     fn send_ping(&self, state: State) -> impl futures::Future<Output = Result<()>> + Send;
     fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static + Send;
     fn stream_queries(&self) -> impl futures::Stream<Item = QueryTask> + 'static + Send;
-    fn run(&self) -> impl futures::Future<Output = ()> + Send {
-        futures::future::pending()
+    fn run(&self, cancellation_token: CancellationToken) -> impl futures::Future<Output = ()> + Send {
+        cancellation_token.cancelled_owned()
     }
 }

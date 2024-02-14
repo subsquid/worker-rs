@@ -15,6 +15,7 @@ use cli::Args;
 use controller::Worker;
 use http_server::Server;
 use storage::{downloader::Downloader, manager::StateManager};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use transport::{http::HttpTransport, p2p::P2PTransport};
 
@@ -36,6 +37,26 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
+fn create_cancellation_token() -> Result<CancellationToken> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let token = CancellationToken::new();
+    let copy = token.clone();
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::spawn(async move {
+        tokio::select!(
+            _ = sigint.recv() => {
+                copy.cancel();
+            },
+            _ = sigterm.recv() => {
+                copy.cancel();
+            },
+        );
+    });
+    Ok(token)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -52,7 +73,9 @@ async fn main() -> anyhow::Result<()> {
 
     let downloader = Downloader::new(args.concurrent_downloads * 4);
     let state_manager =
-        StateManager::new(args.data_dir.clone(), downloader, args.concurrent_downloads).await?;
+        Arc::new(StateManager::new(args.data_dir.clone(), downloader, args.concurrent_downloads).await?);
+
+    let cancellation_token = create_cancellation_token()?;
 
     match args.mode {
         cli::Mode::Http(http_args) => {
@@ -62,16 +85,12 @@ async fn main() -> anyhow::Result<()> {
                 http_args.router.clone(),
             ));
             let worker = Worker::new(state_manager.clone(), transport);
-            tokio::select!(
-                result = worker.run(args.ping_interval_sec) => {
-                    tracing::error!("Worker exited");
-                    result.map_err(From::from)
-                },
-                result = Server::new(state_manager, http_args).run() => {
-                    tracing::error!("HTTP server routine exited");
-                    result
-                }
-            )?;
+            let worker_future = worker.run(args.ping_interval_sec, cancellation_token.clone());
+            let server_future =
+                tokio::spawn(Server::new(state_manager, http_args).run(cancellation_token));
+            let result = worker_future.await;
+            server_future.await??;
+            result?;
         }
         cli::Mode::P2P {
             scheduler_id,
@@ -79,7 +98,11 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
             let worker = Worker::new(state_manager.clone(), transport.clone());
-            worker.run(args.ping_interval_sec).await?;
+            let result = worker
+                .run(args.ping_interval_sec, cancellation_token)
+                .await;
+            transport.stop().await?;
+            result?;
         }
     };
     Ok(())
