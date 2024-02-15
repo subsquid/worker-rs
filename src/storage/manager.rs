@@ -11,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use super::{
-    downloader::Downloader,
     layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
     s3_fs::S3Filesystem,
@@ -31,7 +30,6 @@ pub struct StateManager {
     tx: tokio::sync::mpsc::UnboundedSender<state::ChunkRef>,
     rx: UseOnce<tokio::sync::mpsc::UnboundedReceiver<state::ChunkRef>>,
     notify_sync: tokio::sync::Notify,
-    downloader: Downloader,
     concurrency: usize,
 }
 
@@ -49,12 +47,8 @@ pub struct Status {
 
 // TODO: prioritize short jobs over long ones
 impl StateManager {
-    #[instrument(name = "state_manager", skip(downloader))]
-    pub async fn new(
-        workdir: PathBuf,
-        downloader: Downloader,
-        concurrency: usize,
-    ) -> Result<Self> {
+    #[instrument(name = "state_manager")]
+    pub async fn new(workdir: PathBuf, concurrency: usize) -> Result<Self> {
         let fs = LocalFs::new(workdir);
         Self::remove_temps(&fs)?;
         let state = Self::load_state(&fs).await?;
@@ -70,7 +64,6 @@ impl StateManager {
             tx,
             rx: UseOnce::new(rx),
             notify_sync: tokio::sync::Notify::new(),
-            downloader,
             concurrency,
         })
     }
@@ -78,10 +71,17 @@ impl StateManager {
     #[instrument(name = "state_manager", skip_all)]
     pub async fn run(&self, cancellation_token: CancellationToken) {
         UnboundedReceiverStream::new(self.rx.take().unwrap())
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(self.concurrency, |notification| async {
-                // TODO: cancel running downloads
-                self.process_notification(notification).await;
+            .take_until(cancellation_token.cancelled())
+            .for_each_concurrent(self.concurrency, |notification| {
+                let cancellation_token = &cancellation_token;
+                async move {
+                    tokio::select!(
+                        _ = self.process_notification(&notification) => {},
+                        _ = cancellation_token.cancelled() => {
+                            info!("Cancelled handling chunk {notification:?}");
+                        }
+                    )
+                }
             })
             .await;
     }
@@ -171,18 +171,17 @@ impl StateManager {
     }
 
     fn notify(&self, dataset: &Dataset, chunk: &DataChunk) {
-        let _ = self.tx
-            .send(ChunkRef {
-                dataset: dataset.clone(),
-                chunk: chunk.clone(),
-            });
+        let _ = self.tx.send(ChunkRef {
+            dataset: dataset.clone(),
+            chunk: chunk.clone(),
+        });
     }
 
-    async fn process_notification(&self, chunk: ChunkRef) {
+    async fn process_notification(&self, chunk: &ChunkRef) {
         let mut state = self.state.lock().await;
-        let available = state::has(&state.available, &chunk);
-        let downloading = state::has(&state.downloading, &chunk);
-        let desired = state::has(&state.desired, &chunk);
+        let available = state::has(&state.available, chunk);
+        let downloading = state::has(&state.downloading, chunk);
+        let desired = state::has(&state.desired, chunk);
         assert!(
             !(available && downloading),
             "Inconsisent state: chunk {:?} is both available and downloading",
@@ -285,8 +284,8 @@ impl StateManager {
     }
 
     async fn download_chunk(&self, chunk: &ChunkRef) -> Result<()> {
-        self.downloader
-            .download_dir(&chunk.dataset, chunk.chunk.path(), self.chunk_path(chunk))
+        S3Filesystem::with_bucket(&chunk.dataset)?
+            .download_dir(chunk.chunk.path(), self.chunk_path(chunk))
             .await
             .with_context(|| format!("Could not download chunk {:?}", chunk))?;
         Ok(())

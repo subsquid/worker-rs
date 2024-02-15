@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-pub mod downloader;
+pub mod guard;
 pub mod layout;
 pub mod local_fs;
 pub mod manager;

@@ -14,7 +14,7 @@ use clap::Parser;
 use cli::Args;
 use controller::Worker;
 use http_server::Server;
-use storage::{downloader::Downloader, manager::StateManager};
+use storage::manager::StateManager;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use transport::{http::HttpTransport, p2p::P2PTransport};
@@ -71,9 +71,8 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
 
-    let downloader = Downloader::new(args.concurrent_downloads * 4);
     let state_manager =
-        Arc::new(StateManager::new(args.data_dir.clone(), downloader, args.concurrent_downloads).await?);
+        Arc::new(StateManager::new(args.data_dir.clone(), args.concurrent_downloads).await?);
 
     let cancellation_token = create_cancellation_token()?;
 
@@ -98,9 +97,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
             let worker = Worker::new(state_manager.clone(), transport.clone());
-            let result = worker
-                .run(args.ping_interval_sec, cancellation_token)
-                .await;
+            let result = worker.run(args.ping_interval_sec, cancellation_token).await;
             transport.stop().await?;
             result?;
         }

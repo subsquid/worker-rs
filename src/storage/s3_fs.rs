@@ -6,9 +6,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tracing::instrument;
+use tracing::{info, instrument};
 
-use super::Filesystem;
+use super::local_fs::add_temp_prefix;
+use super::{guard::FsGuard, Filesystem};
+use crate::types::os_str::try_into_string;
 
 lazy_static! {
     static ref AWS_REGION: String = env::var("AWS_REGION").unwrap_or("auto".to_owned());
@@ -44,6 +46,31 @@ impl S3Filesystem {
             .await
             .with_context(|| format!("Couldn't create file '{}'", dst_path.to_string_lossy()))?;
         self.bucket.get_object_to_writer(path, &mut writer).await?;
+        Ok(())
+    }
+
+    /// Either downloads the entire directory or nothing at all.
+    /// This function is cancel-safe. If it is not awaited until the end,
+    /// it will clean up temporary results.
+    ///
+    /// Careful: this function never removes any parent dirs so it can produce
+    /// a dangling empty dir after cleanup.
+    #[instrument(err, ret, skip(self), fields(bucket = self.bucket.name))]
+    pub async fn download_dir(&self, src: String, dst: PathBuf) -> Result<()> {
+        let tmp = &add_temp_prefix(&dst)?;
+        let files = self.ls(&src).await?;
+        info!("Scheduling download: {:?}", files);
+        let mut guard = FsGuard::new(tmp)?;
+        futures::future::try_join_all(files.into_iter().map(|file| async move {
+            let dst_file = tmp
+                .join(file.file_name().unwrap_or_else(|| {
+                    panic!("Couldn't parse S3 file name: '{}'", file.display())
+                }));
+            self.download_one(&try_into_string(file.into_os_string())?, &dst_file)
+                .await
+        }))
+        .await?;
+        guard.persist(dst)?;
         Ok(())
     }
 
