@@ -4706,6 +4706,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sentry-tower"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d87dfe009138dc515009842619b562e03b2b3f926a91318ec7ae23d09435f8b4"
+dependencies = [
+ "axum 0.7.4",
+ "http 1.0.0",
+ "pin-project",
+ "sentry-core",
+ "tower-layer",
+ "tower-service",
+ "url",
+]
+
+[[package]]
 name = "sentry-tracing"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6141,6 +6156,7 @@ dependencies = [
  "reqwest",
  "rust-s3",
  "sentry",
+ "sentry-tower",
  "serde",
  "serde-rename-rule",
  "serde_json",

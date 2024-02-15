@@ -66,6 +66,8 @@ impl Server {
                 state_manager,
                 args,
             }))
+            .layer(sentry_tower::NewSentryLayer::new_from_top())
+            .layer(sentry_tower::SentryHttpLayer::with_transaction())
             .layer(tower_http::catch_panic::CatchPanicLayer::new());
         Self { router, port }
     }

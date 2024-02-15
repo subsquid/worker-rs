@@ -64,11 +64,14 @@ async fn main() -> anyhow::Result<()> {
 
     let _sentry_guard;
     if let Some(sentry_dsn) = &args.sentry_dsn {
-        _sentry_guard = sentry::init((sentry_dsn.as_str(), sentry::ClientOptions {
+        _sentry_guard = sentry::init((
+            sentry_dsn.as_str(),
+            sentry::ClientOptions {
                 release: sentry::release_name!(),
                 traces_sample_rate: 1.0,
-            ..Default::default()
-        }));
+                ..Default::default()
+            },
+        ));
     }
 
     let state_manager =
