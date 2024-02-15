@@ -64,6 +64,7 @@ impl P2PTransport {
         })
     }
 
+    // TODO: switch to latest implementation
     pub async fn stop(&self) -> Result<()> {
         Ok(self.transport_handle.stop().await?)
     }
@@ -171,7 +172,7 @@ impl P2PTransport {
                 warn!("Query {query_id} execution failed: {e:?}");
                 self.send_query_result(query_id, peer_id, Err(e)).await
             }
-        }
+        };
         // TODO: send logs
     }
 

@@ -234,7 +234,7 @@ impl StateManager {
             if downloading {
                 // Some data ranges scheduled for downloading are not needed anymore.
                 // This should not usually happen so just panic in this case.
-                panic!(
+                todo!(
                     "Chunk removal requested while being downloaded: {:?}",
                     chunk
                 );

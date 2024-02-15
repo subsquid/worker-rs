@@ -11,6 +11,7 @@ use tracing::info;
 
 use super::Filesystem;
 
+// TODO: use u64
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
 pub struct BlockNumber(u32);
 
@@ -60,6 +61,7 @@ impl DataChunk {
         )
     }
 
+    // TODO: synchronize with other language implementations
     pub fn parse_range(dirname: &str) -> Result<Self> {
         lazy_static! {
             static ref RE: Regex = Regex::new(r"(\d{10})/(\d{10})-(\d{10})-(\w{8})$").unwrap();

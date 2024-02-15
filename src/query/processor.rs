@@ -20,6 +20,8 @@ pub type QueryResult = Vec<Value>;
 
 // TODO:
 // - optimize queries
+// - stream the results
+// - limit results size
 // - support traces and state diffs querying
 // - support substrate networks
 // - generalize this code
