@@ -8,6 +8,7 @@ pub mod local_fs;
 pub mod manager;
 pub mod s3_fs;
 
+#[allow(async_fn_in_trait)]
 pub trait Filesystem {
     // Returning a collection instead of iterator because partial results are useless
     async fn ls(&self, path: impl AsRef<Path>) -> Result<Vec<PathBuf>>;
@@ -26,10 +27,6 @@ pub mod tests {
     use anyhow::Context;
 
     use super::Filesystem;
-
-    pub fn tests_data() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
-    }
 
     pub struct TestFilesystem {
         pub files: HashMap<PathBuf, Vec<PathBuf>>,

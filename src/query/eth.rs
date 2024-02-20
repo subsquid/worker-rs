@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, map::Map as JsonMap};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct BatchRequest {
     pub from_block: u64,
@@ -23,7 +23,7 @@ pub struct BatchRequest {
     pub r#type: NetworkType,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FieldSelection {
     #[serde(deserialize_with = "parse_selection", default)]
     pub block: Vec<String>,
@@ -35,7 +35,7 @@ pub struct FieldSelection {
     pub trace: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct LogRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,7 +54,7 @@ pub struct LogRequest {
     pub transaction_traces: bool
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct TxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,7 +72,7 @@ pub struct TxRequest {
     // TODO: add nonce
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(rename_all(deserialize = "camelCase"), default)]
 pub struct TraceRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -87,7 +87,7 @@ pub struct TraceRequest {
     pub parents: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(rename_all(deserialize = "camelCase"), default)]
 pub struct _BlockFieldSelection {
     pub number: bool,
@@ -111,7 +111,7 @@ pub struct _BlockFieldSelection {
     pub nonce: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(rename_all(deserialize = "camelCase"), default)]
 pub struct _LogFieldSelection {
     pub log_index: bool,
@@ -121,7 +121,7 @@ pub struct _LogFieldSelection {
     pub topics: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(rename_all(deserialize = "camelCase"), default)]
 pub struct _TxFieldSelection {
     pub transaction_index: bool,
@@ -146,7 +146,7 @@ pub struct _TxFieldSelection {
     pub status: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(rename_all(deserialize = "camelCase"), default)]
 pub struct _TraceFieldSelection {
     pub transaction_index: bool,
@@ -167,7 +167,7 @@ pub struct _TraceFieldSelection {
     pub call_result_output: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct BlockHeader {
     pub number: u64,
@@ -191,7 +191,7 @@ pub struct BlockHeader {
     pub base_fee_per_gas: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct Log {
     pub address: String,
@@ -201,7 +201,7 @@ pub struct Log {
     pub transaction_index: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct Transaction {
     pub transaction_index: u32,
@@ -226,7 +226,7 @@ pub struct Transaction {
     pub status: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "lowercase"))]
 pub enum TraceType {
     Create,
@@ -235,7 +235,7 @@ pub enum TraceType {
     Reward,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "lowercase"))]
 pub enum CallType {
     Call,
@@ -244,7 +244,7 @@ pub enum CallType {
     Staticcall,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone)]
 #[serde(rename_all(deserialize = "lowercase"))]
 pub enum NetworkType {
     #[default]
@@ -252,7 +252,7 @@ pub enum NetworkType {
     Substrate,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct TraceAction {
     pub from: Option<String>,
@@ -271,7 +271,7 @@ pub struct TraceResult {
     pub output: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
 pub struct Trace {
     pub transaction_index: u32,
@@ -283,7 +283,7 @@ pub struct Trace {
     pub result: Option<TraceResult>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Block {
     pub header: BlockHeader,
     pub logs: Option<Vec<Log>>,

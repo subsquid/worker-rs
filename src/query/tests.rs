@@ -7,43 +7,11 @@ use tracing::{info, warn};
 
 use crate::query::eth::*;
 use crate::query::processor::process_query;
-use crate::storage::tests::tests_data;
-use crate::util::tests::setup_tracing;
+use crate::util::tests::{setup_tracing, tests_data};
 
 async fn prepare_context() -> Result<SessionContext> {
     let root = tests_data().join("0017881390/0017881390-0017882786-32ee9457");
-    let ctx = SessionContext::new();
-    ctx.register_parquet(
-        "blocks",
-        root.join("blocks.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
-    ctx.register_parquet(
-        "transactions",
-        root.join("transactions.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
-    ctx.register_parquet(
-        "logs",
-        root.join("logs.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
-    ctx.register_parquet(
-        "traces",
-        root.join("traces.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
-    ctx.register_parquet(
-        "statediffs",
-        root.join("statediffs.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
-    Ok(ctx)
+    crate::query::context::prepare_query_context(&root).await
 }
 
 fn list_fixtures() -> HashMap<String, (PathBuf, PathBuf)> {

@@ -224,10 +224,8 @@ mod tests {
     use anyhow::Result;
     use futures::StreamExt;
 
-    use crate::storage::{
-        local_fs::LocalFs,
-        tests::{tests_data, TestFilesystem},
-    };
+    use crate::storage::{local_fs::LocalFs, tests::TestFilesystem};
+    use crate::util::tests::tests_data;
 
     use super::{read_all_chunks, stream_chunks, BlockNumber, DataChunk};
 

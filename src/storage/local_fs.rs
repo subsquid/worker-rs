@@ -57,7 +57,8 @@ pub fn add_temp_prefix(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::LocalFs;
-    use crate::storage::{tests::tests_data, Filesystem};
+    use crate::storage::Filesystem;
+    use crate::util::tests::tests_data;
 
     #[tokio::test]
     async fn test_fs() {

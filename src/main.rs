@@ -1,23 +1,15 @@
-mod cli;
-mod controller;
-mod http_server;
-mod query;
-mod storage;
-mod transport;
-mod types;
-mod util;
-
 use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::Args;
-use controller::Worker;
-use http_server::Server;
-use storage::manager::StateManager;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
-use transport::{http::HttpTransport, p2p::P2PTransport};
+
+use worker_rust::cli::{self, Args};
+use worker_rust::controller::Worker;
+use worker_rust::http_server::Server;
+use worker_rust::storage::manager::StateManager;
+use worker_rust::transport::{http::HttpTransport, p2p::P2PTransport};
 
 fn setup_tracing() -> Result<()> {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
