@@ -1,10 +1,10 @@
 use anyhow::Result;
-use tracing_subscriber::filter;
+use tracing_subscriber::EnvFilter;
 
 pub fn setup_tracing() -> Result<()> {
     tracing_subscriber::fmt()
         .compact()
-        .with_max_level(filter::LevelFilter::INFO)
+        .with_env_filter(EnvFilter::from_default_env())
         .init();
     Ok(())
 }

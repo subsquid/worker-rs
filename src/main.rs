@@ -16,19 +16,19 @@ use controller::Worker;
 use http_server::Server;
 use storage::manager::StateManager;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 use transport::{http::HttpTransport, p2p::P2PTransport};
 
 fn setup_tracing() -> Result<()> {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
     let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name("archive-rust")
+        .with_service_name(env!("CARGO_PKG_NAME"))
         .install_simple()?;
     let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let fmt = tracing_subscriber::fmt::layer()
         .compact()
-        .with_filter(filter::LevelFilter::INFO);
+        .with_filter(EnvFilter::from_default_env());
     tracing_subscriber::registry()
         .with(fmt)
         .with(opentelemetry)
