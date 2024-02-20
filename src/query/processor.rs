@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash};
+use std::{collections::HashSet, hash::Hash, sync::Arc};
 
 use super::eth::{BatchRequest, NetworkType};
 use anyhow::{ensure, Context, Result};
@@ -15,7 +15,6 @@ use serde_json::{map::Map as JsonMap, Value};
 use serde_rename_rule::RenameRule;
 use tracing::instrument;
 
-
 pub type QueryResult = Vec<Value>;
 
 // TODO:
@@ -26,6 +25,7 @@ pub type QueryResult = Vec<Value>;
 // - support substrate networks
 // - generalize this code
 
+#[instrument(skip_all)]
 pub async fn process_query(ctx: &SessionContext, query: BatchRequest) -> Result<QueryResult> {
     anyhow::ensure!(
         query.r#type == NetworkType::Eth,
@@ -38,7 +38,7 @@ pub async fn process_query(ctx: &SessionContext, query: BatchRequest) -> Result<
     build_response(&query, blocks, transactions, logs)
 }
 
-#[instrument(err, skip(ctx))]
+#[instrument(err, skip_all)]
 async fn extract_data(
     ctx: &SessionContext,
     query: &BatchRequest,
@@ -80,8 +80,8 @@ async fn extract_data(
         ),
     )?;
 
-    let mut selected_logs = Vec::new();
-    let mut selected_transcations = Vec::new();
+    let mut logs_filters = Vec::new();
+    let mut tx_filters = Vec::new();
 
     if let Some(requests) = &query.transactions {
         for request in requests {
@@ -91,29 +91,33 @@ async fn extract_data(
             filters.extend(field_in("sighash", &request.sighash));
             let all_transactions = all_transactions.clone();
             let selected = if let Some(predicate) = all_of(filters) {
+                tx_filters.push(predicate.clone());
                 all_transactions.filter(predicate)?
             } else {
+                tx_filters.push(lit(true));
                 all_transactions
             };
-            selected_transcations.push(selected.clone());
+
             if request.logs {
-                let key = &["block_number", "transaction_index"];
-                selected_logs.push(
+                let key_columns = ["block_number", "transaction_index"];
+                logs_filters.push(exists(Arc::new(
                     selected
-                        .clone()
-                        .select_columns(key)?
-                        .distinct()?
-                        .join(all_logs.clone(), JoinType::Inner, key, key, None)?
-                        .select(
-                            all_logs
-                                .schema()
-                                .fields()
-                                .iter()
-                                .map(|x| col(x.qualified_name()))
-                                .collect_vec(),
-                        )?,
-                );
+                        .filter(
+                            all_of(
+                                key_columns
+                                    .iter()
+                                    .map(|&key| {
+                                        out_ref_col(DataType::Int32, format!("logs.{key}"))
+                                            .eq(col(key))
+                                    })
+                                    .collect(),
+                            )
+                            .unwrap(),
+                        )?
+                        .into_unoptimized_plan(),
+                )));
             }
+
             ensure!(!request.traces, "Traces queries are not supported yet");
             ensure!(
                 !request.state_diffs,
@@ -131,27 +135,31 @@ async fn extract_data(
             filters.extend(field_in("topic3", &request.topic3));
             let all_logs = all_logs.clone();
             let selected = if let Some(predicate) = all_of(filters) {
+                logs_filters.push(predicate.clone());
                 all_logs.filter(predicate)?
             } else {
+                logs_filters.push(lit(true));
                 all_logs
             };
-            selected_logs.push(selected.clone());
+
             if request.transaction {
-                let key = &["block_number", "transaction_index"];
-                selected_transcations.push(
+                let key_columns = ["block_number", "transaction_index"];
+                tx_filters.push(exists(Arc::new(
                     selected
-                        .select_columns(key)?
-                        .distinct()?
-                        .join(all_transactions.clone(), JoinType::Inner, key, key, None)?
-                        .select(
-                            all_transactions
-                                .schema()
-                                .fields()
-                                .iter()
-                                .map(|x| col(x.qualified_name()))
-                                .collect_vec(),
-                        )?,
-                );
+                        .filter(
+                            all_of(
+                                key_columns
+                                    .iter()
+                                    .map(|&key| {
+                                        out_ref_col(DataType::Int32, format!("transactions.{key}"))
+                                            .eq(col(key))
+                                    })
+                                    .collect(),
+                            )
+                            .unwrap(),
+                        )?
+                        .into_unoptimized_plan(),
+                )));
             }
             ensure!(
                 !request.transaction_traces,
@@ -165,9 +173,9 @@ async fn extract_data(
     );
 
     let blocks = camel_case_columns(all_blocks)?.select_columns(&block_columns(query))?;
-    let transactions = union_all(selected_transcations)?
-        .map(|transactions| -> Result<DataFrame> {
-            Ok(camel_case_columns(transactions)?
+    let transactions = any_of(tx_filters)
+        .map(|filter| -> Result<DataFrame> {
+            Ok(camel_case_columns(all_transactions.filter(filter)?)?
                 .select_columns(&tx_columns(query))?
                 .sort(vec![
                     col("\"blockNumber\"").sort(true, true),
@@ -175,9 +183,9 @@ async fn extract_data(
                 ])?)
         })
         .transpose()?;
-    let logs = union_all(selected_logs)?
-        .map(|logs| -> Result<DataFrame> {
-            Ok(camel_case_columns(logs)?
+    let logs = any_of(logs_filters)
+        .map(|filter| -> Result<DataFrame> {
+            Ok(camel_case_columns(all_logs.filter(filter)?)?
                 .select_columns(&log_columns(query))?
                 .sort(vec![
                     col("\"blockNumber\"").sort(true, true),
@@ -204,7 +212,7 @@ async fn extract_data(
     Ok((blocks_result?, tx_result?, logs_result?))
 }
 
-#[instrument(err)]
+#[instrument(err, skip_all)]
 fn convert_to_json(result: Vec<RecordBatch>) -> Result<Vec<JsonMap<String, Value>>> {
     Ok(record_batches_to_json_rows(
         &result.iter().collect::<Vec<_>>(),
