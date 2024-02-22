@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash, sync::Arc};
+use std::{collections::HashSet, hash::Hash};
 
 use super::eth::{BatchRequest, NetworkType};
 use anyhow::{ensure, Context, Result};
@@ -82,90 +82,46 @@ async fn extract_data(
 
     let mut logs_filters = Vec::new();
     let mut tx_filters = Vec::new();
+    let mut tx_by_logs_filters = Vec::new();
+    let mut logs_by_tx_filters = Vec::new();
 
-    if let Some(requests) = &query.transactions {
-        for request in requests {
-            let mut filters = Vec::new();
-            filters.extend(field_in("from", &request.from));
-            filters.extend(field_in("to", &request.to));
-            filters.extend(field_in("sighash", &request.sighash));
-            let all_transactions = all_transactions.clone();
-            let selected = if let Some(predicate) = all_of(filters) {
-                tx_filters.push(predicate.clone());
-                all_transactions.filter(predicate)?
-            } else {
-                tx_filters.push(lit(true));
-                all_transactions
-            };
+    for tx_request in query.transactions.as_ref().unwrap_or(&Vec::new()) {
+        let mut filters = Vec::new();
+        filters.extend(field_in("from", &tx_request.from));
+        filters.extend(field_in("to", &tx_request.to));
+        filters.extend(field_in("sighash", &tx_request.sighash));
 
-            if request.logs {
-                let key_columns = ["block_number", "transaction_index"];
-                logs_filters.push(exists(Arc::new(
-                    selected
-                        .filter(
-                            all_of(
-                                key_columns
-                                    .iter()
-                                    .map(|&key| {
-                                        out_ref_col(DataType::Int32, format!("logs.{key}"))
-                                            .eq(col(key))
-                                    })
-                                    .collect(),
-                            )
-                            .unwrap(),
-                        )?
-                        .into_unoptimized_plan(),
-                )));
-            }
-
-            ensure!(!request.traces, "Traces queries are not supported yet");
-            ensure!(
-                !request.state_diffs,
-                "State diffs queries are not supported yet"
-            );
+        let predicate = all_of(filters).unwrap_or(lit(true));
+        if tx_request.logs {
+            logs_by_tx_filters.push(predicate.clone());
         }
+        tx_filters.push(predicate);
+
+        ensure!(!tx_request.traces, "Traces queries are not supported yet");
+        ensure!(
+            !tx_request.state_diffs,
+            "State diffs queries are not supported yet"
+        );
     }
-    if let Some(requests) = &query.logs {
-        for request in requests {
-            let mut filters = Vec::new();
-            filters.extend(field_in("address", &request.address));
-            filters.extend(field_in("topic0", &request.topic0));
-            filters.extend(field_in("topic1", &request.topic1));
-            filters.extend(field_in("topic2", &request.topic2));
-            filters.extend(field_in("topic3", &request.topic3));
-            let all_logs = all_logs.clone();
-            let selected = if let Some(predicate) = all_of(filters) {
-                logs_filters.push(predicate.clone());
-                all_logs.filter(predicate)?
-            } else {
-                logs_filters.push(lit(true));
-                all_logs
-            };
 
-            if request.transaction {
-                let key_columns = ["block_number", "transaction_index"];
-                tx_filters.push(exists(Arc::new(
-                    selected
-                        .filter(
-                            all_of(
-                                key_columns
-                                    .iter()
-                                    .map(|&key| {
-                                        out_ref_col(DataType::Int32, format!("transactions.{key}"))
-                                            .eq(col(key))
-                                    })
-                                    .collect(),
-                            )
-                            .unwrap(),
-                        )?
-                        .into_unoptimized_plan(),
-                )));
-            }
-            ensure!(
-                !request.transaction_traces,
-                "Traces queries are not supported yet"
-            );
+    for log_request in query.logs.as_ref().unwrap_or(&Vec::new()) {
+        let mut filters = Vec::new();
+        filters.extend(field_in("address", &log_request.address));
+        filters.extend(field_in("topic0", &log_request.topic0));
+        filters.extend(field_in("topic1", &log_request.topic1));
+        filters.extend(field_in("topic2", &log_request.topic2));
+        filters.extend(field_in("topic3", &log_request.topic3));
+
+        let predicate = all_of(filters).unwrap_or(lit(true));
+        if log_request.transaction {
+            tx_by_logs_filters.push(predicate.clone());
         }
+        logs_filters.push(predicate);
+
+        ensure!(
+            !log_request.transaction_traces,
+            "Traces queries are not supported yet"
+        );
     }
     ensure!(
         query.traces.is_none(),
@@ -173,27 +129,61 @@ async fn extract_data(
     );
 
     let blocks = camel_case_columns(all_blocks)?.select_columns(&block_columns(query))?;
-    let transactions = any_of(tx_filters)
-        .map(|filter| -> Result<DataFrame> {
-            Ok(camel_case_columns(all_transactions.filter(filter)?)?
+
+    let mut tx_selections = Vec::new();
+    if let Some(filter) = any_of(tx_filters) {
+        tx_selections.push(all_transactions.clone().filter(filter)?);
+    }
+    if let Some(filter) = any_of(tx_by_logs_filters) {
+        let key = ["block_number", "transaction_index"];
+        tx_selections.push(all_transactions.clone().join(
+            all_logs.clone(),
+            JoinType::LeftSemi,
+            &key,
+            &key,
+            Some(filter),
+        )?);
+    }
+    let transactions = match union_all(tx_selections)? {
+        Some(union) => {
+            let result = camel_case_columns(union)?
                 .select_columns(&tx_columns(query))?
                 .sort(vec![
                     col("\"blockNumber\"").sort(true, true),
                     col("\"transactionIndex\"").sort(true, true),
-                ])?)
-        })
-        .transpose()?;
-    let logs = any_of(logs_filters)
-        .map(|filter| -> Result<DataFrame> {
-            Ok(camel_case_columns(all_logs.filter(filter)?)?
+                ])?;
+            Some(result)
+        }
+        None => None,
+    };
+
+    let mut logs_selections = Vec::new();
+    if let Some(filter) = any_of(logs_filters) {
+        logs_selections.push(all_logs.clone().filter(filter)?);
+    }
+    if let Some(filter) = any_of(logs_by_tx_filters) {
+        let key = ["block_number", "transaction_index"];
+        logs_selections.push(all_logs.clone().join(
+            all_transactions.clone(),
+            JoinType::LeftSemi,
+            &key,
+            &key,
+            Some(filter),
+        )?);
+    }
+    let logs = match union_all(logs_selections)? {
+        Some(union) => {
+            let result = camel_case_columns(union)?
                 .select_columns(&log_columns(query))?
                 .sort(vec![
                     col("\"blockNumber\"").sort(true, true),
                     col("\"transactionIndex\"").sort(true, true),
                     col("\"logIndex\"").sort(true, true),
-                ])?)
-        })
-        .transpose()?;
+                ])?;
+            Some(result)
+        }
+        None => None,
+    };
 
     let tx_future = async move {
         match transactions {
@@ -379,6 +369,7 @@ fn union_all(dataframes: Vec<DataFrame>) -> Result<Option<DataFrame>> {
     if let Some(first) = iter.next() {
         let mut result = first;
         for df in iter {
+            // TODO: use distinct_by
             result = result.union_distinct(df)?;
         }
         Ok(Some(result))
