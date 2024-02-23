@@ -17,3 +17,19 @@ Currently implemented features include:
 - [x] P2P transport
 - [ ] Sending logs
 - [ ] Checking gateway allocations
+
+### `query-performance` branch
+This is an experimental branch that should not be merged into `master` yet.
+
+To run benchmarks:\
+`cargo bench`\
+See also: [criterion.rs docs](https://bheisler.github.io/criterion.rs/book/user_guide/command_line_options.html#baselines).
+
+To perf a benchmark:\
+`perf record cargo bench --bench=query -- include_all_blocks --profile-time 30`
+
+To build a flamegraph:\
+`cargo flamegraph --bench query -- --bench include_all_blocks --profile-time 30`
+
+To run tests and see execution plans:\
+`RUST_LOG=debug,sqlparser::parser=info QUERY=include_all_blocks cargo test --release test_query -- --nocapture`

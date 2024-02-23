@@ -48,6 +48,11 @@ async fn test_query() -> Result<()> {
     setup_tracing()?;
     let ctx = prepare_context().await?;
     for (query_name, (query_path, result_path)) in list_fixtures() {
+        if let Ok(requested) = std::env::var("QUERY") {
+            if query_name != requested {
+                continue;
+            }
+        }
         let query: BatchRequest = serde_json::from_reader(std::fs::File::open(&query_path)?)?;
         let expected: Vec<serde_json::Value> =
             serde_json::from_reader(std::fs::File::open(result_path)?)?;
