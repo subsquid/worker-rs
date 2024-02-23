@@ -9,7 +9,7 @@ use datafusion::{
     prelude::*,
     scalar::ScalarValue,
 };
-use futures::join;
+use futures::try_join;
 use itertools::{Itertools, Position};
 use serde_json::{map::Map as JsonMap, Value};
 use serde_rename_rule::RenameRule;
@@ -185,19 +185,20 @@ async fn extract_data(
         None => None,
     };
 
-    let tx_future = async move {
+    let blocks_future = tokio::spawn(blocks.collect());
+    let tx_future = tokio::spawn(async move {
         match transactions {
             Some(transactions) => transactions.collect().await.map(Some),
             None => Ok(None),
         }
-    };
-    let logs_future = async {
+    });
+    let logs_future = tokio::spawn(async {
         match logs {
             Some(logs) => logs.collect().await.map(Some),
             None => Ok(None),
         }
-    };
-    let (blocks_result, tx_result, logs_result) = join!(blocks.collect(), tx_future, logs_future);
+    });
+    let (blocks_result, tx_result, logs_result) = try_join!(blocks_future, tx_future, logs_future)?;
 
     Ok((blocks_result?, tx_result?, logs_result?))
 }

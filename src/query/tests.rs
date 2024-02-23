@@ -43,7 +43,7 @@ async fn test_schema() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_query() -> Result<()> {
     setup_tracing()?;
     let ctx = prepare_context().await?;
