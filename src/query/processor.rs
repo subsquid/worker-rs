@@ -185,6 +185,14 @@ async fn extract_data(
         None => None,
     };
 
+    blocks.clone().explain(true, true)?.show().await?;
+    if let Some(df) = transactions.as_ref() {
+        df.clone().explain(true, true)?.show().await?
+    }
+    if let Some(df) = logs.as_ref() {
+        df.clone().explain(true, true)?.show().await?
+    }
+
     let blocks_future = tokio::spawn(blocks.collect());
     let tx_future = tokio::spawn(async move {
         match transactions {
