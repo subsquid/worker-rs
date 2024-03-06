@@ -1,16 +1,18 @@
-use std::{collections::HashSet, hash::Hash};
+use std::{collections::HashSet, hash::Hash, pin::Pin};
 
 use super::eth::{BatchRequest, NetworkType};
 use anyhow::{ensure, Context, Result};
+use async_stream::try_stream;
 use datafusion::{
     arrow::{
         datatypes::DataType, json::writer::record_batches_to_json_rows, record_batch::RecordBatch,
     },
+    error::DataFusionError,
     prelude::*,
     scalar::ScalarValue,
 };
-use futures::try_join;
-use itertools::{Itertools, Position};
+use futures::{stream::Peekable, try_join, Stream, StreamExt};
+use itertools::Itertools;
 use serde_json::{map::Map as JsonMap, Value};
 use serde_rename_rule::RenameRule;
 use tracing::instrument;
@@ -32,20 +34,20 @@ pub async fn process_query(ctx: &SessionContext, query: BatchRequest) -> Result<
         "only eth queries are supported"
     );
     let (blocks, transactions, logs) = extract_data(ctx, &query).await?;
-    let blocks = convert_to_json(blocks)?;
-    let transactions = transactions.map(convert_to_json).transpose()?;
-    let logs = logs.map(convert_to_json).transpose()?;
-    build_response(&query, blocks, transactions, logs)
+    let blocks = convert_to_json(blocks);
+    let transactions = transactions.map(convert_to_json);
+    let logs = logs.map(convert_to_json);
+    collect_result(build_response(&query, blocks, transactions, logs)).await
 }
 
-#[instrument(err, skip_all)]
+#[instrument(skip_all)]
 async fn extract_data(
     ctx: &SessionContext,
     query: &BatchRequest,
 ) -> Result<(
-    Vec<RecordBatch>,
-    Option<Vec<RecordBatch>>,
-    Option<Vec<RecordBatch>>,
+    impl Stream<Item = Result<RecordBatch, DataFusionError>>,
+    Option<impl Stream<Item = Result<RecordBatch, DataFusionError>>>,
+    Option<impl Stream<Item = Result<RecordBatch, DataFusionError>>>,
 )> {
     let blocks = ctx.table("blocks").await?;
     let transactions = ctx.table("transactions").await?;
@@ -185,16 +187,16 @@ async fn extract_data(
         None => None,
     };
 
-    let blocks_future = tokio::spawn(blocks.collect());
+    let blocks_future = tokio::spawn(blocks.execute_stream());
     let tx_future = tokio::spawn(async move {
         match transactions {
-            Some(transactions) => transactions.collect().await.map(Some),
+            Some(transactions) => transactions.execute_stream().await.map(Some),
             None => Ok(None),
         }
     });
     let logs_future = tokio::spawn(async {
         match logs {
-            Some(logs) => logs.collect().await.map(Some),
+            Some(logs) => logs.execute_stream().await.map(Some),
             None => Ok(None),
         }
     });
@@ -203,81 +205,139 @@ async fn extract_data(
     Ok((blocks_result?, tx_result?, logs_result?))
 }
 
-#[instrument(err, skip_all)]
-fn convert_to_json(result: Vec<RecordBatch>) -> Result<Vec<JsonMap<String, Value>>> {
-    Ok(record_batches_to_json_rows(
-        &result.iter().collect::<Vec<_>>(),
-    )?)
+#[instrument(skip_all)]
+fn convert_to_json(
+    stream: impl Stream<Item = Result<RecordBatch, DataFusionError>>,
+) -> impl Stream<Item = Result<JsonMap<String, Value>>> {
+    stream.flat_map(|record_batch| {
+        let entries = match record_batch
+            .and_then(|batch| record_batches_to_json_rows(&[&batch]).map_err(From::from))
+        {
+            Ok(vec) => vec.into_iter().map(Ok).collect_vec(),
+            Err(e) => vec![Err(e.into())],
+        };
+        futures::stream::iter(entries)
+    })
 }
-
-#[instrument(err, skip_all)]
-fn build_response(
-    query: &BatchRequest,
-    headers: Vec<JsonMap<String, Value>>,
-    transactions: Option<Vec<JsonMap<String, Value>>>,
-    logs: Option<Vec<JsonMap<String, Value>>>,
-) -> Result<QueryResult> {
+#[instrument(skip_all)]
+fn build_response<'l>(
+    query: &'l BatchRequest,
+    headers: impl Stream<Item = Result<JsonMap<String, Value>>> + Unpin + 'l,
+    transactions: Option<impl Stream<Item = Result<JsonMap<String, Value>>> + 'l>,
+    logs: Option<impl Stream<Item = Result<JsonMap<String, Value>>> + 'l>,
+) -> impl Stream<Item = Result<Value>> + 'l {
     let include_tx = transactions.is_some();
     let include_logs = logs.is_some();
-    let block_txs = transactions
-        .map(|transactions| {
-            transactions
-                .into_iter()
-                .map(|mut tx: JsonMap<String, Value>| {
-                    let number = tx.get("blockNumber").unwrap().as_u64().unwrap();
-                    tx.retain(|key, _| key != "blockNumber");
-                    add_nulls(&mut tx, query.fields.as_ref().map(|f| &f.transaction));
-                    (number, tx)
-                })
-                .into_group_map()
-        })
-        .unwrap_or_default();
-    let block_logs = logs
-        .map(|logs| {
-            logs.into_iter()
-                .map(|mut log: JsonMap<String, Value>| {
-                    let number = log.get("blockNumber").unwrap().as_u64().unwrap();
-                    log.retain(|key, _| key != "blockNumber");
-                    add_nulls(&mut log, query.fields.as_ref().map(|f| &f.log));
-                    (number, log)
-                })
-                .into_group_map()
-        })
-        .unwrap_or_default();
-    let mut blocks = Vec::new();
-    for (block_position, header) in headers.into_iter().with_position() {
-        let mut block = JsonMap::new();
-        block.insert("header".to_owned(), serde_json::to_value(&header)?);
-        let number = header
-            .get("number")
-            .context("Found block without number")?
-            .as_u64()
-            .unwrap();
-        let mut include_block = false;
-        if let Some(transactions) = block_txs.get(&number) {
-            block.insert(
-                "transactions".to_owned(),
-                serde_json::to_value(transactions)?,
-            );
-            include_block = true;
+    let mut transactions = transactions.map(|stream| Box::pin(stream.peekable()));
+    let mut logs = logs.map(|stream| Box::pin(stream.peekable()));
+
+    async fn block_rows<S: Stream<Item = Result<JsonMap<String, Value>>>>(
+        stream: &mut Option<Pin<Box<Peekable<S>>>>,
+        block_number: u64,
+    ) -> Result<Vec<JsonMap<String, Value>>>
+    {
+        if let Some(stream) = stream.as_mut() {
+            consume_while(stream.as_mut(), |tx: &JsonMap<String, Value>| {
+                tx.get("blockNumber").unwrap().as_u64().unwrap() == block_number
+            }).await
         } else {
-            if include_tx {
-                block.insert("transactions".to_owned(), Value::Array(Vec::new()));
-            }
-        }
-        if let Some(logs) = block_logs.get(&number) {
-            block.insert("logs".to_owned(), serde_json::to_value(logs)?);
-            include_block = true;
-        } else {
-            if include_logs {
-                block.insert("logs".to_owned(), Value::Array(Vec::new()));
-            }
-        }
-        if include_block || query.include_all_blocks || block_position != Position::Middle {
-            blocks.push(Value::Object(block));
+            Ok(Vec::new())
         }
     }
-    Ok(blocks)
+
+    try_stream! {
+        let mut last_block = None;
+        let mut headers = headers.enumerate();
+        while let Some((header_index, header)) = headers.next().await {
+            let header = header?;
+            let mut block = JsonMap::new();
+            let number = header
+                .get("number")
+                .context("Found block without number")?
+                .as_u64()
+                .unwrap();
+            let mut include_block = false;
+
+            block.insert("header".to_owned(), serde_json::to_value(&header)?);
+
+            let mut transactions = block_rows(&mut transactions, number).await?;
+            for tx in transactions.iter_mut() {
+                tx.retain(|key, _| key != "blockNumber");
+                add_nulls(tx, query.fields.as_ref().map(|f| &f.transaction));
+            }
+            if !transactions.is_empty() {
+                include_block = true;
+            }
+            if !transactions.is_empty() || include_tx {
+                block.insert(
+                    "transactions".to_owned(),
+                    serde_json::to_value(transactions)?,
+                );
+            }
+
+            let mut logs = block_rows(&mut logs, number).await?;
+            for log in logs.iter_mut() {
+                log.retain(|key, _| key != "blockNumber");
+                add_nulls(log, query.fields.as_ref().map(|f| &f.log));
+            }
+            if !logs.is_empty() {
+                include_block = true;
+            }
+            if !logs.is_empty() || include_logs {
+                block.insert(
+                    "logs".to_owned(),
+                    serde_json::to_value(logs)?,
+                );
+            }
+
+            if include_block || query.include_all_blocks || header_index == 0 {
+                yield Value::Object(block);
+                last_block = None;
+            } else {
+                last_block = Some(block);
+            }
+        }
+        if let Some(block) = last_block {
+            yield Value::Object(block);
+        }
+    }
+}
+
+async fn consume_while<T>(
+    mut stream: std::pin::Pin<&mut Peekable<impl Stream<Item = Result<T>>>>,
+    f: impl Fn(&T) -> bool,
+) -> Result<Vec<T>> {
+    let mut result = Vec::new();
+    while let Some(item) = stream
+        .as_mut()
+        .next_if(|item| match item {
+            Err(_) => true,
+            Ok(item) => f(item),
+        })
+        .await
+    {
+        match item {
+            Ok(item) => {
+                result.push(item);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(result)
+}
+
+#[instrument(skip_all)]
+async fn collect_result(stream: impl Stream<Item = Result<Value>>) -> Result<QueryResult> {
+    let mut result = Vec::new();
+    tokio::pin!(stream);
+    while let Some(row) = stream.next().await {
+        if result.is_empty() {
+            tracing::trace!("Got first result row");
+        }
+        result.push(row?);
+    }
+    tracing::trace!("Got all result rows");
+    Ok(result)
 }
 
 fn camel_case_columns(df: DataFrame) -> Result<DataFrame> {
