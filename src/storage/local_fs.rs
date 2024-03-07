@@ -1,7 +1,6 @@
-use std::path::{Path, PathBuf};
-
 use anyhow::anyhow;
 use anyhow::Context;
+use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 
 use super::Filesystem;
 use super::Result;
@@ -27,8 +26,8 @@ impl Filesystem for LocalFs {
     async fn ls(&self, path: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
         let dir = self.root.join(path);
         std::fs::read_dir(&dir)
-            .with_context(|| format!("Couldn't open dir {}", dir.display()))?
-            .map(|entry| Ok(entry?.path()))
+            .with_context(|| format!("Couldn't open dir '{dir}'"))?
+            .map(|entry| Ok(entry?.path().try_into()?))
             .collect()
     }
 }
@@ -46,12 +45,11 @@ pub fn add_temp_prefix(path: &Path) -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Invalid system time")
         .as_millis();
-    let result: Option<_> = (|| {
-        let name = path.file_name()?.to_str()?;
-        let new_name = format!("temp-{}-{}", timestamp, name);
-        Some(path.with_file_name(new_name))
-    })();
-    result.ok_or_else(|| anyhow!("Invalid chunk path: {}", path.to_string_lossy()))
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("Invalid chunk path: '{path}'"))?;
+    let new_name = format!("temp-{}-{}", timestamp, name);
+    Ok(path.with_file_name(new_name))
 }
 
 #[cfg(test)]

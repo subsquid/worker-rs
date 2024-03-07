@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
-use std::path::PathBuf;
+use camino::Utf8PathBuf as PathBuf;
 
 pub fn tests_data() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")

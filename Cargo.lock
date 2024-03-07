@@ -873,6 +873,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "camino"
+version = "1.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c59e92b5a388f549b863a7bea62612c09f24c8393560709a54558a9abdfb3b9c"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6315,6 +6321,7 @@ dependencies = [
  "async-stream",
  "axum 0.7.4",
  "base64 0.21.7",
+ "camino",
  "clap",
  "criterion",
  "datafusion",

@@ -1,7 +1,7 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use camino::Utf8Path as Path;
 use datafusion::arrow::datatypes::{self, DataType, Field, Schema};
 use datafusion::common::{Constraint, Constraints};
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
@@ -93,7 +93,7 @@ fn register_parquet(
     let options = ParquetReadOptions::default().schema(&schema);
     let constraints = Constraints::new_unverified(vec![Constraint::PrimaryKey(pk_indices)]);
     let listing_options = options.to_listing_options(&ctx.copied_config());
-    let table_url = ListingTableUrl::parse(table_path.as_ref().to_string_lossy())?;
+    let table_url = ListingTableUrl::parse(table_path.as_ref())?;
     let schema = Arc::new(schema.to_owned());
     let config = ListingTableConfig::new(table_url)
         .with_listing_options(listing_options)
@@ -106,7 +106,7 @@ fn register_parquet(
     Ok(())
 }
 
-pub async fn prepare_query_context(path: &std::path::Path) -> anyhow::Result<SessionContext> {
+pub async fn prepare_query_context(path: &Path) -> anyhow::Result<SessionContext> {
     let ctx = SessionContext::new();
     register_parquet(
         &ctx,
@@ -129,17 +129,5 @@ pub async fn prepare_query_context(path: &std::path::Path) -> anyhow::Result<Ses
         &LOGS_SCHEMA,
         vec![0, 1, 2],
     )?;
-    ctx.register_parquet(
-        "traces",
-        path.join("traces.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
-    ctx.register_parquet(
-        "statediffs",
-        path.join("statediffs.parquet").to_string_lossy().as_ref(),
-        ParquetReadOptions::default(),
-    )
-    .await?;
     Ok(ctx)
 }

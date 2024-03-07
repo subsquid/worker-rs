@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use anyhow::Result;
+use camino::Utf8PathBuf as PathBuf;
 use datafusion::prelude::*;
 use tracing::{info, warn};
 
@@ -26,7 +26,7 @@ fn list_fixtures() -> HashMap<String, (PathBuf, PathBuf)> {
         let name: String = filename.strip_suffix(".json").unwrap().to_owned();
         let result_path = path.join([&name, ".result.json"].join(""));
         assert!(result_path.exists());
-        result.insert(name, (entry.path(), result_path));
+        result.insert(name, (entry.path().try_into().unwrap(), result_path));
     }
     result
 }

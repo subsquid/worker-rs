@@ -1,9 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
+use camino::Utf8PathBuf as PathBuf;
 use futures::{future, StreamExt};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -17,10 +15,7 @@ use super::{
 };
 use crate::{
     storage::Filesystem,
-    types::{
-        os_str::try_into_str,
-        state::{self, difference, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
-    },
+    types::state::{self, difference, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
     util::UseOnce,
 };
 
@@ -244,13 +239,13 @@ impl StateManager {
 
     #[instrument(err)]
     fn remove_temps(fs: &LocalFs) -> Result<()> {
-        for entry in glob::glob(fs.root.join("**/temp-*").to_str().unwrap())? {
+        for entry in glob::glob(fs.root.join("**/temp-*").as_str())? {
             match entry {
                 Ok(path) => {
-                    info!("Removing temp dir {}", path.display());
+                    info!("Removing temp dir '{}'", path.display());
                     std::fs::remove_dir_all(&path)
-                        .context(format!("Couldn't remove dir {}", path.display()))?;
-                    layout::clean_chunk_ancestors(path)?;
+                        .context(format!("Couldn't remove dir '{}'", path.display()))?;
+                    layout::clean_chunk_ancestors(PathBuf::try_from(path)?)?;
                 }
                 Err(e) => warn!("Couldn't read dir: {}", e),
             };
@@ -264,13 +259,13 @@ impl StateManager {
         let mut result = ChunkSet::new();
         for dir in fs.ls_root().await? {
             let dirname = dir.file_name().unwrap();
-            if let Some(dataset) = state::decode_dataset(try_into_str(dirname)?) {
+            if let Some(dataset) = state::decode_dataset(dirname) {
                 let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
                     .await
-                    .context(format!("Invalid layout in {:?}", dirname))?;
+                    .context(format!("Invalid layout in '{dir}'"))?;
                 result.insert(dataset, chunks.into_iter().collect());
             } else {
-                warn!("Invalid dataset in workdir: {}", dir.display());
+                warn!("Invalid dataset in workdir: '{dir}'");
             }
         }
         Ok(result)
@@ -335,14 +330,11 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use camino::Utf8PathBuf as PathBuf;
 
     #[test]
     fn test_join_glob() {
         // `remove_temps` depends on this behavior
-        assert_eq!(
-            PathBuf::from("a/b").join("**/*.c").to_str(),
-            Some("a/b/**/*.c")
-        );
+        assert_eq!(PathBuf::from("a/b").join("**/*.c").as_str(), "a/b/**/*.c");
     }
 }

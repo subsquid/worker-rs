@@ -1,8 +1,9 @@
-use std::{ops::Deref, path::Path};
+use std::ops::Deref;
 
-use crate::{types::os_str::try_into_str, util::iterator::WithLookahead};
+use crate::util::iterator::WithLookahead;
 use anyhow::{anyhow, bail, Context, Result};
 use async_stream::try_stream;
+use camino::Utf8Path as Path;
 use futures::Stream;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -76,7 +77,7 @@ impl DataChunk {
                     _ => None,
                 },
             )
-            .ok_or_else(|| anyhow!("Could not parse chunk dirname '{}'", dirname))?;
+            .ok_or_else(|| anyhow!("Could not parse chunk dirname '{dirname}'"))?;
         Ok(Self {
             first_block: BlockNumber::try_from(beg)?,
             last_block: BlockNumber::try_from(end)?,
@@ -97,7 +98,7 @@ async fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
         .ls_root()
         .await?
         .into_iter()
-        .flat_map(|name| BlockNumber::try_from(name.file_name()?.to_str()?).ok())
+        .filter_map(|name| BlockNumber::try_from(name.file_name()?).ok())
         .collect();
     entries.sort_unstable();
     Ok(entries)
@@ -108,8 +109,8 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
         .ls(&top.to_string())
         .await?
         .into_iter()
-        .map(|dirname| DataChunk::parse_range(try_into_str(dirname.as_os_str())?))
-        .collect::<Result<_>>()?;
+        .filter_map(|dirname| DataChunk::parse_range(dirname.as_str()).ok())
+        .collect();
     entries.sort_unstable();
     Ok(entries)
 }
@@ -203,15 +204,15 @@ pub fn clean_chunk_ancestors(path: impl AsRef<Path>) -> Result<()> {
     // take(2) limits it to removing range dir and dataset dir but not the workdir itself
     for dir in path.as_ref().ancestors().skip(1).take(2) {
         if is_dir_empty(dir) {
-            info!("Removing empty dir {}", dir.display());
-            std::fs::remove_dir(dir).context(format!("Couldn't remove dir {}", dir.display()))?;
+            info!("Removing empty dir '{dir}'");
+            std::fs::remove_dir(dir).context(format!("Couldn't remove dir '{dir}'"))?;
         }
     }
     Ok(())
 }
 
 fn is_dir_empty(path: impl AsRef<Path>) -> bool {
-    match std::fs::read_dir(path) {
+    match std::fs::read_dir(path.as_ref()) {
         Ok(entries) => entries.count() == 0,
         Err(_) => false,
     }

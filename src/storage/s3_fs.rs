@@ -1,16 +1,12 @@
 use anyhow::{Context, Result};
+use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use lazy_static::lazy_static;
 use s3::{creds::Credentials, Bucket};
-use std::{
-    env,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{env, time::Duration};
 use tracing::{info, instrument};
 
 use super::local_fs::add_temp_prefix;
 use super::{guard::FsGuard, Filesystem};
-use crate::types::os_str::try_into_string;
 
 lazy_static! {
     static ref AWS_REGION: String = env::var("AWS_REGION").unwrap_or("auto".to_owned());
@@ -44,7 +40,7 @@ impl S3Filesystem {
         // TODO: check resulting file size
         let mut writer = tokio::fs::File::create(dst_path)
             .await
-            .with_context(|| format!("Couldn't create file '{}'", dst_path.to_string_lossy()))?;
+            .with_context(|| format!("Couldn't create file '{dst_path}'"))?;
         self.bucket.get_object_to_writer(path, &mut writer).await?;
         Ok(())
     }
@@ -62,11 +58,11 @@ impl S3Filesystem {
         info!("Scheduling download: {:?}", files);
         let mut guard = FsGuard::new(tmp)?;
         futures::future::try_join_all(files.into_iter().map(|file| async move {
-            let dst_file = tmp
-                .join(file.file_name().unwrap_or_else(|| {
-                    panic!("Couldn't parse S3 file name: '{}'", file.display())
-                }));
-            self.download_one(&try_into_string(file.into_os_string())?, &dst_file)
+            let dst_file = tmp.join(
+                file.file_name()
+                    .unwrap_or_else(|| panic!("Couldn't parse S3 file name: '{file}'")),
+            );
+            self.download_one(file.as_str(), &dst_file)
                 .await
         }))
         .await?;
@@ -98,7 +94,7 @@ impl S3Filesystem {
 
 impl Filesystem for S3Filesystem {
     async fn ls(&self, path: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-        self.ls_raw(format!("{}/", path.as_ref().display())).await
+        self.ls_raw(format!("{}/", path.as_ref())).await
     }
 
     async fn ls_root(&self) -> Result<Vec<PathBuf>> {

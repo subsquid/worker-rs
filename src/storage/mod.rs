@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 
 use anyhow::Result;
 
@@ -19,10 +19,8 @@ pub trait Filesystem {
 
 #[cfg(test)]
 pub mod tests {
-    use std::{
-        collections::HashMap,
-        path::{Path, PathBuf},
-    };
+    use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
+    use std::collections::HashMap;
 
     use anyhow::Context;
 
@@ -41,7 +39,7 @@ pub mod tests {
             self.files
                 .get(path.as_ref())
                 .cloned()
-                .with_context(|| format!("Couldn't find top dir {}", path.as_ref().display()))
+                .with_context(|| format!("Couldn't find top dir {}", path.as_ref()))
         }
     }
 }

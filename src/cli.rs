@@ -1,6 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
+use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
 use subsquid_network_transport::cli::TransportArgs;
 

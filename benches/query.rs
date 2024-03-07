@@ -1,6 +1,5 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
+use camino::Utf8PathBuf as PathBuf;
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::prelude::SessionContext;
 use tokio::runtime::Runtime;
