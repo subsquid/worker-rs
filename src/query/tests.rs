@@ -35,11 +35,11 @@ fn list_fixtures() -> HashMap<String, (PathBuf, PathBuf)> {
 async fn test_schema() -> Result<()> {
     let ctx = prepare_context().await?;
     let blocks = ctx.table("blocks").await?;
-    let _traces = ctx.table("traces").await?;
-    let schema = blocks.schema();
-    for field in schema.fields() {
-        println!("{:?}: {:?}", field.name(), field.data_type());
-    }
+    let transactions = ctx.table("transactions").await?;
+    let logs = ctx.table("logs").await?;
+    println!("Blocks schema {:?}", blocks.schema());
+    println!("Transactions schema {:?}", transactions.schema());
+    println!("Logs schema {:?}", logs.schema());
     Ok(())
 }
 
