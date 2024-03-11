@@ -2,7 +2,7 @@ use crate::{
     query::{self, error::QueryError, eth::BatchRequest, processor::QueryResult},
     storage::manager::StateManager,
     transport::Transport,
-    types::state::Dataset,
+    types::dataset::Dataset,
 };
 use futures::{self, StreamExt};
 use itertools::Itertools;

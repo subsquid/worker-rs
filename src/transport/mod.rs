@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     query::{error::QueryError, eth::BatchRequest, processor::QueryResult},
-    types::state::{Dataset, Ranges},
+    types::{dataset::Dataset, state::Ranges},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -26,7 +26,10 @@ pub trait Transport: Send + Sync {
     fn send_ping(&self, state: State) -> impl futures::Future<Output = Result<()>> + Send;
     fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static + Send;
     fn stream_queries(&self) -> impl futures::Stream<Item = QueryTask> + 'static + Send;
-    fn run(&self, cancellation_token: CancellationToken) -> impl futures::Future<Output = ()> + Send {
+    fn run(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> impl futures::Future<Output = ()> + Send {
         cancellation_token.cancelled_owned()
     }
 }

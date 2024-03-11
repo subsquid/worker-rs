@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     cli::HttpArgs, controller, query::eth::BatchRequest, storage::manager::StateManager,
-    types::state::Dataset,
+    types::dataset::Dataset,
 };
 
 use axum::{

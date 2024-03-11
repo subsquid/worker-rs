@@ -15,7 +15,10 @@ use super::{
 };
 use crate::{
     storage::Filesystem,
-    types::state::{self, difference, to_ranges, ChunkRef, ChunkSet, Dataset, Ranges},
+    types::{
+        dataset::{self, Dataset},
+        state::{self, difference, to_ranges, ChunkRef, ChunkSet, Ranges},
+    },
     util::UseOnce,
 };
 
@@ -259,7 +262,7 @@ impl StateManager {
         let mut result = ChunkSet::new();
         for dir in fs.ls_root().await? {
             let dirname = dir.file_name().unwrap();
-            if let Some(dataset) = state::decode_dataset(dirname) {
+            if let Some(dataset) = dataset::decode_dataset(dirname) {
                 let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
                     .await
                     .context(format!("Invalid layout in '{dir}'"))?;
@@ -274,7 +277,7 @@ impl StateManager {
     fn chunk_path(&self, chunk: &ChunkRef) -> PathBuf {
         self.fs
             .root
-            .join(state::encode_dataset(&chunk.dataset))
+            .join(dataset::encode_dataset(&chunk.dataset))
             .join(chunk.chunk.path())
     }
 

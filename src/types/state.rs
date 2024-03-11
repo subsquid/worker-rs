@@ -1,22 +1,10 @@
+use super::dataset::Dataset;
 use crate::storage::layout::DataChunk;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use std::collections::{HashMap, HashSet};
 use subsquid_messages::{Range, RangeSet};
 
-pub type Dataset = String;
 pub type ChunkSet = HashMap<Dataset, HashSet<DataChunk>>;
 pub type Ranges = HashMap<Dataset, RangeSet>;
-
-pub fn encode_dataset(dataset: &str) -> String {
-    base64.encode(dataset.as_bytes())
-}
-
-pub fn decode_dataset(str: &str) -> Option<Dataset> {
-    base64
-        .decode(str)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-}
 
 #[derive(Clone)]
 pub struct ChunkRef {
@@ -56,16 +44,19 @@ pub fn remove(state: &mut ChunkSet, chunk: &ChunkRef) {
 }
 
 pub fn difference(first: ChunkSet, second: &ChunkSet) -> ChunkSet {
-    first.into_iter().filter_map(|(key, mut chunks)| {
-        if let Some(removed) = second.get(&key) {
-            chunks.retain(|x| !removed.contains(x));
-        }
-        if chunks.is_empty() {
-            None
-        } else {
-            Some((key, chunks))
-        }
-    }).collect()
+    first
+        .into_iter()
+        .filter_map(|(key, mut chunks)| {
+            if let Some(removed) = second.get(&key) {
+                chunks.retain(|x| !removed.contains(x));
+            }
+            if chunks.is_empty() {
+                None
+            } else {
+                Some((key, chunks))
+            }
+        })
+        .collect()
 }
 
 pub fn to_ranges(state: ChunkSet) -> Ranges {
