@@ -46,7 +46,7 @@ impl Deref for BlockNumber {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
+#[derive(Default, Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub struct DataChunk {
     pub first_block: BlockNumber,
     pub last_block: BlockNumber,

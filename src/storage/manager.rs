@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf as PathBuf;
@@ -17,7 +17,7 @@ use crate::{
     storage::Filesystem,
     types::{
         dataset::{self, Dataset},
-        state::{self, difference, to_ranges, ChunkRef, ChunkSet, Ranges},
+        state::{self, to_ranges, ChunkRef, ChunkSet, Ranges},
     },
     util::UseOnce,
 };
@@ -100,16 +100,16 @@ impl StateManager {
         // All chunks in `previous` have already been scheduled for download or removal.
         // Now only the difference between new and previous assignment needs to be scheduled.
 
-        for (dataset, ranges) in previous.iter() {
-            if !desired.contains_key(dataset) {
+        for (dataset, ranges) in previous.inner().iter() {
+            if !desired.inner().contains_key(dataset) {
                 // Dataset was fully removed
                 for chunk in ranges {
                     self.notify(dataset, chunk);
                 }
             }
         }
-        for (dataset, desired_ranges) in desired.iter() {
-            if let Some(previous_ranges) = previous.get(dataset) {
+        for (dataset, desired_ranges) in desired.inner().iter() {
+            if let Some(previous_ranges) = previous.inner().get(dataset) {
                 previous_ranges
                     .symmetric_difference(desired_ranges)
                     .for_each(|chunk| {
@@ -161,7 +161,7 @@ impl StateManager {
         let desired = state.desired.clone();
         let available = state.available.clone();
         drop(state); // release mutex
-        let downloading = difference(desired, &available);
+        let downloading = desired.difference(&available);
         Status {
             available: to_ranges(available),
             downloading: to_ranges(downloading),
@@ -177,9 +177,9 @@ impl StateManager {
 
     async fn process_notification(&self, chunk: &ChunkRef) {
         let mut state = self.state.lock().await;
-        let available = state::has(&state.available, chunk);
-        let downloading = state::has(&state.downloading, chunk);
-        let desired = state::has(&state.desired, chunk);
+        let available = state.available.contains(&chunk.dataset, &chunk.chunk);
+        let downloading = state.downloading.contains(&chunk.dataset, &chunk.chunk);
+        let desired = state.desired.contains(&chunk.dataset, &chunk.chunk);
         assert!(
             !(available && downloading),
             "Inconsisent state: chunk {:?} is both available and downloading",
@@ -190,20 +190,24 @@ impl StateManager {
                 // Chunk is already being processed. Do nothing.
                 return;
             }
-            state::add(&mut state.downloading, &chunk);
+            state
+                .downloading
+                .insert(chunk.dataset.clone(), chunk.chunk.clone());
             drop(state); // unlock before awaiting
 
             let download_result = self.download_chunk(&chunk).await;
 
             let mut state = self.state.lock().await;
-            state::remove(&mut state.downloading, &chunk);
+            state.downloading.remove(&chunk.dataset, &chunk.chunk);
             if download_result.is_err() {
                 warn!("Failed to download chunk '{:?}', retrying", chunk);
                 self.notify(&chunk.dataset, &chunk.chunk);
                 return;
             }
-            state::add(&mut state.available, &chunk);
-            let desired_now = state::has(&state.desired, &chunk);
+            state
+                .available
+                .insert(chunk.dataset.clone(), chunk.chunk.clone());
+            let desired_now = state.desired.contains(&chunk.dataset, &chunk.chunk);
             if !desired_now {
                 info!(
                     "Chunk {:?} was unassigned during download. Scheduling removal.",
@@ -219,7 +223,7 @@ impl StateManager {
         } else {
             if available {
                 // Wait until done because removals are fast.
-                state::remove(&mut state.available, &chunk);
+                state.available.remove(&chunk.dataset, &chunk.chunk);
                 self.drop_chunk(&chunk)
                     .await
                     .with_context(|| format!("Could not remove chunk {:?}", chunk))
@@ -266,7 +270,9 @@ impl StateManager {
                 let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
                     .await
                     .context(format!("Invalid layout in '{dir}'"))?;
-                result.insert(dataset, chunks.into_iter().collect());
+                for chunk in chunks {
+                    result.insert(dataset.clone(), chunk);
+                }
             } else {
                 warn!("Invalid dataset in workdir: '{dir}'");
             }
@@ -324,10 +330,12 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
                 .map(|x| (dataset, x.into_iter().flatten().collect::<HashSet<_>>()))
         });
     }
-    let chunks: ChunkSet = futures::future::try_join_all(items.into_iter())
-        .await?
-        .into_iter()
-        .collect::<HashMap<_, _>>();
+    let chunks = ChunkSet::from_inner(
+        futures::future::try_join_all(items.into_iter())
+            .await?
+            .into_iter()
+            .collect(),
+    );
     Ok(chunks)
 }
 
