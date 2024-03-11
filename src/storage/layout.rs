@@ -14,6 +14,7 @@ use super::Filesystem;
 
 // TODO: use u64
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
+#[repr(transparent)]
 pub struct BlockNumber(u32);
 
 impl std::fmt::Display for BlockNumber {
@@ -39,6 +40,12 @@ impl From<u32> for BlockNumber {
     }
 }
 
+impl AsRef<u32> for BlockNumber {
+    fn as_ref(&self) -> &u32 {
+        &self.0
+    }
+}
+
 impl Deref for BlockNumber {
     type Target = u32;
     fn deref(&self) -> &Self::Target {
@@ -46,10 +53,10 @@ impl Deref for BlockNumber {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
+#[derive(Default, Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub struct DataChunk {
-    pub first_block: BlockNumber,
     pub last_block: BlockNumber,
+    pub first_block: BlockNumber,
     pub last_hash: String,
     pub top: BlockNumber,
 }

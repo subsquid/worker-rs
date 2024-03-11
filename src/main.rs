@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state_manager =
-        Arc::new(StateManager::new(args.data_dir.clone(), args.concurrent_downloads).await?);
+        Arc::new(StateManager::new(args.data_dir.clone()).await?);
 
     let cancellation_token = create_cancellation_token()?;
 
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
                 http_args.router.clone(),
             ));
             let worker = Worker::new(state_manager.clone(), transport);
-            let worker_future = worker.run(args.ping_interval_sec, cancellation_token.clone());
+            let worker_future = worker.run(args.ping_interval_sec, cancellation_token.clone(), args.concurrent_downloads);
             let server_future =
                 tokio::spawn(Server::new(state_manager, http_args).run(cancellation_token));
             let result = worker_future.await;
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
             let worker = Worker::new(state_manager.clone(), transport.clone());
-            let result = worker.run(args.ping_interval_sec, cancellation_token).await;
+            let result = worker.run(args.ping_interval_sec, cancellation_token, args.concurrent_downloads).await;
             transport.stop().await?;
             result?;
         }

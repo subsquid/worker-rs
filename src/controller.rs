@@ -30,6 +30,7 @@ impl<T: Transport + 'static> Worker<T> {
         &self,
         ping_interval: Duration,
         cancellation_token: CancellationToken,
+        concurrent_downloads: usize
     ) -> Result<(), JoinError> {
         let transport = self.transport.clone();
         let state_manager = self.state_manager.clone();
@@ -70,7 +71,7 @@ impl<T: Transport + 'static> Worker<T> {
                 "state_manager",
                 tokio::spawn({
                     let cancellation_token = cancellation_token.clone();
-                    async move { state_manager.run(cancellation_token).await }
+                    async move { state_manager.run(cancellation_token, concurrent_downloads).await }
                 }),
             ),
         ];
@@ -100,7 +101,7 @@ impl<T: Transport + 'static> Worker<T> {
         cancellation_token: CancellationToken,
     ) {
         loop {
-            let status = state_manager.current_status().await;
+            let status = state_manager.current_status();
             let result = transport
                 .send_ping(crate::transport::State {
                     datasets: status.available,
@@ -181,11 +182,11 @@ pub async fn run_query(
     query: BatchRequest,
     dataset: Dataset,
 ) -> Result<QueryResult, QueryError> {
-    let path = state_manager
-        .find_chunk(&dataset, (query.from_block as u32).into())
-        .await;
+    let guard = state_manager
+        .find_chunks(&dataset, (query.from_block as u32).into())?;
+    let path = guard.iter().next();
     if let Some(path) = path {
-        let ctx = query::context::prepare_query_context(&path).await.unwrap();
+        let ctx = query::context::prepare_query_context(path).await.unwrap();
         let result = query::processor::process_query(&ctx, query).await;
         result.map_err(From::from)
     } else {
