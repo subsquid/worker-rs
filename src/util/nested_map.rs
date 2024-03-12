@@ -1,7 +1,7 @@
 use std::{collections::HashMap, hash::Hash};
 
 #[repr(transparent)]
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct NestedMap<K1, K2, V> {
     inner: HashMap<K1, HashMap<K2, V>>,
 }
@@ -15,6 +15,19 @@ impl<K1: Eq + Hash, K2: Eq + Hash, V> NestedMap<K1, K2, V> {
 
     pub fn inner(&self) -> &HashMap<K1, HashMap<K2, V>> {
         &self.inner
+    }
+
+    pub fn contains(&self, key1: &K1, key2: &K2) -> bool {
+        match self.inner.get(key1) {
+            Some(nested) => nested.contains_key(key2),
+            None => false,
+        }
+    }
+
+    pub fn get_mut(&mut self, key1: &K1, key2: &K2) -> Option<&mut V> {
+        self.inner
+            .get_mut(key1)
+            .and_then(|nested| nested.get_mut(key2))
     }
 
     pub fn insert(&mut self, key1: K1, key2: K2, value: V) -> Option<V> {
@@ -45,12 +58,44 @@ impl<K1: Eq + Hash, K2: Eq + Hash, V> NestedMap<K1, K2, V> {
 }
 
 impl<K1: Clone, K2, V> NestedMap<K1, K2, V> {
-    fn into_iter(self) -> impl Iterator<Item = (K1, K2, V)> {
-        Box::new(
-            self.inner.into_iter().flat_map(|(k1, nested)| {
-                nested.into_iter().map(move |(k2, v)| (k1.clone(), k2, v))
-            }),
-        )
+    pub fn into_iter(self) -> impl Iterator<Item = (K1, K2, V)> {
+        self.inner
+            .into_iter()
+            .flat_map(|(k1, nested)| nested.into_iter().map(move |(k2, v)| (k1.clone(), k2, v)))
+    }
+
+    pub fn drain<'l>(&'l mut self) -> impl Iterator<Item = (K1, K2, V)> + 'l {
+        self.inner
+            .drain()
+            .flat_map(|(k1, nested)| nested.into_iter().map(move |(k2, v)| (k1.clone(), k2, v)))
+    }
+
+    pub fn iter_keys(&self) -> impl Iterator<Item = (&K1, &K2)> {
+        self.inner
+            .iter()
+            .flat_map(|(k1, nested)| nested.iter().map(move |(k2, _)| (k1, k2)))
+    }
+}
+
+impl<K1: Eq + Hash + Clone, K2: Eq + Hash + Clone, V> NestedMap<K1, K2, V> {
+    /// Removes elements specified by the predicate and returns removed entries
+    pub fn extract_if(&mut self, mut f: impl FnMut(&K1, &K2, &mut V) -> bool) -> Vec<(K1, K2, V)> {
+        let mut result = Vec::new();
+        self.inner.retain(|key1, nested| {
+            let mut to_remove = Vec::with_capacity(nested.len());
+            for (key2, v) in nested.iter_mut() {
+                if f(key1, key2, v) {
+                    // TODO: optimize out clones when `hash_extract_if` stabilizes
+                    to_remove.push(key2.clone());
+                }
+            }
+            for key2 in to_remove.into_iter() {
+                let value = nested.remove(&key2).unwrap();
+                result.push((key1.clone(), key2, value));
+            }
+            !nested.is_empty()
+        });
+        result
     }
 }
 

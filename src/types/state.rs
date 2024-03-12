@@ -6,13 +6,19 @@ use subsquid_messages::{Range, RangeSet};
 pub type ChunkSet = NestedSet<Dataset, DataChunk>;
 pub type Ranges = HashMap<Dataset, RangeSet>;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ChunkRef {
     pub dataset: Dataset,
     pub chunk: DataChunk,
 }
 
 impl std::fmt::Debug for ChunkRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self, f)
+    }
+}
+
+impl std::fmt::Display for ChunkRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.dataset, self.chunk)
     }

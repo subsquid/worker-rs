@@ -24,6 +24,10 @@ impl<K1: Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
         &self.inner
     }
 
+    pub fn inner_mut(&mut self) -> &mut HashMap<K1, HashSet<K2>> {
+        &mut self.inner
+    }
+
     pub fn into_inner(self) -> HashMap<K1, HashSet<K2>> {
         self.inner
     }
@@ -81,6 +85,35 @@ impl<K1: Clone + Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
             let k1 = k1;
             nested.into_iter().map(move |k2| (k1.clone(), k2))
         })
+    }
+
+    pub fn drain<'l>(&'l mut self) -> impl Iterator<Item = (K1, K2)> + 'l {
+        self.inner.drain().flat_map(|(k1, nested)| {
+            let k1 = k1;
+            nested.into_iter().map(move |k2| (k1.clone(), k2))
+        })
+    }
+}
+
+impl<K1: Eq + Hash + Clone, K2: Eq + Hash + Clone> NestedSet<K1, K2> {
+    /// Removes elements specified by the predicate and returns them
+    pub fn extract_if(&mut self, mut f: impl FnMut(&K1, &K2) -> bool) -> Vec<(K1, K2)> {
+        let mut result = Vec::new();
+        self.inner.retain(|key1, nested| {
+            let mut to_remove = Vec::with_capacity(nested.len());
+            for key2 in nested.iter() {
+                if f(key1, key2) {
+                    // TODO: optimize out clones when `hash_extract_if` stabilizes
+                    to_remove.push(key2.clone());
+                }
+            }
+            for key2 in to_remove.into_iter() {
+                nested.remove(&key2);
+                result.push((key1.clone(), key2));
+            }
+            !nested.is_empty()
+        });
+        result
     }
 }
 

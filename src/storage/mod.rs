@@ -7,6 +7,7 @@ pub mod layout;
 pub mod local_fs;
 pub mod manager;
 pub mod s3_fs;
+pub mod state;
 
 #[allow(async_fn_in_trait)]
 pub trait Filesystem {
