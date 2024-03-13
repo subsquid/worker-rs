@@ -25,6 +25,7 @@ impl std::fmt::Display for ChunkRef {
 }
 
 pub fn to_ranges(state: ChunkSet) -> Ranges {
+    // TODO: merge adjacent ranges
     state
         .into_inner()
         .into_iter()

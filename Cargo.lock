@@ -6332,6 +6332,7 @@ dependencies = [
  "lazy_static",
  "opentelemetry",
  "opentelemetry-jaeger",
+ "parking_lot",
  "prometheus",
  "prost",
  "regex",

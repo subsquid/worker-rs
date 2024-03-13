@@ -19,14 +19,19 @@ pub struct State {
 
 #[derive(Default, Debug)]
 pub struct UpdateResult {
-    canceled: ChunkSet,
-    removed: ChunkSet,
+    pub cancelled: ChunkSet,
+    pub removed: ChunkSet,
 }
 
 #[derive(Debug)]
 pub enum UpdateStatus {
     Unchanged,
     Updated(UpdateResult),
+}
+
+pub struct Status {
+    pub available: ChunkSet,
+    pub downloading: ChunkSet,
 }
 
 impl State {
@@ -67,7 +72,7 @@ impl State {
             .downloading
             .extract_if(|ds, chunk| !desired.contains(ds, chunk))
         {
-            result.canceled.insert(dataset, chunk);
+            result.cancelled.insert(dataset, chunk);
             updated = true;
         }
 
@@ -116,9 +121,15 @@ impl State {
     }
 
     pub fn complete_download(&mut self, chunk: &ChunkRef) {
-        self.downloading.remove(&chunk.dataset, &chunk.chunk);
-        self.available
-            .insert(chunk.dataset.clone(), chunk.chunk.clone(), 1);
+        let was_present = self.downloading.remove(&chunk.dataset, &chunk.chunk);
+        if !was_present {
+            // The chunk has finished download before being cancelled. It should be removed now
+            self.to_remove
+                .insert(chunk.dataset.clone(), chunk.chunk.clone());
+        } else {
+            self.available
+                .insert(chunk.dataset.clone(), chunk.chunk.clone(), 1);
+        }
     }
 
     // TODO: consider storing chunks in a sorted order and finding the requested range in the State itself
@@ -139,6 +150,18 @@ impl State {
     ) {
         for chunk in chunks {
             self.remove_chunk(dataset, chunk);
+        }
+    }
+
+    #[instrument(skip_all)]
+    pub fn status(&self) -> Status {
+        Status {
+            downloading: self.to_download.clone().union(self.downloading.clone()),
+            available: self
+                .available
+                .iter_keys()
+                .map(|(ds, chunk)| (ds.clone(), chunk.clone()))
+                .collect(),
         }
     }
 
@@ -208,7 +231,7 @@ mod tests {
                     &[(a.dataset, a.chunk)]
                 );
                 assert_eq!(
-                    result.canceled.into_iter().collect::<Vec<_>>(),
+                    result.cancelled.into_iter().collect::<Vec<_>>(),
                     &[(c.dataset, c.chunk)]
                 );
             }

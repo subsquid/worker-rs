@@ -80,6 +80,15 @@ impl<K1: Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
 }
 
 impl<K1: Clone + Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
+    pub fn union(mut self, other: Self) -> Self {
+        for (key1, nested) in other.inner {
+            for key2 in nested {
+                self.insert(key1.clone(), key2);
+            }
+        }
+        self
+    }
+
     pub fn into_iter(self) -> impl Iterator<Item = (K1, K2)> {
         self.inner.into_iter().flat_map(|(k1, nested)| {
             let k1 = k1;

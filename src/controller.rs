@@ -30,6 +30,7 @@ impl<T: Transport + 'static> Worker<T> {
         &self,
         ping_interval: Duration,
         cancellation_token: CancellationToken,
+        concurrent_downloads: usize
     ) -> Result<(), JoinError> {
         let transport = self.transport.clone();
         let state_manager = self.state_manager.clone();
@@ -70,7 +71,7 @@ impl<T: Transport + 'static> Worker<T> {
                 "state_manager",
                 tokio::spawn({
                     let cancellation_token = cancellation_token.clone();
-                    async move { state_manager.run(cancellation_token).await }
+                    async move { state_manager.run(cancellation_token, concurrent_downloads).await }
                 }),
             ),
         ];

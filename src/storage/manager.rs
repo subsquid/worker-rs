@@ -1,40 +1,32 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
+use async_stream::stream;
 use camino::Utf8PathBuf as PathBuf;
-use futures::{future, StreamExt};
-use tokio::sync::Mutex;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use futures::StreamExt;
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
+use crate::types::{
+    dataset,
+    state::{to_ranges, ChunkRef, ChunkSet, Ranges},
+};
+
 use super::{
+    downloader::ChunkDownloader,
     layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
     s3_fs::S3Filesystem,
-};
-use crate::{
-    storage::Filesystem,
-    types::{
-        dataset::{self, Dataset},
-        state::{self, to_ranges, ChunkRef, ChunkSet, Ranges},
-    },
-    util::UseOnce,
+    state::{State, UpdateStatus},
+    Filesystem,
 };
 
 pub struct StateManager {
     fs: LocalFs,
-    state: Mutex<Inner>,
-    tx: tokio::sync::mpsc::UnboundedSender<state::ChunkRef>,
-    rx: UseOnce<tokio::sync::mpsc::UnboundedReceiver<state::ChunkRef>>,
-    notify_sync: tokio::sync::Notify,
-    concurrency: usize,
-}
-
-struct Inner {
-    available: ChunkSet,
-    downloading: ChunkSet,
-    desired: ChunkSet,
+    state: Mutex<State>,
+    downloader: ChunkDownloader,
+    notify: tokio::sync::Notify,
 }
 
 pub struct Status {
@@ -43,87 +35,75 @@ pub struct Status {
     // TODO: add stored_bytes
 }
 
-// TODO: prioritize short jobs over long ones
 impl StateManager {
-    #[instrument(name = "state_manager")]
-    pub async fn new(workdir: PathBuf, concurrency: usize) -> Result<Self> {
+    pub async fn new(workdir: PathBuf) -> Result<Self> {
         let fs = LocalFs::new(workdir);
-        Self::remove_temps(&fs)?;
-        let state = Self::load_state(&fs).await?;
-
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        remove_temps(&fs)?;
+        let existing_chunks = load_state(&fs).await?;
         Ok(Self {
             fs,
-            state: Mutex::new(Inner {
-                available: state.clone(),
-                downloading: ChunkSet::default(),
-                desired: state,
-            }),
-            tx,
-            rx: UseOnce::new(rx),
-            notify_sync: tokio::sync::Notify::new(),
-            concurrency,
+            state: Mutex::new(State::new(existing_chunks)),
+            downloader: ChunkDownloader::new(),
+            notify: tokio::sync::Notify::new(),
         })
     }
 
-    #[instrument(name = "state_manager", skip_all)]
-    pub async fn run(&self, cancellation_token: CancellationToken) {
-        UnboundedReceiverStream::new(self.rx.take().unwrap())
+    pub async fn run(&self, cancellation_token: CancellationToken, concurrency: usize) {
+        let stream = stream! {
+            loop {
+                self.notify.notified().await;
+
+                while let Some(chunk) = self.state.lock().take_next_download() {
+                    yield chunk;
+                }
+            }
+        };
+
+        let cancellation_token = &cancellation_token;
+        stream
             .take_until(cancellation_token.cancelled())
-            .for_each_concurrent(self.concurrency, |notification| {
-                let cancellation_token = &cancellation_token;
-                async move {
-                    tokio::select!(
-                        _ = self.process_notification(&notification) => {},
-                        _ = cancellation_token.cancelled() => {
-                            info!("Cancelled handling chunk {notification:?}");
-                        }
-                    )
+            .for_each_concurrent(concurrency, |chunk| async move {
+                tokio::select! {
+                    _ = self.download_chunk(&chunk) => {},
+                    _ = cancellation_token.cancelled() => {
+                        info!("Downloading chunk {chunk} cancelled");
+                    },
                 }
             })
             .await;
     }
 
-    #[instrument(skip(self))]
-    pub async fn set_desired_ranges(&self, desired: Ranges) -> Result<()> {
-        let chunks = find_all_chunks(desired).await?;
-        self.set_desired_chunks(chunks).await;
-        Ok(())
+    pub async fn current_status(&self) -> Status {
+        let status = self.state.lock().status();
+        Status {
+            available: to_ranges(status.available),
+            downloading: to_ranges(status.downloading),
+        }
     }
 
     // TODO: prevent accidental massive removals
-    #[instrument(skip_all)]
-    pub async fn set_desired_chunks(&self, desired: ChunkSet) {
-        let mut state = self.state.lock().await;
-        let previous = &mut state.desired;
+    #[instrument(err, skip(self))]
+    pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
+        self.set_desired_chunks(find_all_chunks(ranges).await?)
+    }
 
-        // All chunks in `previous` have already been scheduled for download or removal.
-        // Now only the difference between new and previous assignment needs to be scheduled.
-
-        for (dataset, ranges) in previous.inner().iter() {
-            if !desired.inner().contains_key(dataset) {
-                // Dataset was fully removed
-                for chunk in ranges {
-                    self.notify(dataset, chunk);
+    #[instrument(skip(self))]
+    fn set_desired_chunks(&self, desired: ChunkSet) -> Result<()> {
+        match self.state.lock().set_desired_chunks(desired) {
+            UpdateStatus::Updated(result) => {
+                for (dataset, chunk) in result.cancelled.into_iter() {
+                    self.cancel_download(&ChunkRef { dataset, chunk });
                 }
+                for (dataset, chunk) in result.removed.into_iter() {
+                    self.drop_chunk(&ChunkRef { dataset, chunk })?;
+                }
+                self.notify.notify_one();
+            }
+            UpdateStatus::Unchanged => {
+                info!("Assignment has not updated");
             }
         }
-        for (dataset, desired_ranges) in desired.inner().iter() {
-            if let Some(previous_ranges) = previous.inner().get(dataset) {
-                previous_ranges
-                    .symmetric_difference(desired_ranges)
-                    .for_each(|chunk| {
-                        self.notify(dataset, chunk);
-                    })
-            } else {
-                // New dataset was added
-                for chunk in desired_ranges {
-                    self.notify(dataset, chunk);
-                }
-            }
-        }
-
-        state.desired = desired;
+        Ok(())
     }
 
     // TODO: protect dir from removing while in use
@@ -132,152 +112,35 @@ impl StateManager {
         encoded_dataset: &str,
         block_number: BlockNumber,
     ) -> Option<PathBuf> {
-        let fs = self.fs.cd(encoded_dataset);
-        let stream = layout::stream_chunks(&fs, Some(&block_number), None);
-        tokio::pin!(stream);
-        match stream.next().await {
-            Some(Ok(first)) => Some(self.fs.root.join(encoded_dataset).join(first.path())),
-            Some(Err(e)) => {
-                warn!("Couldn't get first chunk: {:?}", e);
-                None
-            }
-            None => None,
-        }
+        todo!();
     }
 
-    #[allow(dead_code)]
-    pub async fn wait_sync(&self) {
-        let state = self.state.lock().await;
-        if state.available == state.desired {
-            return;
-        }
-        let future = self.notify_sync.notified();
-        drop(state); // release mutex before awaiting
-        future.await
-    }
-
-    pub async fn current_status(&self) -> Status {
-        let state = self.state.lock().await;
-        let desired = state.desired.clone();
-        let available = state.available.clone();
-        drop(state); // release mutex
-        let downloading = desired.difference(&available);
-        Status {
-            available: to_ranges(available),
-            downloading: to_ranges(downloading),
-        }
-    }
-
-    fn notify(&self, dataset: &Dataset, chunk: &DataChunk) {
-        let _ = self.tx.send(ChunkRef {
-            dataset: dataset.clone(),
-            chunk: chunk.clone(),
-        });
-    }
-
-    async fn process_notification(&self, chunk: &ChunkRef) {
-        let mut state = self.state.lock().await;
-        let available = state.available.contains(&chunk.dataset, &chunk.chunk);
-        let downloading = state.downloading.contains(&chunk.dataset, &chunk.chunk);
-        let desired = state.desired.contains(&chunk.dataset, &chunk.chunk);
-        assert!(
-            !(available && downloading),
-            "Inconsisent state: chunk {:?} is both available and downloading",
-            chunk
-        );
-        if desired {
-            if available || downloading {
-                // Chunk is already being processed. Do nothing.
-                return;
+    #[instrument(skip(self))]
+    async fn download_chunk(&self, chunk: &ChunkRef) {
+        let dst = self.chunk_path(chunk);
+        match self.downloader.download(chunk, dst).await {
+            Err(e) => {
+                warn!("Failed to download chunk '{chunk}' scheduling a retry: {e}");
+                todo!();
             }
-            state
-                .downloading
-                .insert(chunk.dataset.clone(), chunk.chunk.clone());
-            drop(state); // unlock before awaiting
-
-            let download_result = self.download_chunk(&chunk).await;
-
-            let mut state = self.state.lock().await;
-            state.downloading.remove(&chunk.dataset, &chunk.chunk);
-            if download_result.is_err() {
-                warn!("Failed to download chunk '{:?}', retrying", chunk);
-                self.notify(&chunk.dataset, &chunk.chunk);
-                return;
-            }
-            state
-                .available
-                .insert(chunk.dataset.clone(), chunk.chunk.clone());
-            let desired_now = state.desired.contains(&chunk.dataset, &chunk.chunk);
-            if !desired_now {
-                info!(
-                    "Chunk {:?} was unassigned during download. Scheduling removal.",
-                    chunk
-                );
-                self.notify(&chunk.dataset, &chunk.chunk);
-                return;
-            }
-            if state.available == state.desired {
-                info!("State is in sync");
-                self.notify_sync.notify_waiters();
-            }
-        } else {
-            if available {
-                // Wait until done because removals are fast.
-                state.available.remove(&chunk.dataset, &chunk.chunk);
-                self.drop_chunk(&chunk)
-                    .await
-                    .with_context(|| format!("Could not remove chunk {:?}", chunk))
-                    .unwrap();
-                if state.available == state.desired {
-                    info!("State is in sync");
-                    self.notify_sync.notify_waiters();
-                }
-            }
-            if downloading {
-                // Some data ranges scheduled for downloading are not needed anymore.
-                // This should not usually happen so just panic in this case.
-                todo!(
-                    "Chunk removal requested while being downloaded: {:?}",
-                    chunk
-                );
+            Ok(()) => {
+                self.state.lock().complete_download(chunk);
             }
         }
     }
 
-    #[instrument(err)]
-    fn remove_temps(fs: &LocalFs) -> Result<()> {
-        for entry in glob::glob(fs.root.join("**/temp-*").as_str())? {
-            match entry {
-                Ok(path) => {
-                    info!("Removing temp dir '{}'", path.display());
-                    std::fs::remove_dir_all(&path)
-                        .context(format!("Couldn't remove dir '{}'", path.display()))?;
-                    layout::clean_chunk_ancestors(PathBuf::try_from(path)?)?;
-                }
-                Err(e) => warn!("Couldn't read dir: {}", e),
-            };
-        }
+    fn cancel_download(&self, chunk: &ChunkRef) {
+        self.downloader.cancel(chunk);
+    }
+
+    #[instrument(err, skip(self))]
+    fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
+        let path = self.chunk_path(chunk);
+        let tmp = add_temp_prefix(&path)?;
+        std::fs::rename(&path, &tmp)?;
+        std::fs::remove_dir_all(tmp)?;
+        layout::clean_chunk_ancestors(path)?;
         Ok(())
-    }
-
-    #[instrument(err, ret, skip(fs))]
-    async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
-        tokio::fs::create_dir_all(&fs.root).await?;
-        let mut result = ChunkSet::new();
-        for dir in fs.ls_root().await? {
-            let dirname = dir.file_name().unwrap();
-            if let Some(dataset) = dataset::decode_dataset(dirname) {
-                let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
-                    .await
-                    .context(format!("Invalid layout in '{dir}'"))?;
-                for chunk in chunks {
-                    result.insert(dataset.clone(), chunk);
-                }
-            } else {
-                warn!("Invalid dataset in workdir: '{dir}'");
-            }
-        }
-        Ok(result)
     }
 
     fn chunk_path(&self, chunk: &ChunkRef) -> PathBuf {
@@ -285,25 +148,6 @@ impl StateManager {
             .root
             .join(dataset::encode_dataset(&chunk.dataset))
             .join(chunk.chunk.path())
-    }
-
-    async fn download_chunk(&self, chunk: &ChunkRef) -> Result<()> {
-        S3Filesystem::with_bucket(&chunk.dataset)?
-            .download_dir(chunk.chunk.path(), self.chunk_path(chunk))
-            .await
-            .with_context(|| format!("Could not download chunk {:?}", chunk))?;
-        Ok(())
-    }
-
-    // TODO: lock used chunks
-    #[instrument(err, skip(self))]
-    async fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
-        let path = self.chunk_path(chunk);
-        let tmp = add_temp_prefix(&path)?;
-        tokio::fs::rename(&path, &tmp).await?;
-        tokio::fs::remove_dir_all(tmp).await?;
-        layout::clean_chunk_ancestors(path)?;
-        Ok(())
     }
 }
 
@@ -325,7 +169,7 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
             streams.push(stream_fut);
         }
         items.push(async {
-            future::try_join_all(streams.into_iter())
+            futures::future::try_join_all(streams.into_iter())
                 .await
                 .map(|x| (dataset, x.into_iter().flatten().collect::<HashSet<_>>()))
         });
@@ -337,6 +181,42 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
             .collect(),
     );
     Ok(chunks)
+}
+
+#[instrument(err, skip_all)]
+fn remove_temps(fs: &LocalFs) -> Result<()> {
+    for entry in glob::glob(fs.root.join("**/temp-*").as_str())? {
+        match entry {
+            Ok(path) => {
+                info!("Removing temp dir '{}'", path.display());
+                std::fs::remove_dir_all(&path)
+                    .context(format!("Couldn't remove dir '{}'", path.display()))?;
+                layout::clean_chunk_ancestors(PathBuf::try_from(path)?)?;
+            }
+            Err(e) => warn!("Couldn't read dir: {}", e),
+        };
+    }
+    Ok(())
+}
+
+#[instrument(err, ret, skip_all)]
+async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
+    tokio::fs::create_dir_all(&fs.root).await?;
+    let mut result = ChunkSet::new();
+    for dir in fs.ls_root().await? {
+        let dirname = dir.file_name().unwrap();
+        if let Some(dataset) = dataset::decode_dataset(dirname) {
+            let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
+                .await
+                .context(format!("Invalid layout in '{dir}'"))?;
+            for chunk in chunks {
+                result.insert(dataset.clone(), chunk);
+            }
+        } else {
+            warn!("Invalid dataset in workdir: '{dir}'");
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
