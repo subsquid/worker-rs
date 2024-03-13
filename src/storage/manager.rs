@@ -53,8 +53,13 @@ impl StateManager {
             loop {
                 self.notify.notified().await;
 
-                while let Some(chunk) = self.state.lock().take_next_download() {
-                    yield chunk;
+                loop {
+                    let next = self.state.lock().take_next_download();
+                    if let Some(chunk) = next {
+                        yield chunk;
+                    } else {
+                        break;
+                    }
                 }
             }
         };
