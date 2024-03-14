@@ -17,6 +17,10 @@ impl<K1: Eq + Ord, K2: Eq + Ord, V> NestedMap<K1, K2, V> {
         &self.inner
     }
 
+    pub fn len(&self) -> usize {
+        self.inner.iter().map(|(_key1, nested)| nested.len()).sum()
+    }
+
     pub fn contains(&self, key1: &K1, key2: &K2) -> bool {
         match self.inner.get(key1) {
             Some(nested) => nested.contains_key(key2),

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, BTreeSet},
     hash::Hash,
 };
 
@@ -8,28 +8,32 @@ use std::{
 pub struct NestedSet<K1, K2>
 where
     K1: Eq + Hash,
-    K2: Eq + Hash,
+    K2: Eq + Ord,
 {
-    inner: HashMap<K1, HashSet<K2>>,
+    inner: HashMap<K1, BTreeSet<K2>>,
 }
 
-impl<K1: Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
+impl<K1: Eq + Hash, K2: Eq + Ord> NestedSet<K1, K2> {
     pub fn new() -> Self {
         Self {
             inner: HashMap::new(),
         }
     }
 
-    pub fn inner(&self) -> &HashMap<K1, HashSet<K2>> {
+    pub fn inner(&self) -> &HashMap<K1, BTreeSet<K2>> {
         &self.inner
     }
 
-    pub fn inner_mut(&mut self) -> &mut HashMap<K1, HashSet<K2>> {
+    pub fn inner_mut(&mut self) -> &mut HashMap<K1, BTreeSet<K2>> {
         &mut self.inner
     }
 
-    pub fn into_inner(self) -> HashMap<K1, HashSet<K2>> {
+    pub fn into_inner(self) -> HashMap<K1, BTreeSet<K2>> {
         self.inner
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.iter().map(|(_key1, nested)| nested.len()).sum()
     }
 
     pub fn insert(&mut self, key1: K1, key2: K2) -> bool {
@@ -74,12 +78,12 @@ impl<K1: Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
         Self { inner: result }
     }
 
-    pub fn from_inner(inner: HashMap<K1, HashSet<K2>>) -> Self {
+    pub fn from_inner(inner: HashMap<K1, BTreeSet<K2>>) -> Self {
         Self { inner }
     }
 }
 
-impl<K1: Clone + Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
+impl<K1: Clone + Eq + Hash, K2: Eq + Ord> NestedSet<K1, K2> {
     pub fn union(mut self, other: Self) -> Self {
         for (key1, nested) in other.inner {
             for key2 in nested {
@@ -104,7 +108,7 @@ impl<K1: Clone + Eq + Hash, K2: Eq + Hash> NestedSet<K1, K2> {
     }
 }
 
-impl<K1: Eq + Hash + Clone, K2: Eq + Hash + Clone> NestedSet<K1, K2> {
+impl<K1: Eq + Hash + Clone, K2: Eq + Ord + Clone> NestedSet<K1, K2> {
     /// Removes elements specified by the predicate and returns them
     pub fn extract_if(&mut self, mut f: impl FnMut(&K1, &K2) -> bool) -> Vec<(K1, K2)> {
         let mut result = Vec::new();
@@ -126,7 +130,7 @@ impl<K1: Eq + Hash + Clone, K2: Eq + Hash + Clone> NestedSet<K1, K2> {
     }
 }
 
-impl<K1: Eq + Hash, K2: Eq + Hash> FromIterator<(K1, K2)> for NestedSet<K1, K2> {
+impl<K1: Eq + Hash, K2: Eq + Ord> FromIterator<(K1, K2)> for NestedSet<K1, K2> {
     fn from_iter<I: IntoIterator<Item = (K1, K2)>>(iter: I) -> Self {
         let mut result = Self::new();
         for (key1, key2) in iter {

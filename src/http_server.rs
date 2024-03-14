@@ -15,7 +15,7 @@ use prometheus::{gather, TextEncoder};
 use tokio_util::sync::CancellationToken;
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let status = state.state_manager.current_status().await;
+    let status = state.state_manager.current_status();
     Json(serde_json::json!({
         "router_url": state.args.router,
         "worker_id": state.args.worker_id,

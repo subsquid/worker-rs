@@ -193,8 +193,7 @@ impl State {
         }
     }
 
-    #[allow(unused)]
-    fn schedule_download(&mut self, chunk: ChunkRef) {
+    pub fn schedule_download(&mut self, chunk: ChunkRef) {
         self.to_download.insert(chunk.dataset, chunk.chunk);
     }
 
@@ -219,6 +218,13 @@ impl State {
             .available
             .get_mut(dataset, chunk)
             .unwrap_or_else(|| panic!("Trying to lock unknown chunk: {}/{}", dataset, chunk)) += 1;
+    }
+
+    fn report_status(&self) {
+        info!(
+            "Chunks available: {}, downloading: {}, pending downloads: {}",
+            self.available.len(), self.downloading.len(), self.to_download.len()
+        )
     }
 }
 

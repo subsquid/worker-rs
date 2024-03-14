@@ -14,6 +14,7 @@ use super::Filesystem;
 
 // TODO: use u64
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
+#[repr(transparent)]
 pub struct BlockNumber(u32);
 
 impl std::fmt::Display for BlockNumber {

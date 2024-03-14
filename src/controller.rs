@@ -101,7 +101,7 @@ impl<T: Transport + 'static> Worker<T> {
         cancellation_token: CancellationToken,
     ) {
         loop {
-            let status = state_manager.current_status().await;
+            let status = state_manager.current_status();
             let result = transport
                 .send_ping(crate::transport::State {
                     datasets: status.available,

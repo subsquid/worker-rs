@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use async_stream::stream;
@@ -78,7 +78,7 @@ impl StateManager {
             .await;
     }
 
-    pub async fn current_status(&self) -> Status {
+    pub fn current_status(&self) -> Status {
         let status = self.state.lock().status();
         Status {
             available: to_ranges(status.available),
@@ -138,7 +138,7 @@ impl StateManager {
         match self.downloader.download(chunk, dst).await {
             Err(e) => {
                 warn!("Failed to download chunk '{chunk}' scheduling a retry: {e}");
-                todo!();
+                self.state.lock().schedule_download(chunk.clone());
             }
             Ok(()) => {
                 self.state.lock().complete_download(chunk);
@@ -188,7 +188,7 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
         items.push(async {
             futures::future::try_join_all(streams.into_iter())
                 .await
-                .map(|x| (dataset, x.into_iter().flatten().collect::<HashSet<_>>()))
+                .map(|x| (dataset, x.into_iter().flatten().collect::<BTreeSet<_>>()))
         });
     }
     let chunks = ChunkSet::from_inner(
