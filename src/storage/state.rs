@@ -1,6 +1,6 @@
 use tracing::instrument;
 
-use super::layout::DataChunk;
+use super::layout::{BlockNumber, DataChunk};
 use crate::{
     types::{
         dataset::Dataset,
@@ -132,24 +132,52 @@ impl State {
         }
     }
 
-    // TODO: consider storing chunks in a sorted order and finding the requested range in the State itself
-    pub fn lock_chunks<'a>(
+    pub fn find_and_lock_chunks<'a>(
         &mut self,
         dataset: &Dataset,
-        chunks: impl IntoIterator<Item = &'a DataChunk>,
-    ) {
-        for chunk in chunks {
+        block_number: BlockNumber,
+    ) -> Vec<DataChunk> {
+        let from = DataChunk {
+            last_block: block_number,
+            first_block: block_number,
+            ..Default::default()
+        };
+        let mut range = match self.available.inner().get(dataset) {
+            None => return Vec::new(),
+            Some(nested) => nested.range(from..),
+        };
+        let first = match range.next() {
+            None => return Vec::new(),
+            Some((chunk, _count)) => chunk.clone(),
+        };
+        if first.first_block > block_number {
+            return Vec::new();
+        }
+
+        let mut last_block = first.last_block;
+        let mut result = vec![first];
+        for (chunk, _count) in range {
+            if *chunk.first_block.as_ref() == *last_block.as_ref() + 1 {
+                result.push(chunk.clone());
+                last_block = chunk.last_block;
+            } else {
+                break;
+            }
+        }
+
+        for chunk in result.iter() {
             self.lock_chunk(dataset, chunk);
         }
+        result
     }
 
-    pub fn release_chunks<'a>(
+    pub fn release_chunks(
         &mut self,
         dataset: &Dataset,
-        chunks: impl IntoIterator<Item = &'a DataChunk>,
+        chunks: impl IntoIterator<Item = DataChunk>,
     ) {
         for chunk in chunks {
-            self.remove_chunk(dataset, chunk);
+            self.remove_chunk(dataset, &chunk);
         }
     }
 
@@ -246,5 +274,21 @@ mod tests {
             UpdateStatus::Unchanged => {}
             _ => panic!("Unexpected set_desired_chunks result"),
         };
+    }
+
+    #[test]
+    fn test_data_chunk_comparison() {
+        // Chunks lookup depends on sorting by last_block
+        assert!(
+            DataChunk {
+                first_block: 1.into(),
+                last_block: 2.into(),
+                ..Default::default()
+            } < DataChunk {
+                first_block: 0.into(),
+                last_block: 3.into(),
+                ..Default::default()
+            }
+        )
     }
 }

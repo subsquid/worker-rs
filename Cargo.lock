@@ -6338,6 +6338,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-s3",
+ "scopeguard",
  "sentry",
  "sentry-tower",
  "serde",

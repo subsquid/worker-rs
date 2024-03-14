@@ -182,11 +182,11 @@ pub async fn run_query(
     query: BatchRequest,
     dataset: Dataset,
 ) -> Result<QueryResult, QueryError> {
-    let path = state_manager
-        .find_chunk(&dataset, (query.from_block as u32).into())
-        .await;
+    let guard = state_manager
+        .find_chunks(&dataset, (query.from_block as u32).into())?;
+    let path = guard.iter().next();
     if let Some(path) = path {
-        let ctx = query::context::prepare_query_context(&path).await.unwrap();
+        let ctx = query::context::prepare_query_context(path).await.unwrap();
         let result = query::processor::process_query(&ctx, query).await;
         result.map_err(From::from)
     } else {

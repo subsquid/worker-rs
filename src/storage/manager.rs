@@ -111,13 +111,25 @@ impl StateManager {
         Ok(())
     }
 
-    // TODO: protect dir from removing while in use
-    pub async fn find_chunk(
-        &self,
+    pub fn find_chunks<'s>(
+        &'s self,
         encoded_dataset: &str,
         block_number: BlockNumber,
-    ) -> Option<PathBuf> {
-        todo!();
+    ) -> Result<scopeguard::ScopeGuard<Vec<PathBuf>, impl FnOnce(Vec<PathBuf>) + 's>> {
+        let dataset = dataset::decode_dataset(encoded_dataset)
+            .with_context(|| format!("Couldn't decode dataset: {encoded_dataset}"))?;
+        let chunks = self
+            .state
+            .lock()
+            .find_and_lock_chunks(&dataset, block_number);
+        let paths = chunks
+            .iter()
+            .map(|chunk| self.fs.root.join(encoded_dataset).join(chunk.path()))
+            .collect();
+        let guard = scopeguard::guard(paths, move |_| {
+            self.state.lock().release_chunks(&dataset, chunks)
+        });
+        Ok(guard)
     }
 
     #[instrument(skip(self))]

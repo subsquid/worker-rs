@@ -39,6 +39,12 @@ impl From<u32> for BlockNumber {
     }
 }
 
+impl AsRef<u32> for BlockNumber {
+    fn as_ref(&self) -> &u32 {
+        &self.0
+    }
+}
+
 impl Deref for BlockNumber {
     type Target = u32;
     fn deref(&self) -> &Self::Target {
@@ -48,8 +54,8 @@ impl Deref for BlockNumber {
 
 #[derive(Default, Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub struct DataChunk {
-    pub first_block: BlockNumber,
     pub last_block: BlockNumber,
+    pub first_block: BlockNumber,
     pub last_hash: String,
     pub top: BlockNumber,
 }

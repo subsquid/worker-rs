@@ -1,19 +1,19 @@
-use std::{collections::HashMap, hash::Hash};
+use std::collections::BTreeMap;
 
 #[repr(transparent)]
 #[derive(Default, Debug, Clone)]
 pub struct NestedMap<K1, K2, V> {
-    inner: HashMap<K1, HashMap<K2, V>>,
+    inner: BTreeMap<K1, BTreeMap<K2, V>>,
 }
 
-impl<K1: Eq + Hash, K2: Eq + Hash, V> NestedMap<K1, K2, V> {
+impl<K1: Eq + Ord, K2: Eq + Ord, V> NestedMap<K1, K2, V> {
     pub fn new() -> Self {
         Self {
-            inner: HashMap::new(),
+            inner: BTreeMap::new(),
         }
     }
 
-    pub fn inner(&self) -> &HashMap<K1, HashMap<K2, V>> {
+    pub fn inner(&self) -> &BTreeMap<K1, BTreeMap<K2, V>> {
         &self.inner
     }
 
@@ -64,12 +64,6 @@ impl<K1: Clone, K2, V> NestedMap<K1, K2, V> {
             .flat_map(|(k1, nested)| nested.into_iter().map(move |(k2, v)| (k1.clone(), k2, v)))
     }
 
-    pub fn drain<'l>(&'l mut self) -> impl Iterator<Item = (K1, K2, V)> + 'l {
-        self.inner
-            .drain()
-            .flat_map(|(k1, nested)| nested.into_iter().map(move |(k2, v)| (k1.clone(), k2, v)))
-    }
-
     pub fn iter_keys(&self) -> impl Iterator<Item = (&K1, &K2)> {
         self.inner
             .iter()
@@ -77,7 +71,7 @@ impl<K1: Clone, K2, V> NestedMap<K1, K2, V> {
     }
 }
 
-impl<K1: Eq + Hash + Clone, K2: Eq + Hash + Clone, V> NestedMap<K1, K2, V> {
+impl<K1: Eq + Ord + Clone, K2: Eq + Ord + Clone, V> NestedMap<K1, K2, V> {
     /// Removes elements specified by the predicate and returns removed entries
     pub fn extract_if(&mut self, mut f: impl FnMut(&K1, &K2, &mut V) -> bool) -> Vec<(K1, K2, V)> {
         let mut result = Vec::new();
@@ -99,7 +93,7 @@ impl<K1: Eq + Hash + Clone, K2: Eq + Hash + Clone, V> NestedMap<K1, K2, V> {
     }
 }
 
-impl<K1: Eq + Hash, K2: Eq + Hash, V> FromIterator<(K1, K2, V)> for NestedMap<K1, K2, V> {
+impl<K1: Eq + Ord, K2: Eq + Ord, V> FromIterator<(K1, K2, V)> for NestedMap<K1, K2, V> {
     fn from_iter<I: IntoIterator<Item = (K1, K2, V)>>(iter: I) -> Self {
         let mut result = Self::new();
         for (key1, key2, value) in iter {
