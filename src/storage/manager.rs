@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_stream::stream;
@@ -96,11 +96,11 @@ impl StateManager {
     fn set_desired_chunks(&self, desired: ChunkSet) -> Result<()> {
         match self.state.lock().set_desired_chunks(desired) {
             UpdateStatus::Updated(result) => {
-                for (dataset, chunk) in result.cancelled.into_iter() {
-                    self.cancel_download(&ChunkRef { dataset, chunk });
+                for chunk in result.cancelled.into_iter() {
+                    self.cancel_download(&chunk);
                 }
-                for (dataset, chunk) in result.removed.into_iter() {
-                    self.drop_chunk(&ChunkRef { dataset, chunk })?;
+                for chunk in result.removed.into_iter() {
+                    self.drop_chunk(&chunk)?;
                 }
                 self.notify.notify_one();
             }
@@ -121,14 +121,12 @@ impl StateManager {
         let chunks = self
             .state
             .lock()
-            .find_and_lock_chunks(&dataset, block_number);
+            .find_and_lock_chunks(Arc::new(dataset), block_number);
         let paths = chunks
             .iter()
-            .map(|chunk| self.fs.root.join(encoded_dataset).join(chunk.path()))
+            .map(|chunk| self.fs.root.join(encoded_dataset).join(chunk.chunk.path()))
             .collect();
-        let guard = scopeguard::guard(paths, move |_| {
-            self.state.lock().release_chunks(&dataset, chunks)
-        });
+        let guard = scopeguard::guard(paths, move |_| self.state.lock().release_chunks(chunks));
         Ok(guard)
     }
 
@@ -173,6 +171,7 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
     let mut items = Vec::new();
     for (dataset, ranges) in desired {
         let rfs = S3Filesystem::with_bucket(&dataset)?;
+        let dataset = Arc::new(dataset);
         let mut streams = Vec::new();
         for range in ranges.ranges {
             let rfs = rfs.clone();
@@ -185,18 +184,25 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
             };
             streams.push(stream_fut);
         }
-        items.push(async {
+        items.push(async move {
             futures::future::try_join_all(streams.into_iter())
                 .await
-                .map(|x| (dataset, x.into_iter().flatten().collect::<BTreeSet<_>>()))
+                .map(|x| {
+                    x.into_iter()
+                        .flatten()
+                        .map(|chunk| ChunkRef {
+                            dataset: dataset.clone(),
+                            chunk,
+                        })
+                        .collect::<BTreeSet<_>>()
+                })
         });
     }
-    let chunks = ChunkSet::from_inner(
-        futures::future::try_join_all(items.into_iter())
-            .await?
-            .into_iter()
-            .collect(),
-    );
+    let chunks = futures::future::try_join_all(items.into_iter())
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
     Ok(chunks)
 }
 
@@ -226,8 +232,12 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
             let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
                 .await
                 .context(format!("Invalid layout in '{dir}'"))?;
+            let dataset = Arc::new(dataset);
             for chunk in chunks {
-                result.insert(dataset.clone(), chunk);
+                result.insert(ChunkRef {
+                    dataset: dataset.clone(),
+                    chunk,
+                });
             }
         } else {
             warn!("Invalid dataset in workdir: '{dir}'");
