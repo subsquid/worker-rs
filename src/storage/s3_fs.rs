@@ -35,7 +35,7 @@ impl S3Filesystem {
         Ok(Self { bucket })
     }
 
-    #[instrument(err, skip(self))]
+    #[instrument(skip_all)]
     pub async fn download_one(&self, path: &str, dst_path: &Path) -> Result<()> {
         // TODO: check resulting file size
         let mut writer = tokio::fs::File::create(dst_path)
@@ -51,11 +51,10 @@ impl S3Filesystem {
     ///
     /// Careful: this function never removes any parent dirs so it can produce
     /// a dangling empty dir after cleanup.
-    #[instrument(err, ret, skip(self), fields(bucket = self.bucket.name))]
+    #[instrument(skip_all)]
     pub async fn download_dir(&self, src: String, dst: PathBuf) -> Result<()> {
         let tmp = &add_temp_prefix(&dst)?;
         let files = self.ls(&src).await?;
-        info!("Scheduling download: {:?}", files);
         let mut guard = FsGuard::new(tmp)?;
         futures::future::try_join_all(files.into_iter().map(|file| async move {
             let dst_file = tmp.join(
@@ -70,7 +69,7 @@ impl S3Filesystem {
         Ok(())
     }
 
-    #[instrument(err, ret, skip(self), name = "ls", level = "debug")]
+    #[instrument(skip(self), name = "ls", level = "debug")]
     async fn ls_raw(&self, path: String) -> Result<Vec<PathBuf>> {
         let list = self.bucket.list(path, Some("/".to_owned())).await?;
         Ok(list

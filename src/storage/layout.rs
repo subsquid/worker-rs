@@ -8,7 +8,7 @@ use futures::Stream;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
-use tracing::info;
+use tracing::{info, instrument};
 
 use super::Filesystem;
 
@@ -53,7 +53,7 @@ impl Deref for BlockNumber {
     }
 }
 
-#[derive(Default, Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
+#[derive(Default, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub struct DataChunk {
     pub last_block: BlockNumber,
     pub first_block: BlockNumber,
@@ -100,6 +100,13 @@ impl std::fmt::Display for DataChunk {
     }
 }
 
+impl std::fmt::Debug for DataChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self, f)
+    }
+}
+
+#[instrument(skip_all, level = "debug")]
 async fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
     let mut entries: Vec<_> = fs
         .ls_root()
@@ -111,6 +118,7 @@ async fn list_top_dirs(fs: &impl Filesystem) -> Result<Vec<BlockNumber>> {
     Ok(entries)
 }
 
+#[instrument(skip_all, level = "debug")]
 async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<DataChunk>> {
     let mut entries: Vec<_> = fs
         .ls(&top.to_string())
@@ -123,6 +131,7 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
 }
 
 // TODO: test it
+#[instrument(skip_all, level = "debug")]
 pub fn stream_chunks<'a>(
     fs: &'a impl Filesystem,
     first_block: Option<&BlockNumber>,

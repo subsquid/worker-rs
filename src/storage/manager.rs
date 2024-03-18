@@ -1,11 +1,11 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::types::{
     dataset,
@@ -38,6 +38,8 @@ impl StateManager {
         let fs = LocalFs::new(workdir);
         remove_temps(&fs)?;
         let existing_chunks = load_state(&fs).await?;
+        debug!("Loaded state: {:?}", existing_chunks);
+
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
@@ -89,6 +91,7 @@ impl StateManager {
         }
     }
 
+    #[instrument(skip_all)]
     pub fn current_status(&self) -> Status {
         let status = self.state.lock().status();
         Status {
@@ -98,12 +101,12 @@ impl StateManager {
     }
 
     // TODO: prevent accidental massive removals
-    #[instrument(err, skip(self))]
+    #[instrument(skip(self))]
     pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
         Ok(self.set_desired_chunks(find_all_chunks(ranges).await?))
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     fn set_desired_chunks(&self, desired: ChunkSet) {
         match self.state.lock().set_desired_chunks(desired) {
             UpdateStatus::Updated => {
@@ -151,7 +154,7 @@ impl StateManager {
     }
 }
 
-#[instrument(err)]
+#[instrument(ret, level = "trace")]
 async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
     let mut items = Vec::new();
     for (dataset, ranges) in desired {
@@ -179,7 +182,7 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
                             dataset: dataset.clone(),
                             chunk,
                         })
-                        .collect::<BTreeSet<_>>()
+                        .collect::<ChunkSet>()
                 })
         });
     }
@@ -191,7 +194,7 @@ async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
     Ok(chunks)
 }
 
-#[instrument(err, skip_all)]
+#[instrument(skip_all)]
 fn remove_temps(fs: &LocalFs) -> Result<()> {
     for entry in glob::glob(fs.root.join("**/temp-*").as_str())? {
         match entry {
@@ -207,7 +210,7 @@ fn remove_temps(fs: &LocalFs) -> Result<()> {
     Ok(())
 }
 
-#[instrument(err, ret, skip_all)]
+#[instrument(skip_all)]
 async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
     tokio::fs::create_dir_all(&fs.root).await?;
     let mut result = ChunkSet::new();

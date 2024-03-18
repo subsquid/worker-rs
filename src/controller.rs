@@ -9,7 +9,7 @@ use itertools::Itertools;
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
+use tracing::{debug, instrument, warn};
 
 const PARALLEL_QUERIES: usize = 4;
 
@@ -79,7 +79,7 @@ impl<T: Transport + 'static> Worker<T> {
             let cancellation_token = cancellation_token.clone();
             async move {
                 let result = task.await;
-                info!("Task '{name}' exited");
+                debug!("Task '{name}' exited");
                 // Try to shut down the whole process
                 cancellation_token.cancel();
                 result
@@ -101,6 +101,7 @@ impl<T: Transport + 'static> Worker<T> {
         cancellation_token: CancellationToken,
     ) {
         loop {
+            debug!("Sending ping");
             let status = state_manager.current_status();
             let result = transport
                 .send_ping(crate::transport::State {
