@@ -11,8 +11,8 @@ use subsquid_network_transport::{
     transport::{P2PTransportBuilder, P2PTransportHandle},
     Keypair, PeerId,
 };
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -32,8 +32,8 @@ pub struct P2PTransport {
     scheduler_id: PeerId,
     worker_id: PeerId,
     keypair: Keypair,
-    assignments_tx: mpsc::Sender<Ranges>,
-    assignments_rx: UseOnce<mpsc::Receiver<Ranges>>,
+    assignments_tx: watch::Sender<Ranges>,
+    assignments_rx: UseOnce<watch::Receiver<Ranges>>,
     queries_tx: mpsc::Sender<QueryTask>,
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
 }
@@ -45,7 +45,7 @@ impl P2PTransport {
         let keypair = transport_builder.keypair();
         info!("Local peer ID: {worker_id}");
 
-        let (assignments_tx, assignments_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
+        let (assignments_tx, assignments_rx) = watch::channel(Default::default());
         let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
         let (msg_receiver, transport_handle) = transport_builder.run().await?;
         transport_handle.subscribe(PING_TOPIC).await?;
@@ -90,7 +90,7 @@ impl P2PTransport {
                 };
                 match envelope.msg {
                     Some(Msg::Pong(pong)) => {
-                        self.handle_pong(peer_id, pong).await;
+                        self.handle_pong(peer_id, pong);
                     }
                     Some(Msg::Query(query)) => {
                         self.handle_query(peer_id, query).await;
@@ -103,7 +103,7 @@ impl P2PTransport {
             .await;
     }
 
-    async fn handle_pong(&self, peer_id: PeerId, pong: Pong) {
+    fn handle_pong(&self, peer_id: PeerId, pong: Pong) {
         use subsquid_messages::pong::Status;
         if peer_id != self.scheduler_id {
             warn!("Wrong pong message origin: '{}'", peer_id.to_string());
@@ -122,15 +122,9 @@ impl P2PTransport {
                 warn!("Worker jailed until the end of epoch: {reason}");
             }
             Some(Status::Active(assignment)) => {
-                match self.assignments_tx.try_send(assignment.datasets) {
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        warn!("The previous assignment is still being handled");
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        panic!("Assignment subscriber dropped");
-                    }
-                    _ => {}
-                }
+                self.assignments_tx
+                    .send(assignment.datasets)
+                    .expect("Assignment subscriber dropped");
             }
             None => {
                 warn!("Invalid pong message: no status field");
@@ -260,7 +254,7 @@ impl super::Transport for P2PTransport {
 
     fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static {
         let rx = self.assignments_rx.take().unwrap();
-        ReceiverStream::new(rx)
+        WatchStream::from_changes(rx)
     }
 
     fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {

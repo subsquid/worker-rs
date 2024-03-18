@@ -3,7 +3,7 @@ use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use lazy_static::lazy_static;
 use s3::{creds::Credentials, Bucket};
 use std::{env, time::Duration};
-use tracing::{info, instrument};
+use tracing::instrument;
 
 use super::local_fs::add_temp_prefix;
 use super::{guard::FsGuard, Filesystem};
@@ -61,8 +61,7 @@ impl S3Filesystem {
                 file.file_name()
                     .unwrap_or_else(|| panic!("Couldn't parse S3 file name: '{file}'")),
             );
-            self.download_one(file.as_str(), &dst_file)
-                .await
+            self.download_one(file.as_str(), &dst_file).await
         }))
         .await?;
         guard.persist(dst)?;

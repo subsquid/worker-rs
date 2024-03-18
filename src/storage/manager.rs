@@ -112,8 +112,8 @@ impl StateManager {
             UpdateStatus::Updated => {
                 info!("Got new assignment");
                 self.notify.notify_one();
-            },
-            UpdateStatus::Unchanged => {},
+            }
+            UpdateStatus::Unchanged => {}
         }
     }
 
