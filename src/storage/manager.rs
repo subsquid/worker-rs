@@ -1,7 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result};
-use async_stream::stream;
 use camino::Utf8PathBuf as PathBuf;
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -25,7 +24,6 @@ use super::{
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
-    downloader: ChunkDownloader,
     notify: tokio::sync::Notify,
 }
 
@@ -43,39 +41,52 @@ impl StateManager {
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
-            downloader: ChunkDownloader::new(),
             notify: tokio::sync::Notify::new(),
         })
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken, concurrency: usize) {
-        let stream = stream! {
-            loop {
-                self.notify.notified().await;
+        let mut downloader = ChunkDownloader::default();
+        loop {
+            self.state.lock().report_status();
 
-                loop {
-                    let next = self.state.lock().take_next_download();
-                    if let Some(chunk) = next {
-                        yield chunk;
-                    } else {
-                        break;
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                (chunk, result) = downloader.downloaded() => {
+                    match result {
+                        Ok(()) => {
+                            self.state.lock().complete_download(&chunk, true);
+                        }
+                        Err(e) => {
+                            // TODO: skip logging if the download was cancelled
+                            warn!("Failed to download chunk '{chunk}':\n{e:?}");
+                            self.state.lock().complete_download(&chunk, false);
+                        }
                     }
                 }
+                _ = cancellation_token.cancelled() => { break }
             }
-        };
 
-        let cancellation_token = &cancellation_token;
-        stream
-            .take_until(cancellation_token.cancelled())
-            .for_each_concurrent(concurrency, |chunk| async move {
-                tokio::select! {
-                    _ = self.download_chunk(&chunk) => {},
-                    _ = cancellation_token.cancelled() => {
-                        info!("Downloading chunk {chunk} cancelled");
-                    },
+            for chunk in self.state.lock().get_stale_downloads() {
+                downloader.cancel(&chunk);
+            }
+
+            for chunk in self.state.lock().take_removals() {
+                info!("Removing chunk {chunk}");
+                self.drop_chunk(&chunk)
+                    .unwrap_or_else(|_| panic!("Couldn't remove chunk {chunk}"));
+            }
+
+            while downloader.download_count() < concurrency {
+                if let Some(chunk) = self.state.lock().take_next_download() {
+                    info!("Downloading chunk {chunk}");
+                    let dst = self.chunk_path(&chunk);
+                    downloader.start_download(chunk, dst);
+                } else {
+                    break;
                 }
-            })
-            .await;
+            }
+        }
     }
 
     pub fn current_status(&self) -> Status {
@@ -89,26 +100,18 @@ impl StateManager {
     // TODO: prevent accidental massive removals
     #[instrument(err, skip(self))]
     pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
-        self.set_desired_chunks(find_all_chunks(ranges).await?)
+        Ok(self.set_desired_chunks(find_all_chunks(ranges).await?))
     }
 
     #[instrument(skip(self))]
-    fn set_desired_chunks(&self, desired: ChunkSet) -> Result<()> {
+    fn set_desired_chunks(&self, desired: ChunkSet) {
         match self.state.lock().set_desired_chunks(desired) {
-            UpdateStatus::Updated(result) => {
-                for chunk in result.cancelled.into_iter() {
-                    self.cancel_download(&chunk);
-                }
-                for chunk in result.removed.into_iter() {
-                    self.drop_chunk(&chunk)?;
-                }
+            UpdateStatus::Updated => {
+                info!("Got new assignment");
                 self.notify.notify_one();
-            }
-            UpdateStatus::Unchanged => {
-                info!("Assignment has not updated");
-            }
+            },
+            UpdateStatus::Unchanged => {},
         }
-        Ok(())
     }
 
     pub fn find_chunks<'s>(
@@ -128,24 +131,6 @@ impl StateManager {
             .collect();
         let guard = scopeguard::guard(paths, move |_| self.state.lock().release_chunks(chunks));
         Ok(guard)
-    }
-
-    #[instrument(skip(self))]
-    async fn download_chunk(&self, chunk: &ChunkRef) {
-        let dst = self.chunk_path(chunk);
-        match self.downloader.download(chunk, dst).await {
-            Err(e) => {
-                warn!("Failed to download chunk '{chunk}' scheduling a retry: {e}");
-                self.state.lock().schedule_download(chunk.clone());
-            }
-            Ok(()) => {
-                self.state.lock().complete_download(chunk);
-            }
-        }
-    }
-
-    fn cancel_download(&self, chunk: &ChunkRef) {
-        self.downloader.cancel(chunk);
     }
 
     #[instrument(err, skip(self))]

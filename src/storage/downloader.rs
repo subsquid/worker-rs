@@ -1,57 +1,68 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
-use parking_lot::Mutex;
+use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 use crate::types::state::ChunkRef;
 
 use super::s3_fs::S3Filesystem;
 
+#[derive(Default)]
 pub struct ChunkDownloader {
-    running: Mutex<HashMap<ChunkRef, CancellationToken>>,
+    futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
+    cancel_tokens: HashMap<ChunkRef, CancellationToken>,
 }
 
 impl ChunkDownloader {
-    pub fn new() -> Self {
-        Self {
-            running: Default::default(),
+    pub fn start_download(&mut self, chunk: ChunkRef, dst: PathBuf) {
+        let cancel_token = CancellationToken::new();
+
+        let previous = self
+            .cancel_tokens
+            .insert(chunk.clone(), cancel_token.clone());
+        if previous.is_some() {
+            panic!("Chunk {chunk} is already being downloaded");
+        }
+
+        self.futures.push(tokio::spawn(async move {
+            let rfs = match S3Filesystem::with_bucket(&chunk.dataset) {
+                Ok(rfs) => rfs,
+                Err(e) => return (chunk, Err(e)),
+            };
+            tokio::select! {
+                result = rfs.download_dir(chunk.chunk.path(), dst) => {
+                    (chunk, result)
+                }
+                _ = cancel_token.cancelled_owned() => {
+                    (chunk, Err(anyhow!("Download cancelled")))
+                }
+            }
+        }));
+    }
+
+    pub fn downloaded(&mut self) -> impl FusedFuture<Output = (ChunkRef, Result<()>)> + '_ {
+        if self.futures.is_empty() {
+            futures::future::Fuse::terminated()
+        } else {
+            self.futures
+                .select_next_some()
+                .map(|result| {
+                    let (chunk, result) = result.expect("Download task panicked");
+                    self.cancel_tokens.remove(&chunk);
+                    (chunk, result)
+                })
+                .fuse()
         }
     }
 
-    pub async fn download(&self, chunk: &ChunkRef, dst: PathBuf) -> Result<()> {
-        let rfs = S3Filesystem::with_bucket(&chunk.dataset)?;
-
-        let cancel_token = CancellationToken::new();
-        self.running
-            .lock()
-            .insert(chunk.clone(), cancel_token.clone())
-            .unwrap_or_else(|| panic!("Chunk {chunk} is already being downloaded"));
-
-        let downloaded = rfs.download_dir(chunk.chunk.path(), dst);
-
-        tokio::select! {
-            result = downloaded => {
-                self.running
-                    .lock()
-                    .remove(chunk);
-                result.with_context(|| format!("Could not download chunk {:?}", chunk))?;
-            }
-            _ = cancel_token.cancelled_owned() => {
-                self.running
-                    .lock()
-                    .remove(chunk);
-                info!("Downloading chunk {chunk} cancelled");
-            }
-        };
-
-        Ok(())
+    pub fn download_count(&self) -> usize {
+        self.futures.len()
     }
 
-    pub fn cancel(&self, chunk: &ChunkRef) {
-        if let Some(cancel_token) = self.running.lock().get(chunk) {
+    pub fn cancel(&mut self, chunk: &ChunkRef) {
+        if let Some(cancel_token) = self.cancel_tokens.remove(chunk) {
             cancel_token.cancel();
         }
     }
