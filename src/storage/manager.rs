@@ -24,6 +24,7 @@ use super::{
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
+    desired_ranges: Mutex<Ranges>,
     notify: tokio::sync::Notify,
 }
 
@@ -43,6 +44,7 @@ impl StateManager {
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
+            desired_ranges: Default::default(),
             notify: tokio::sync::Notify::new(),
         })
     }
@@ -103,18 +105,23 @@ impl StateManager {
     // TODO: prevent accidental massive removals
     #[instrument(skip(self))]
     pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
-        Ok(self.set_desired_chunks(find_all_chunks(ranges).await?))
-    }
+        if *self.desired_ranges.lock() != ranges {
+            let chunks = find_all_chunks(ranges.clone()).await?;
 
-    #[instrument(skip_all)]
-    fn set_desired_chunks(&self, desired: ChunkSet) {
-        match self.state.lock().set_desired_chunks(desired) {
-            UpdateStatus::Updated => {
-                info!("Got new assignment");
-                self.notify.notify_one();
+            let mut cache = self.desired_ranges.lock();
+            let mut state = self.state.lock();
+            let result = state.set_desired_chunks(chunks);
+            *cache = ranges;
+
+            match result {
+                UpdateStatus::Updated => {
+                    info!("Got new assignment");
+                    self.notify.notify_one();
+                }
+                UpdateStatus::Unchanged => {}
             }
-            UpdateStatus::Unchanged => {}
         }
+        Ok(())
     }
 
     pub fn find_chunks<'s>(
@@ -154,7 +161,8 @@ impl StateManager {
     }
 }
 
-#[instrument(ret, level = "trace")]
+// TODO: make it faster by only iterating added ranges
+#[instrument(ret, level = "debug")]
 async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
     let mut items = Vec::new();
     for (dataset, ranges) in desired {
