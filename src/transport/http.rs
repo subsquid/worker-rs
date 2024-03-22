@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, WatchStream};
@@ -5,6 +7,8 @@ use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 use crate::{types::state::Ranges, util::UseOnce};
 
 use super::{QueryTask, State, Transport};
+
+const PING_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct HttpTransport {
     worker_id: String,
@@ -42,6 +46,7 @@ impl Transport for HttpTransport {
                 "state": state,
                 "pause": false,
             }))
+            .timeout(PING_TIMEOUT)
             .send()
             .await?
             .error_for_status()?

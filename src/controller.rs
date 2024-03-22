@@ -7,7 +7,7 @@ use crate::{
 use futures::{self, StreamExt};
 use itertools::Itertools;
 use std::{sync::Arc, time::Duration};
-use tokio::task::JoinError;
+use tokio::{task::JoinError, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
@@ -100,7 +100,16 @@ impl<T: Transport + 'static> Worker<T> {
         interval: Duration,
         cancellation_token: CancellationToken,
     ) {
+        let mut timer = tokio::time::interval(interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
+            tokio::select!(
+                _ = timer.tick() => {},
+                _ = cancellation_token.cancelled() => {
+                    // TODO: send pause request
+                    break;
+                },
+            );
             debug!("Sending ping");
             let status = state_manager.current_status();
             let result = transport
@@ -111,13 +120,6 @@ impl<T: Transport + 'static> Worker<T> {
             if let Err(err) = result {
                 warn!("Couldn't send ping: {:?}", err);
             }
-            tokio::select!(
-                _ = tokio::time::sleep(interval) => {},
-                _ = cancellation_token.cancelled() => {
-                    // TODO: send pause request
-                    break;
-                },
-            );
         }
     }
 
