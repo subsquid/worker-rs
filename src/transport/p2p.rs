@@ -25,6 +25,7 @@ type Message = subsquid_network_transport::Message<MsgContent>;
 const PING_TOPIC: &str = "worker_ping";
 const LOGS_TOPIC: &str = "worker_query_logs";
 const SERVICE_QUEUE_SIZE: usize = 16;
+const CONCURRENT_MESSAGES: usize = 32;
 
 pub struct P2PTransport {
     raw_msg_receiver: UseOnce<mpsc::Receiver<Message>>,
@@ -73,7 +74,7 @@ impl P2PTransport {
         let msg_receiver = self.raw_msg_receiver.take().unwrap();
         ReceiverStream::new(msg_receiver)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(None, |msg| async move {
+            .for_each_concurrent(CONCURRENT_MESSAGES, |msg| async move {
                 let envelope = match subsquid_messages::Envelope::decode(msg.content.as_slice()) {
                     Ok(envelope) => envelope,
                     Err(e) => {
