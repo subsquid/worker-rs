@@ -10,6 +10,7 @@ pub struct Args {
     /// Directory to keep in the data and state of this worker (defaults to cwd)
     #[clap(
         long,
+        env,
         value_name = "DIR",
         default_value = ".",
         hide_default_value(true)
@@ -44,19 +45,19 @@ pub struct Args {
 #[derive(clap::Args)]
 pub struct HttpArgs {
     /// URL of the router to connect to
-    #[clap(long, value_name = "URL")]
+    #[clap(long, env, value_name = "URL")]
     pub router: String,
 
     /// Unique id of this worker
-    #[clap(long, value_name = "UID")]
+    #[clap(long, env, value_name = "UID")]
     pub worker_id: String,
 
     /// Externally visible URL of this worker
-    #[clap(long, value_name = "URL")]
+    #[clap(long, env, value_name = "URL")]
     pub worker_url: String,
 
     /// Port to listen on
-    #[clap(short, long, default_value_t = 8000)]
+    #[clap(short, long, env, default_value_t = 8000)]
     pub port: u16,
 }
 
@@ -65,7 +66,7 @@ pub enum Mode {
     Http(HttpArgs),
     P2P {
         /// Peer ID of the scheduler
-        #[clap(long)]
+        #[clap(long, env)]
         scheduler_id: String,
 
         #[command(flatten)]
