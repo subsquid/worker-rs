@@ -1,5 +1,5 @@
 # See https://www.lpalmieri.com/posts/fast-rust-docker-builds/#cargo-chef for explanation
-FROM lukemathwalker/cargo-chef:0.1.63-rust-1.76.0 AS chef
+FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:0.1.63-rust-1.76.0 AS chef
 WORKDIR /app
 
 
@@ -19,5 +19,5 @@ RUN --mount=type=ssh cargo build --release
 
 
 FROM chef AS worker
-COPY --from=builder /app/target/release/worker ./worker
+COPY --from=builder /app/target/release/worker /app/worker
 ENTRYPOINT ["/app/worker"]
