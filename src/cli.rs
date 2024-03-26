@@ -6,6 +6,7 @@ use clap::Parser;
 use subsquid_network_transport::cli::TransportArgs;
 
 #[derive(Parser)]
+#[command(version)]
 pub struct Args {
     /// Directory to keep in the data and state of this worker (defaults to cwd)
     #[clap(
