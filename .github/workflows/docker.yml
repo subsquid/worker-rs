@@ -14,6 +14,11 @@ jobs:
     name: Build and publish docker image
     runs-on: ubuntu-latest
     steps:
+      - name: Load ssh key to fetch private dependencies
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+            ssh-private-key: ${{ secrets.NETWORK_SSH_KEY }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -31,6 +36,7 @@ jobs:
           tags: worker-rust
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          ssh: default=${{ env.SSH_AUTH_SOCK }}
 
       - name: Get version
         run: echo "WORKER_VERSION=$(docker run --rm worker-rust --version | cut -d ' ' -f2)" >> $GITHUB_ENV
@@ -45,3 +51,4 @@ jobs:
             ghcr.io/subsquid/worker-rs:${{ inputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          ssh: default=${{ env.SSH_AUTH_SOCK }}
