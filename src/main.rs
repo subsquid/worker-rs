@@ -3,10 +3,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use worker_rust::cli::{self, Args};
+use worker_rust::cli::{self, Args, P2PArgs};
 use worker_rust::controller::Worker;
+use worker_rust::gateway_allocations::allocations_checker::AllocationsChecker;
+use worker_rust::gateway_allocations::{self, allocations_checker};
 use worker_rust::http_server::Server;
 use worker_rust::storage::manager::StateManager;
 use worker_rust::transport::{http::HttpTransport, p2p::P2PTransport};
@@ -66,8 +69,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    let state_manager =
-        Arc::new(StateManager::new(args.data_dir.clone()).await?);
+    let state_manager = Arc::new(StateManager::new(args.data_dir.clone()).await?);
 
     let cancellation_token = create_cancellation_token()?;
 
@@ -79,20 +81,44 @@ async fn main() -> anyhow::Result<()> {
                 http_args.router.clone(),
             ));
             let worker = Worker::new(state_manager.clone(), transport);
-            let worker_future = worker.run(args.ping_interval_sec, cancellation_token.clone(), args.concurrent_downloads);
+            let worker_future = worker.run(
+                args.ping_interval_sec,
+                cancellation_token.clone(),
+                args.concurrent_downloads,
+            );
             let server_future =
                 tokio::spawn(Server::new(state_manager, http_args).run(cancellation_token));
             let result = worker_future.await;
             server_future.await??;
             result?;
         }
-        cli::Mode::P2P {
+        cli::Mode::P2P(P2PArgs {
             scheduler_id,
             transport: transport_args,
-        } => {
+            rpc,
+            ..
+        }) => {
             let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
+            let allocations_checker: Box<dyn AllocationsChecker> = if let Some(rpc) = rpc {
+                Box::new(
+                    allocations_checker::RpcAllocationsChecker::new(
+                        &rpc,
+                        transport.local_peer_id(),
+                    )
+                    .await?,
+                )
+            } else {
+                warn!("RPC endpoint was not provided. Skipping gateway allocations checks");
+                Box::new(allocations_checker::NoopAllocationsChecker {})
+            };
             let worker = Worker::new(state_manager.clone(), transport.clone());
-            let result = worker.run(args.ping_interval_sec, cancellation_token, args.concurrent_downloads).await;
+            let result = worker
+                .run(
+                    args.ping_interval_sec,
+                    cancellation_token,
+                    args.concurrent_downloads,
+                )
+                .await;
             transport.stop().await?;
             result?;
         }

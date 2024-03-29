@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod controller;
+pub mod gateway_allocations;
 pub mod http_server;
 pub mod query;
 pub mod storage;

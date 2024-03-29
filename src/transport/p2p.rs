@@ -226,6 +226,10 @@ impl P2PTransport {
             // TODO: add retries
         }
     }
+
+    pub fn local_peer_id(&self) -> PeerId {
+        self.worker_id
+    }
 }
 
 impl super::Transport for P2PTransport {

@@ -4,6 +4,7 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
 use subsquid_network_transport::cli::TransportArgs;
+use contract_client::RpcArgs;
 
 #[derive(Parser)]
 #[command(version)]
@@ -62,17 +63,23 @@ pub struct HttpArgs {
     pub port: u16,
 }
 
+#[derive(clap::Args)]
+pub struct P2PArgs {
+    /// Peer ID of the scheduler
+    #[clap(long, env)]
+    pub scheduler_id: String,
+
+    #[command(flatten)]
+    pub transport: TransportArgs,
+
+    #[command(flatten)]
+    pub rpc: Option<RpcArgs>,
+}
+
 #[derive(clap::Subcommand)]
 pub enum Mode {
     Http(HttpArgs),
-    P2P {
-        /// Peer ID of the scheduler
-        #[clap(long, env)]
-        scheduler_id: String,
-
-        #[command(flatten)]
-        transport: TransportArgs,
-    },
+    P2P(P2PArgs),
 }
 
 fn parse_seconds(s: &str) -> Result<Duration> {
