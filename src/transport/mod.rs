@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    query::{error::QueryError, eth::BatchRequest, processor::QueryResult},
+    query::{error::QueryError, eth::BatchRequest, result::QueryResult},
     types::{dataset::Dataset, state::Ranges},
 };
 

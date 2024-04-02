@@ -34,7 +34,7 @@ async fn run_query(
 ) -> Response {
     controller::run_query(state.state_manager.clone(), query, dataset)
         .await
-        .map(|result| Json(result))
+        .map(|result| result.raw_data)
         .into_response()
 }
 

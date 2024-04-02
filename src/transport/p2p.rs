@@ -1,8 +1,5 @@
-use std::io::Write;
-
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 use futures::StreamExt;
-use serde_json::Value as JsonValue;
 use subsquid_messages::{
     envelope::Msg, signatures::SignedMessage, DatasetRanges, Ping, Pong, ProstMsg, Query,
 };
@@ -16,7 +13,11 @@ use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::{types::state::Ranges, util::UseOnce};
+use crate::{
+    query::{error::QueryError, result::QueryResult},
+    types::state::Ranges,
+    util::UseOnce,
+};
 
 use super::QueryTask;
 
@@ -151,37 +152,32 @@ impl P2PTransport {
             );
             return;
         };
+
         let result = self.process_query(peer_id, query).await;
-        match result {
-            Ok(values) => match values.try_into() {
-                Ok(query_result) => {
-                    self.send_query_result(query_id, peer_id, Ok(query_result))
-                        .await
-                }
-                Err(e) => {
-                    error!("Couldn't encode query result: {e:?}");
-                    return;
-                }
-            },
-            Err(e) => {
-                warn!("Query {query_id} execution failed: {e:?}");
-                self.send_query_result(query_id, peer_id, Err(e)).await
-            }
-        };
+
+        if let Err(e) = &result {
+            warn!("Query {query_id} execution failed: {e:?}");
+        }
+        self.send_query_result(query_id, peer_id, result).await;
         // TODO: send logs
     }
 
-    async fn process_query(&self, peer_id: PeerId, query: Query) -> Result<Vec<JsonValue>> {
+    async fn process_query(
+        &self,
+        peer_id: PeerId,
+        query: Query,
+    ) -> std::result::Result<QueryResult, QueryError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if let (Some(dataset), Some(query_str)) = (query.dataset, query.query) {
+            let query = serde_json::from_str(&query_str).map_err(anyhow::Error::from)?;
             match self.queries_tx.try_send(QueryTask {
                 dataset,
                 peer_id,
-                query: serde_json::from_str(&query_str)?,
+                query,
                 response_sender: resp_tx,
             }) {
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    bail!("Service overloaded");
+                    Err(anyhow!("Service overloaded"))?;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     panic!("Query subscriber dropped");
@@ -189,19 +185,18 @@ impl P2PTransport {
                 _ => {}
             }
         } else {
-            bail!("Some fields are missing in proto message");
+            Err(anyhow!("Some fields are missing in proto message"))?;
         }
         resp_rx
             .await
             .expect("Query processor didn't produce a result")
-            .map_err(From::from)
     }
 
     async fn send_query_result(
         &self,
         query_id: String,
         peer_id: PeerId,
-        result: Result<QueryResult>,
+        result: std::result::Result<QueryResult, QueryError>,
     ) {
         use subsquid_messages::query_result;
         let query_result = match result {
@@ -209,8 +204,10 @@ impl P2PTransport {
                 data: result.compressed_data,
                 exec_plan: None,
             }),
-            // TODO: use separate error types for bad request and internal error
-            Err(e) => query_result::Result::BadRequest(e.to_string()),
+            Err(e @ QueryError::NotFound) => query_result::Result::BadRequest(e.to_string()),
+            Err(QueryError::NoAllocation) => query_result::Result::NoAllocation(()),
+            Err(QueryError::BadRequest(e)) => query_result::Result::BadRequest(e),
+            Err(QueryError::Other(e)) => query_result::Result::ServerError(e.to_string()),
         };
         let envelope = subsquid_messages::Envelope {
             msg: Some(Msg::QueryResult(subsquid_messages::QueryResult {
@@ -270,37 +267,5 @@ impl super::Transport for P2PTransport {
 
     async fn run(&self, cancellation_token: CancellationToken) {
         self.run(cancellation_token).await
-    }
-}
-
-struct QueryResult {
-    compressed_data: Vec<u8>,
-    data_size: usize,
-    data_sha3_256: Option<Vec<u8>>,
-}
-
-impl TryFrom<Vec<JsonValue>> for QueryResult {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Vec<JsonValue>) -> Result<Self> {
-        use flate2::write::GzEncoder;
-        use sha3::{Digest, Sha3_256};
-
-        let data = serde_json::to_vec(&value)?;
-        let data_size = data.len();
-
-        let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(&data)?;
-        let compressed_data = encoder.finish()?;
-
-        let mut hasher = Sha3_256::new();
-        hasher.update(data);
-        let hash = hasher.finalize();
-
-        Ok(Self {
-            compressed_data,
-            data_size,
-            data_sha3_256: Some(hash.to_vec()),
-        })
     }
 }

@@ -17,7 +17,7 @@ use serde_json::{map::Map as JsonMap, Value};
 use serde_rename_rule::RenameRule;
 use tracing::instrument;
 
-pub type QueryResult = Vec<Value>;
+pub(super) type QueryResult = Vec<Value>;
 
 // TODO:
 // - optimize queries

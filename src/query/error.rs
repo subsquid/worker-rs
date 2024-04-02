@@ -6,6 +6,8 @@ pub enum QueryError {
     NotFound,
     #[error("This worker doesn't have enough CU allocated")]
     NoAllocation,
+    #[error("Bad request: {0}")]
+    BadRequest(String),
     #[error("Internal error")]
     Other(#[from] anyhow::Error),
 }
@@ -13,10 +15,11 @@ pub enum QueryError {
 impl IntoResponse for QueryError {
     fn into_response(self) -> axum::response::Response {
         match self {
-            Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            Self::NoAllocation => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
+            s @ Self::NotFound => (StatusCode::NOT_FOUND, s.to_string()).into_response(),
+            s @ Self::NoAllocation => (StatusCode::TOO_MANY_REQUESTS, s.to_string()).into_response(),
+            s @ Self::BadRequest(_) => (StatusCode::BAD_REQUEST, s.to_string()).into_response(),
             Self::Other(err) => (
-                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Couldn't execute query: {:?}", err),
             )
                 .into_response(),

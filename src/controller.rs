@@ -1,6 +1,6 @@
 use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
-    query::{self, error::QueryError, eth::BatchRequest, processor::QueryResult},
+    query::{self, error::QueryError, eth::BatchRequest, result::QueryResult},
     storage::manager::StateManager,
     transport::Transport,
     types::dataset::Dataset,
@@ -208,8 +208,8 @@ pub async fn run_query(
     let path = guard.iter().next();
     if let Some(path) = path {
         let ctx = query::context::prepare_query_context(path).await.unwrap();
-        let result = query::processor::process_query(&ctx, query).await;
-        result.map_err(From::from)
+        let result = query::processor::process_query(&ctx, query).await?;
+        Ok(QueryResult::new(result, 1)?)
     } else {
         Err(QueryError::NotFound)
     }
