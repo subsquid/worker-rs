@@ -7,12 +7,12 @@ use subsquid_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::compute_units_storage::{ComputeUnitsStorage, Status};
+use super::{compute_units_storage::ComputeUnitsStorage, Status};
 
 const SINGLE_EXECUTION_COST: u64 = 1;
 
 #[async_trait]
-pub trait AllocationsChecker {
+pub trait AllocationsChecker: Sync + Send {
     async fn run(&self, polling_interval: Duration, cancellation_token: CancellationToken);
 
     async fn try_spend(&self, gateway_id: PeerId) -> Result<Status>;
@@ -41,7 +41,7 @@ pub struct RpcAllocationsChecker {
 impl RpcAllocationsChecker {
     pub async fn new(rpc_args: &contract_client::RpcArgs, peer_id: PeerId) -> Result<Self> {
         let client = contract_client::get_client(rpc_args).await?;
-        let own_id = client.worker_id(peer_id.clone()).await?;
+        let own_id = client.worker_id(peer_id).await?;
         Ok(Self {
             client,
             own_id,

@@ -1,4 +1,5 @@
 use crate::{
+    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     query::{self, error::QueryError, eth::BatchRequest, processor::QueryResult},
     storage::manager::StateManager,
     transport::Transport,
@@ -16,13 +17,19 @@ const PARALLEL_QUERIES: usize = 4;
 pub struct Worker<T: Transport> {
     state_manager: Arc<StateManager>,
     transport: Arc<T>,
+    allocations_checker: Arc<dyn AllocationsChecker>,
 }
 
 impl<T: Transport + 'static> Worker<T> {
-    pub fn new(state_manager: Arc<StateManager>, transport: Arc<T>) -> Self {
+    pub fn new(
+        state_manager: Arc<StateManager>,
+        transport: Arc<T>,
+        allocations_checker: Arc<dyn AllocationsChecker>,
+    ) -> Self {
         Self {
             state_manager,
             transport,
+            allocations_checker,
         }
     }
 
@@ -30,7 +37,7 @@ impl<T: Transport + 'static> Worker<T> {
         &self,
         ping_interval: Duration,
         cancellation_token: CancellationToken,
-        concurrent_downloads: usize
+        concurrent_downloads: usize,
     ) -> Result<(), JoinError> {
         let transport = self.transport.clone();
         let state_manager = self.state_manager.clone();
@@ -57,6 +64,7 @@ impl<T: Transport + 'static> Worker<T> {
                 tokio::spawn(Self::handle_queries_forever(
                     self.state_manager.clone(),
                     self.transport.clone(),
+                    self.allocations_checker.clone(),
                     cancellation_token.clone(),
                 )),
             ),
@@ -71,7 +79,11 @@ impl<T: Transport + 'static> Worker<T> {
                 "state_manager",
                 tokio::spawn({
                     let cancellation_token = cancellation_token.clone();
-                    async move { state_manager.run(cancellation_token, concurrent_downloads).await }
+                    async move {
+                        state_manager
+                            .run(cancellation_token, concurrent_downloads)
+                            .await
+                    }
                 }),
             ),
         ];
@@ -151,6 +163,7 @@ impl<T: Transport + 'static> Worker<T> {
     async fn handle_queries_forever(
         state_manager: Arc<StateManager>,
         transport: Arc<T>,
+        allocations_checker: Arc<dyn AllocationsChecker>,
         cancellation_token: CancellationToken,
     ) {
         let queries = transport.stream_queries();
@@ -158,18 +171,24 @@ impl<T: Transport + 'static> Worker<T> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each_concurrent(PARALLEL_QUERIES, |query_task| {
                 let state_manager = state_manager.clone();
+                let allocations_checker = allocations_checker.clone();
                 async move {
-                    let result = tokio::task::spawn(run_query(
-                        state_manager,
-                        query_task.query,
-                        query_task.dataset,
-                    ))
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(QueryError::Other(
-                            anyhow::Error::new(e).context("Query processing task panicked"),
-                        ))
-                    });
+                    let result =
+                        match allocations_checker.try_spend(query_task.peer_id).await {
+                            Ok(gateway_allocations::Status::Spent) => tokio::task::spawn(
+                                run_query(state_manager, query_task.query, query_task.dataset),
+                            )
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(QueryError::Other(
+                                    anyhow::Error::new(e).context("Query processing task panicked"),
+                                ))
+                            }),
+                            Ok(gateway_allocations::Status::NotEnoughCU) => {
+                                Err(QueryError::NoAllocation)
+                            }
+                            Err(e) => panic!("Couldn't check CU allocations: {e:?}"),
+                        };
                     if query_task.response_sender.send(result).is_err() {
                         tracing::error!("Query result couldn't be sent");
                     }
@@ -185,8 +204,7 @@ pub async fn run_query(
     query: BatchRequest,
     dataset: Dataset,
 ) -> Result<QueryResult, QueryError> {
-    let guard = state_manager
-        .find_chunks(&dataset, (query.from_block as u32).into())?;
+    let guard = state_manager.find_chunks(&dataset, (query.from_block as u32).into())?;
     let path = guard.iter().next();
     if let Some(path) = path {
         let ctx = query::context::prepare_query_context(path).await.unwrap();

@@ -151,7 +151,7 @@ impl P2PTransport {
             );
             return;
         };
-        let result = self.process_query(query).await;
+        let result = self.process_query(peer_id, query).await;
         match result {
             Ok(values) => match values.try_into() {
                 Ok(query_result) => {
@@ -171,11 +171,12 @@ impl P2PTransport {
         // TODO: send logs
     }
 
-    async fn process_query(&self, query: Query) -> Result<Vec<JsonValue>> {
+    async fn process_query(&self, peer_id: PeerId, query: Query) -> Result<Vec<JsonValue>> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if let (Some(dataset), Some(query_str)) = (query.dataset, query.query) {
             match self.queries_tx.try_send(QueryTask {
                 dataset,
+                peer_id,
                 query: serde_json::from_str(&query_str)?,
                 response_sender: resp_tx,
             }) {

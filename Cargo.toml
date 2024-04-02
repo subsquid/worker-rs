@@ -15,7 +15,7 @@ axum = "0.7.4"
 base64 = "0.21.7"
 camino = "1.1.6"
 clap = { version = "4.4.18", features = ["derive", "env"] }
-contract-client = { git = "https://github.com/subsquid/archive-router.git", version = "0.1.1" }
+contract-client = { git = "ssh://git@github.com/subsquid/archive-router.git", version = "0.1.1" }
 criterion = { version = "0.5.1", features = ["async_tokio"] }
 datafusion = "34.0.0"
 flate2 = "1.0.28"

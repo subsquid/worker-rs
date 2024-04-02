@@ -3,6 +3,7 @@ pub mod p2p;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use subsquid_network_transport::PeerId;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +20,7 @@ pub struct State {
 pub struct QueryTask {
     pub dataset: Dataset,
     pub query: BatchRequest,
+    pub peer_id: PeerId,
     pub response_sender: oneshot::Sender<std::result::Result<QueryResult, QueryError>>,
 }
 

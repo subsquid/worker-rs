@@ -8,8 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use worker_rust::cli::{self, Args, P2PArgs};
 use worker_rust::controller::Worker;
-use worker_rust::gateway_allocations::allocations_checker::AllocationsChecker;
-use worker_rust::gateway_allocations::{self, allocations_checker};
+use worker_rust::gateway_allocations::allocations_checker::{self, AllocationsChecker};
 use worker_rust::http_server::Server;
 use worker_rust::storage::manager::StateManager;
 use worker_rust::transport::{http::HttpTransport, p2p::P2PTransport};
@@ -80,7 +79,11 @@ async fn main() -> anyhow::Result<()> {
                 http_args.worker_url.clone(),
                 http_args.router.clone(),
             ));
-            let worker = Worker::new(state_manager.clone(), transport);
+            let worker = Worker::new(
+                state_manager.clone(),
+                transport,
+                Arc::new(allocations_checker::NoopAllocationsChecker {}),
+            );
             let worker_future = worker.run(
                 args.ping_interval_sec,
                 cancellation_token.clone(),
@@ -99,8 +102,8 @@ async fn main() -> anyhow::Result<()> {
             ..
         }) => {
             let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
-            let allocations_checker: Box<dyn AllocationsChecker> = if let Some(rpc) = rpc {
-                Box::new(
+            let allocations_checker: Arc<dyn AllocationsChecker> = if let Some(rpc) = rpc {
+                Arc::new(
                     allocations_checker::RpcAllocationsChecker::new(
                         &rpc,
                         transport.local_peer_id(),
@@ -109,9 +112,13 @@ async fn main() -> anyhow::Result<()> {
                 )
             } else {
                 warn!("RPC endpoint was not provided. Skipping gateway allocations checks");
-                Box::new(allocations_checker::NoopAllocationsChecker {})
+                Arc::new(allocations_checker::NoopAllocationsChecker {})
             };
-            let worker = Worker::new(state_manager.clone(), transport.clone());
+            let worker = Worker::new(
+                state_manager.clone(),
+                transport.clone(),
+                allocations_checker,
+            );
             let result = worker
                 .run(
                     args.ping_interval_sec,

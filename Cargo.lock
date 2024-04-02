@@ -1281,7 +1281,7 @@ checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 [[package]]
 name = "contract-client"
 version = "0.1.1"
-source = "git+https://github.com/subsquid/archive-router.git#aa2dad86d6735042d1aba084c5f883302541933a"
+source = "git+ssh://git@github.com/subsquid/archive-router.git#51856969aa6baa90638017e00200289162836463"
 dependencies = [
  "async-trait",
  "clap",

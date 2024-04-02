@@ -4,6 +4,8 @@ use axum::{http::StatusCode, response::IntoResponse};
 pub enum QueryError {
     #[error("This worker doesn't have any chunks in requested range")]
     NotFound,
+    #[error("This worker doesn't have enough CU allocated")]
+    NoAllocation,
     #[error("Internal error")]
     Other(#[from] anyhow::Error),
 }
@@ -11,14 +13,13 @@ pub enum QueryError {
 impl IntoResponse for QueryError {
     fn into_response(self) -> axum::response::Response {
         match self {
-            Self::NotFound => (
-                StatusCode::NOT_FOUND,
-                "This worker doesn't have any chunks in requested range",
-            ).into_response(),
+            Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
+            Self::NoAllocation => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
             Self::Other(err) => (
                 StatusCode::BAD_REQUEST,
                 format!("Couldn't execute query: {:?}", err),
-            ).into_response()
+            )
+                .into_response(),
         }
     }
 }
