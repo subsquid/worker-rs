@@ -97,11 +97,14 @@ async fn main() -> anyhow::Result<()> {
         }
         cli::Mode::P2P(P2PArgs {
             scheduler_id,
+            logs_collector_id,
             transport: transport_args,
             rpc,
             ..
         }) => {
-            let transport = Arc::new(P2PTransport::from_cli(transport_args, scheduler_id).await?);
+            let transport = Arc::new(
+                P2PTransport::from_cli(transport_args, scheduler_id, logs_collector_id).await?,
+            );
             let allocations_checker: Arc<dyn AllocationsChecker> = if let Some(rpc) = rpc {
                 Arc::new(
                     allocations_checker::RpcAllocationsChecker::new(

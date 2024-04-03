@@ -1,7 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result, Context};
 use futures::StreamExt;
+use parking_lot::Mutex;
 use subsquid_messages::{
-    envelope::Msg, signatures::SignedMessage, DatasetRanges, Ping, Pong, ProstMsg, Query,
+    envelope::Msg, query_executed, signatures::SignedMessage, DatasetRanges, InputAndOutput,
+    LogsCollected, Ping, Pong, ProstMsg, Query, QueryExecuted, SizeAndHash,
 };
 use subsquid_network_transport::{
     cli::TransportArgs,
@@ -14,9 +16,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
+    logs_storage::LogsStorage,
     query::{error::QueryError, result::QueryResult},
     types::state::Ranges,
-    util::UseOnce,
+    util::{hash::sha3_256, UseOnce},
 };
 
 use super::QueryTask;
@@ -27,11 +30,14 @@ const PING_TOPIC: &str = "worker_ping";
 const LOGS_TOPIC: &str = "worker_query_logs";
 const SERVICE_QUEUE_SIZE: usize = 16;
 const CONCURRENT_MESSAGES: usize = 32;
+const LOGS_SEND_INTERVAL_SEC: u64 = 600;
 
 pub struct P2PTransport {
     raw_msg_receiver: UseOnce<mpsc::Receiver<Message>>,
     transport_handle: P2PTransportHandle<MsgContent>,
+    logs_storage: Mutex<LogsStorage>,
     scheduler_id: PeerId,
+    logs_collector_id: PeerId,
     worker_id: PeerId,
     keypair: Keypair,
     assignments_tx: watch::Sender<Ranges>,
@@ -41,7 +47,11 @@ pub struct P2PTransport {
 }
 
 impl P2PTransport {
-    pub async fn from_cli(args: TransportArgs, scheduler_id: String) -> Result<Self> {
+    pub async fn from_cli(
+        args: TransportArgs,
+        scheduler_id: String,
+        logs_collector_id: String,
+    ) -> Result<Self> {
         let transport_builder = P2PTransportBuilder::from_cli(args).await?;
         let worker_id = transport_builder.local_peer_id();
         let keypair = transport_builder.keypair();
@@ -56,7 +66,13 @@ impl P2PTransport {
         Ok(Self {
             raw_msg_receiver: UseOnce::new(msg_receiver),
             transport_handle,
-            scheduler_id: scheduler_id.parse()?,
+            logs_storage: Default::default(),
+            scheduler_id: scheduler_id
+                .parse()
+                .context("Couldn't parse scheduler id")?,
+            logs_collector_id: logs_collector_id
+                .parse()
+                .context("Couldn't parse logs collector id")?,
             worker_id,
             keypair,
             assignments_tx,
@@ -71,7 +87,7 @@ impl P2PTransport {
         Ok(self.transport_handle.stop().await?)
     }
 
-    async fn run(&self, cancellation_token: CancellationToken) {
+    async fn run_receive_loop(&self, cancellation_token: CancellationToken) {
         let msg_receiver = self.raw_msg_receiver.take().unwrap();
         ReceiverStream::new(msg_receiver)
             .take_until(cancellation_token.cancelled_owned())
@@ -97,12 +113,55 @@ impl P2PTransport {
                     Some(Msg::Query(query)) => {
                         self.handle_query(peer_id, query).await;
                     }
+                    Some(Msg::LogsCollected(collected)) => {
+                        self.handle_logs_collected(collected, peer_id).await;
+                    }
                     _ => {
                         // ignore all other events
                     }
                 }
             })
             .await;
+    }
+
+    async fn run_send_logs_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        interval: std::time::Duration,
+    ) {
+        let mut timer = tokio::time::interval(interval);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select!(
+                _ = timer.tick() => {},
+                _ = cancellation_token.cancelled() => {
+                    break;
+                },
+            );
+
+            let logs = {
+                let mut storage = self.logs_storage.lock();
+                if !storage.is_initialized() {
+                    continue;
+                }
+                storage.take_logs()
+            };
+
+            info!("Sending {} logs to the logs collector", logs.len());
+            let envelope = subsquid_messages::Envelope {
+                msg: Some(Msg::QueryLogs(subsquid_messages::QueryLogs {
+                    queries_executed: logs,
+                })),
+            };
+            // TODO: limit message size
+            let result = self
+                .transport_handle
+                .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC)
+                .await;
+            if let Err(e) = result {
+                panic!("Couldn't send logs: {e:?}");
+            }
+        }
     }
 
     fn handle_pong(&self, peer_id: PeerId, pong: Pong) {
@@ -134,6 +193,20 @@ impl P2PTransport {
         }
     }
 
+    async fn handle_logs_collected(&self, collected: LogsCollected, peer_id: PeerId) {
+        if peer_id != self.logs_collector_id {
+            warn!("Wrong LogsCollected message origin: {peer_id}");
+            return;
+        }
+        let last_collected_seq_no = collected
+            .sequence_numbers
+            .get(&self.worker_id.to_base58())
+            .map(|&x| x as usize);
+        self.logs_storage
+            .lock()
+            .logs_collected(last_collected_seq_no);
+    }
+
     // Completes only when the query is processed and the result is sent
     async fn handle_query(&self, peer_id: PeerId, mut query: Query) {
         if !query.verify_signature(&peer_id) {
@@ -153,25 +226,37 @@ impl P2PTransport {
             return;
         };
 
-        let result = self.process_query(peer_id, query).await;
+        if !self.logs_storage.lock().is_initialized() {
+            warn!("Logs storage not initialized. Cannot execute queries yet.");
+            return;
+        }
 
+        let result = self.process_query(peer_id, &query).await;
         if let Err(e) = &result {
             warn!("Query {query_id} execution failed: {e:?}");
         }
+
+        let log = if let Err(QueryError::NoAllocation) = result {
+            None
+        } else {
+            Some(self.generate_log(&result, query, peer_id))
+        };
         self.send_query_result(query_id, peer_id, result).await;
-        // TODO: send logs
+        if let Some(log) = log {
+            self.logs_storage.lock().save_log(log);
+        }
     }
 
     async fn process_query(
         &self,
         peer_id: PeerId,
-        query: Query,
+        query: &Query,
     ) -> std::result::Result<QueryResult, QueryError> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        if let (Some(dataset), Some(query_str)) = (query.dataset, query.query) {
-            let query = serde_json::from_str(&query_str).map_err(anyhow::Error::from)?;
+        if let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) {
+            let query = serde_json::from_str(query_str).map_err(anyhow::Error::from)?;
             match self.queries_tx.try_send(QueryTask {
-                dataset,
+                dataset: dataset.clone(),
                 peer_id,
                 query,
                 response_sender: resp_tx,
@@ -228,6 +313,45 @@ impl P2PTransport {
     pub fn local_peer_id(&self) -> PeerId {
         self.worker_id
     }
+
+    fn generate_log(
+        &self,
+        query_result: &std::result::Result<QueryResult, QueryError>,
+        query: Query,
+        client_id: PeerId,
+    ) -> QueryExecuted {
+        let result = match query_result {
+            Ok(result) => query_executed::Result::Ok(InputAndOutput {
+                num_read_chunks: Some(result.num_read_chunks as u32),
+                output: Some(SizeAndHash {
+                    size: Some(result.data_size as u32),
+                    sha3_256: result.data_sha3_256.clone(),
+                }),
+            }),
+            Err(e @ QueryError::NotFound) => query_executed::Result::BadRequest(e.to_string()),
+            Err(QueryError::BadRequest(e)) => query_executed::Result::BadRequest(e.clone()),
+            Err(QueryError::Other(e)) => query_executed::Result::ServerError(e.to_string()),
+            Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
+        };
+        let query_hash = sha3_256(
+            query
+                .query
+                .as_ref()
+                .expect("Hashing empty query")
+                .as_bytes(),
+        );
+        let mut result = QueryExecuted {
+            client_id: client_id.to_base58(),
+            worker_id: self.worker_id.to_base58(),
+            query_hash,
+            query: Some(query),
+            result: Some(result),
+            exec_time_ms: None, // TODO: measure execution time
+            ..Default::default()
+        };
+        result.sign(&self.keypair).expect("Couldn't sign query log");
+        result
+    }
 }
 
 impl super::Transport for P2PTransport {
@@ -266,6 +390,12 @@ impl super::Transport for P2PTransport {
     }
 
     async fn run(&self, cancellation_token: CancellationToken) {
-        self.run(cancellation_token).await
+        tokio::join!(
+            self.run_receive_loop(cancellation_token.clone()),
+            self.run_send_logs_loop(
+                cancellation_token,
+                std::time::Duration::from_secs(LOGS_SEND_INTERVAL_SEC)
+            ),
+        );
     }
 }

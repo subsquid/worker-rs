@@ -1,3 +1,4 @@
+pub mod hash;
 pub mod iterator;
 mod once;
 pub mod tests;

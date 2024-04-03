@@ -69,6 +69,10 @@ pub struct P2PArgs {
     #[clap(long, env)]
     pub scheduler_id: String,
 
+    /// Peer ID of the logs collector
+    #[clap(long, env)]
+    pub logs_collector_id: String,
+
     #[command(flatten)]
     pub transport: TransportArgs,
 
