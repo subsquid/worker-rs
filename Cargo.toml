@@ -15,7 +15,7 @@ axum = "0.7.4"
 base64 = "0.21.7"
 camino = "1.1.6"
 clap = { version = "4.4.18", features = ["derive", "env"] }
-contract-client = { git = "ssh://git@github.com/subsquid/archive-router.git", version = "0.1.1" }
+contract-client = { git = "ssh://git@github.com/subsquid/archive-router.git", rev = "5185696" }
 criterion = { version = "0.5.1", features = ["async_tokio"] }
 datafusion = "34.0.0"
 flate2 = "1.0.28"
@@ -38,8 +38,9 @@ serde = "1.0.195"
 serde-rename-rule = "0.2.2"
 serde_json = { version = "1.0.111", features = ["preserve_order"] }
 sha3 = "0.10.8"
-subsquid-messages = { git = "ssh://git@github.com/subsquid/archive-router.git", rev = "f5e0a84", features = ["signatures"] }
-subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "d721986", features = ["metrics"] }
+sqlite = "0.34.0"
+subsquid-messages = { git = "ssh://git@github.com/subsquid/archive-router.git", rev = "5185696", features = ["signatures"] }
+subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "c083749", features = ["metrics"] }
 thiserror = "1.0.57"
 tokio = { version = "1.35.1", features = ["full", "tracing"] }
 tokio-stream = "0.1.14"

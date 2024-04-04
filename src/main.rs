@@ -11,7 +11,8 @@ use worker_rust::controller::Worker;
 use worker_rust::gateway_allocations::allocations_checker::{self, AllocationsChecker};
 use worker_rust::http_server::Server;
 use worker_rust::storage::manager::StateManager;
-use worker_rust::transport::{http::HttpTransport, p2p::P2PTransport};
+use worker_rust::transport::http::HttpTransport;
+use worker_rust::transport::p2p::create_p2p_transport;
 
 fn setup_tracing() -> Result<()> {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
@@ -103,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
             ..
         }) => {
             let transport = Arc::new(
-                P2PTransport::from_cli(transport_args, scheduler_id, logs_collector_id).await?,
+                create_p2p_transport(transport_args, scheduler_id, logs_collector_id).await?,
             );
             let allocations_checker: Arc<dyn AllocationsChecker> = if let Some(rpc) = rpc {
                 Arc::new(
@@ -122,15 +123,13 @@ async fn main() -> anyhow::Result<()> {
                 transport.clone(),
                 allocations_checker,
             );
-            let result = worker
+            worker
                 .run(
                     args.ping_interval_sec,
                     cancellation_token,
                     args.concurrent_downloads,
                 )
-                .await;
-            transport.stop().await?;
-            result?;
+                .await?;
         }
     };
     Ok(())

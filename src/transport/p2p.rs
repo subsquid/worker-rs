@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result, Context};
-use futures::StreamExt;
+use anyhow::{anyhow, Context, Result};
+use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use subsquid_messages::{
     envelope::Msg, query_executed, signatures::SignedMessage, DatasetRanges, InputAndOutput,
@@ -32,8 +32,8 @@ const SERVICE_QUEUE_SIZE: usize = 16;
 const CONCURRENT_MESSAGES: usize = 32;
 const LOGS_SEND_INTERVAL_SEC: u64 = 600;
 
-pub struct P2PTransport {
-    raw_msg_receiver: UseOnce<mpsc::Receiver<Message>>,
+pub struct P2PTransport<MsgStream> {
+    raw_msg_stream: UseOnce<MsgStream>,
     transport_handle: P2PTransportHandle<MsgContent>,
     logs_storage: Mutex<LogsStorage>,
     scheduler_id: PeerId,
@@ -46,50 +46,45 @@ pub struct P2PTransport {
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
 }
 
-impl P2PTransport {
-    pub async fn from_cli(
-        args: TransportArgs,
-        scheduler_id: String,
-        logs_collector_id: String,
-    ) -> Result<Self> {
-        let transport_builder = P2PTransportBuilder::from_cli(args).await?;
-        let worker_id = transport_builder.local_peer_id();
-        let keypair = transport_builder.keypair();
-        info!("Local peer ID: {worker_id}");
+pub async fn create_p2p_transport(
+    args: TransportArgs,
+    scheduler_id: String,
+    logs_collector_id: String,
+) -> Result<P2PTransport<impl Stream<Item = Message>>> {
+    let transport_builder = P2PTransportBuilder::from_cli(args).await?;
+    let worker_id = transport_builder.local_peer_id();
+    let keypair = transport_builder.keypair();
+    info!("Local peer ID: {worker_id}");
 
-        let (assignments_tx, assignments_rx) = watch::channel(Default::default());
-        let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
-        let (msg_receiver, transport_handle) = transport_builder.run().await?;
-        transport_handle.subscribe(PING_TOPIC).await?;
-        transport_handle.subscribe(LOGS_TOPIC).await?;
+    let (assignments_tx, assignments_rx) = watch::channel(Default::default());
+    let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
+    let (msg_receiver, transport_handle) = transport_builder.run().await?;
+    transport_handle.subscribe(PING_TOPIC).await?;
+    transport_handle.subscribe(LOGS_TOPIC).await?;
 
-        Ok(Self {
-            raw_msg_receiver: UseOnce::new(msg_receiver),
-            transport_handle,
-            logs_storage: Default::default(),
-            scheduler_id: scheduler_id
-                .parse()
-                .context("Couldn't parse scheduler id")?,
-            logs_collector_id: logs_collector_id
-                .parse()
-                .context("Couldn't parse logs collector id")?,
-            worker_id,
-            keypair,
-            assignments_tx,
-            assignments_rx: UseOnce::new(assignments_rx),
-            queries_tx,
-            queries_rx: UseOnce::new(queries_rx),
-        })
-    }
+    Ok(P2PTransport {
+        raw_msg_stream: UseOnce::new(msg_receiver),
+        transport_handle,
+        logs_storage: Default::default(),
+        scheduler_id: scheduler_id
+            .parse()
+            .context("Couldn't parse scheduler id")?,
+        logs_collector_id: logs_collector_id
+            .parse()
+            .context("Couldn't parse logs collector id")?,
+        worker_id,
+        keypair,
+        assignments_tx,
+        assignments_rx: UseOnce::new(assignments_rx),
+        queries_tx,
+        queries_rx: UseOnce::new(queries_rx),
+    })
+}
 
-    // TODO: switch to latest implementation
-    pub async fn stop(&self) -> Result<()> {
-        Ok(self.transport_handle.stop().await?)
-    }
-
+impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
     async fn run_receive_loop(&self, cancellation_token: CancellationToken) {
-        let msg_receiver = self.raw_msg_receiver.take().unwrap();
-        ReceiverStream::new(msg_receiver)
+        let msg_stream = self.raw_msg_stream.take().unwrap();
+        msg_stream
             .take_until(cancellation_token.cancelled_owned())
             .for_each_concurrent(CONCURRENT_MESSAGES, |msg| async move {
                 let envelope = match subsquid_messages::Envelope::decode(msg.content.as_slice()) {
@@ -156,8 +151,7 @@ impl P2PTransport {
             // TODO: limit message size
             let result = self
                 .transport_handle
-                .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC)
-                .await;
+                .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC);
             if let Err(e) = result {
                 panic!("Couldn't send logs: {e:?}");
             }
@@ -303,7 +297,6 @@ impl P2PTransport {
         if let Err(e) = self
             .transport_handle
             .send_direct_msg(envelope.encode_to_vec(), peer_id)
-            .await
         {
             error!("Couldn't send query result: {e:?}");
             // TODO: add retries
@@ -354,7 +347,7 @@ impl P2PTransport {
     }
 }
 
-impl super::Transport for P2PTransport {
+impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport<MsgStream> {
     async fn send_ping(&self, state: super::State) -> Result<()> {
         let mut ping = Ping {
             stored_ranges: state
@@ -374,8 +367,7 @@ impl super::Transport for P2PTransport {
             msg: Some(Msg::Ping(ping)),
         };
         self.transport_handle
-            .send_direct_msg(envelope.encode_to_vec(), self.scheduler_id)
-            .await?;
+            .send_direct_msg(envelope.encode_to_vec(), self.scheduler_id)?;
         Ok(())
     }
 
