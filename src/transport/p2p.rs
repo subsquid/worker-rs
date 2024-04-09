@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
+use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
-use parking_lot::Mutex;
 use subsquid_messages::{
     envelope::Msg, query_executed, signatures::SignedMessage, DatasetRanges, InputAndOutput,
     LogsCollected, Ping, Pong, ProstMsg, Query, QueryExecuted, SizeAndHash,
@@ -35,7 +35,7 @@ const LOGS_SEND_INTERVAL_SEC: u64 = 600;
 pub struct P2PTransport<MsgStream> {
     raw_msg_stream: UseOnce<MsgStream>,
     transport_handle: P2PTransportHandle<MsgContent>,
-    logs_storage: Mutex<LogsStorage>,
+    logs_storage: LogsStorage,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     worker_id: PeerId,
@@ -50,6 +50,7 @@ pub async fn create_p2p_transport(
     args: TransportArgs,
     scheduler_id: String,
     logs_collector_id: String,
+    logs_db_path: PathBuf,
 ) -> Result<P2PTransport<impl Stream<Item = Message>>> {
     let transport_builder = P2PTransportBuilder::from_cli(args).await?;
     let worker_id = transport_builder.local_peer_id();
@@ -65,7 +66,7 @@ pub async fn create_p2p_transport(
     Ok(P2PTransport {
         raw_msg_stream: UseOnce::new(msg_receiver),
         transport_handle,
-        logs_storage: Default::default(),
+        logs_storage: LogsStorage::new(logs_db_path.as_str()).await?,
         scheduler_id: scheduler_id
             .parse()
             .context("Couldn't parse scheduler id")?,
@@ -135,11 +136,16 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             );
 
             let logs = {
-                let mut storage = self.logs_storage.lock();
-                if !storage.is_initialized() {
+                if !self.logs_storage.is_initialized() {
                     continue;
                 }
-                storage.take_logs()
+                match self.logs_storage.get_logs().await {
+                    Ok(logs) => logs,
+                    Err(e) => {
+                        warn!("Couldn't get logs from storage: {e:?}");
+                        continue;
+                    }
+                }
             };
 
             info!("Sending {} logs to the logs collector", logs.len());
@@ -197,8 +203,8 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             .get(&self.worker_id.to_base58())
             .map(|&x| x as usize);
         self.logs_storage
-            .lock()
-            .logs_collected(last_collected_seq_no);
+            .logs_collected(last_collected_seq_no)
+            .await;
     }
 
     // Completes only when the query is processed and the result is sent
@@ -220,7 +226,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             return;
         };
 
-        if !self.logs_storage.lock().is_initialized() {
+        if !self.logs_storage.is_initialized() {
             warn!("Logs storage not initialized. Cannot execute queries yet.");
             return;
         }
@@ -237,7 +243,10 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         };
         self.send_query_result(query_id, peer_id, result).await;
         if let Some(log) = log {
-            self.logs_storage.lock().save_log(log);
+            let result = self.logs_storage.save_log(log).await;
+            if let Err(e) = result {
+                warn!("Couldn't save query log: {e:?}");
+            }
         }
     }
 

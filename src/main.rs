@@ -97,7 +97,13 @@ async fn main() -> anyhow::Result<()> {
             ..
         }) => {
             let transport = Arc::new(
-                create_p2p_transport(transport_args, scheduler_id, logs_collector_id).await?,
+                create_p2p_transport(
+                    transport_args,
+                    scheduler_id,
+                    logs_collector_id,
+                    args.data_dir.join("logs.db"),
+                )
+                .await?,
             );
             let allocations_checker: Arc<dyn AllocationsChecker> = if let Some(rpc) = rpc {
                 Arc::new(
