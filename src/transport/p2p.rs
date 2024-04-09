@@ -1,3 +1,5 @@
+use std::env;
+
 use anyhow::{anyhow, Context, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
@@ -368,7 +370,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
                 })
                 .collect(),
             worker_id: Some(self.worker_id.to_string()),
-            version: Some("0.2.1".to_owned()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ..Default::default()
         };
         ping.sign(&self.keypair)?;

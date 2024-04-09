@@ -15,5 +15,5 @@ Currently implemented features include:
 - [ ] Weighting queries
 - [x] HTTP transport
 - [x] P2P transport
-- [ ] Sending logs
-- [ ] Checking gateway allocations
+- [x] Sending logs
+- [x] Checking gateway allocations
