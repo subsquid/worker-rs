@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
 const PARALLEL_QUERIES: usize = 4;
+const NETWORK_POLLING_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct Worker<T: Transport> {
     state_manager: Arc<StateManager>,
@@ -82,6 +83,18 @@ impl<T: Transport + 'static> Worker<T> {
                     async move {
                         state_manager
                             .run(cancellation_token, concurrent_downloads)
+                            .await
+                    }
+                }),
+            ),
+            (
+                "allocations_updater",
+                tokio::spawn({
+                    let cancellation_token = cancellation_token.clone();
+                    let allocations_checker = self.allocations_checker.clone();
+                    async move {
+                        allocations_checker
+                            .run(NETWORK_POLLING_INTERVAL, cancellation_token)
                             .await
                     }
                 }),
