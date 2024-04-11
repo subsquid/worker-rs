@@ -54,12 +54,11 @@ async fn extract_data(
     let logs = ctx.table("logs").await?;
 
     let range_filter = |column| {
-        col(column).between(
-            lit(query.from_block),
-            lit(query
-                .to_block
-                .expect("Queries without 'to_block' are not supported yet")),
-        )
+        if let Some(to_block) = query.to_block {
+            col(column).between(lit(query.from_block), lit(to_block))
+        } else {
+            col(column).gt_eq(lit(query.from_block))
+        }
     };
     let all_blocks = blocks
         .filter(range_filter("number"))?
