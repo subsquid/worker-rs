@@ -15,7 +15,7 @@ use subsquid_network_transport::{
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     logs_storage::LogsStorage,
@@ -33,6 +33,7 @@ const LOGS_TOPIC: &str = "worker_query_logs";
 const SERVICE_QUEUE_SIZE: usize = 16;
 const CONCURRENT_MESSAGES: usize = 32;
 const LOGS_SEND_INTERVAL_SEC: u64 = 600;
+const LOGS_MESSAGE_MAX_BYTES: usize = 64000;
 
 pub struct P2PTransport<MsgStream> {
     raw_msg_stream: UseOnce<MsgStream>,
@@ -150,19 +151,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 }
             };
 
-            info!("Sending {} logs to the logs collector", logs.len());
-            let envelope = subsquid_messages::Envelope {
-                msg: Some(Msg::QueryLogs(subsquid_messages::QueryLogs {
-                    queries_executed: logs,
-                })),
-            };
-            // TODO: limit message size
-            let result = self
-                .transport_handle
-                .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC);
-            if let Err(e) = result {
-                panic!("Couldn't send logs: {e:?}");
-            }
+            self.send_logs(logs);
         }
     }
 
@@ -318,6 +307,30 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         self.worker_id
     }
 
+    fn send_logs(&self, logs: Vec<QueryExecuted>) {
+        info!("Sending {} logs to the logs collector", logs.len());
+        for bundle in bundle_messages(logs, LOGS_MESSAGE_MAX_BYTES) {
+            if let [log] = &bundle[..] {
+                if log.encoded_len() > LOGS_MESSAGE_MAX_BYTES {
+                    error!("Query log too big to be sent");
+                    debug!("Dropped log: {log:?}");
+                    continue;
+                }
+            }
+            let envelope = subsquid_messages::Envelope {
+                msg: Some(Msg::QueryLogs(subsquid_messages::QueryLogs {
+                    queries_executed: bundle,
+                })),
+            };
+            let result = self
+                .transport_handle
+                .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC);
+            if let Err(e) = result {
+                panic!("Couldn't send logs: {e:?}");
+            }
+        }
+    }
+
     fn generate_log(
         &self,
         query_result: &std::result::Result<QueryResult, QueryError>,
@@ -357,7 +370,6 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         result
     }
 }
-
 impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport<MsgStream> {
     async fn send_ping(&self, state: super::State) -> Result<()> {
         let mut ping = Ping {
@@ -400,5 +412,45 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
                 std::time::Duration::from_secs(LOGS_SEND_INTERVAL_SEC)
             ),
         );
+    }
+}
+
+fn bundle_messages<T: prost::Message>(
+    messages: impl IntoIterator<Item = T>,
+    size_limit: usize,
+) -> Vec<Vec<T>> {
+    let mut bundles = Vec::new();
+    let mut bundle = Vec::new();
+    let mut bundle_size = 0;
+    for msg in messages {
+        let msg_size = msg.encoded_len();
+        if bundle_size + msg_size > size_limit {
+            bundles.push(bundle);
+            bundle = Vec::new();
+            bundle_size = 0;
+        }
+        bundle.push(msg);
+        bundle_size += msg_size;
+    }
+    if !bundle.is_empty() {
+        bundles.push(bundle);
+    }
+    bundles
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bundle_messages() {
+        let messages = vec![vec![0u8; 40], vec![0u8; 40], vec![0u8; 200], vec![0u8; 90]];
+        let bundles = bundle_messages(messages, 100);
+
+        assert_eq!(bundles.len(), 3);
+        assert_eq!(bundles[0].len(), 2);
+        assert_eq!(bundles[1].len(), 1);
+        assert_eq!(bundles[2].len(), 1);
     }
 }
