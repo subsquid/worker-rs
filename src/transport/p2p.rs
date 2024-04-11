@@ -309,7 +309,11 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
 
     fn send_logs(&self, logs: Vec<QueryExecuted>) {
         info!("Sending {} logs to the logs collector", logs.len());
-        for bundle in bundle_messages(logs, LOGS_MESSAGE_MAX_BYTES) {
+        let signed_logs = logs.into_iter().map(|mut log| {
+            log.sign(&self.keypair).expect("Couldn't sign query log");
+            log
+        });
+        for bundle in bundle_messages(signed_logs, LOGS_MESSAGE_MAX_BYTES) {
             if let [log] = &bundle[..] {
                 if log.encoded_len() > LOGS_MESSAGE_MAX_BYTES {
                     error!("Query log too big to be sent");
@@ -357,17 +361,15 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 .expect("Hashing empty query")
                 .as_bytes(),
         );
-        let mut result = QueryExecuted {
+        QueryExecuted {
             client_id: client_id.to_base58(),
             worker_id: self.worker_id.to_base58(),
             query_hash,
             query: Some(query),
             result: Some(result),
-            exec_time_ms: None, // TODO: measure execution time
+            exec_time_ms: Some(0), // TODO: measure execution time
             ..Default::default()
-        };
-        result.sign(&self.keypair).expect("Couldn't sign query log");
-        result
+        }
     }
 }
 impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport<MsgStream> {

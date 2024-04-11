@@ -186,6 +186,7 @@ impl<T: Transport + 'static> Worker<T> {
                 let state_manager = state_manager.clone();
                 let allocations_checker = allocations_checker.clone();
                 async move {
+                    tracing::debug!("Running query from {}", query_task.peer_id);
                     let result =
                         match allocations_checker.try_spend(query_task.peer_id).await {
                             Ok(gateway_allocations::Status::Spent) => tokio::task::spawn(
