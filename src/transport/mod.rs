@@ -15,6 +15,7 @@ use crate::{
 #[derive(Serialize, Deserialize)]
 pub struct State {
     pub datasets: Ranges,
+    pub stored_bytes: u64,
 }
 
 pub struct QueryTask {

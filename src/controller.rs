@@ -140,6 +140,8 @@ impl<T: Transport + 'static> Worker<T> {
             let result = transport
                 .send_ping(crate::transport::State {
                     datasets: status.available,
+                    stored_bytes: status.stored_bytes,
+
                 })
                 .await;
             if let Err(err) = result {

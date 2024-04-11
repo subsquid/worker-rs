@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use camino::Utf8PathBuf as PathBuf;
+use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use futures::StreamExt;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -31,7 +31,7 @@ pub struct StateManager {
 pub struct Status {
     pub available: Ranges,
     pub downloading: Ranges,
-    // TODO: add stored_bytes
+    pub stored_bytes: u64,
 }
 
 impl StateManager {
@@ -96,9 +96,11 @@ impl StateManager {
     #[instrument(skip_all)]
     pub fn current_status(&self) -> Status {
         let status = self.state.lock().status();
+        let stored_bytes = get_directory_size(&self.fs.root);
         Status {
             available: to_ranges(status.available),
             downloading: to_ranges(status.downloading),
+            stored_bytes,
         }
     }
 
@@ -223,6 +225,9 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
     tokio::fs::create_dir_all(&fs.root).await?;
     let mut result = ChunkSet::new();
     for dir in fs.ls_root().await? {
+        if !dir.is_dir() {
+            continue;
+        }
         let dirname = dir.file_name().unwrap();
         if let Some(dataset) = dataset::decode_dataset(dirname) {
             let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
@@ -240,6 +245,28 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
         }
     }
     Ok(result)
+}
+
+fn get_directory_size(path: &Path) -> u64 {
+    let mut result = 0;
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = if let Ok(entry) = entry {
+            entry
+        } else {
+            warn!("Couldn't read dir: {entry:?}");
+            continue;
+        };
+        let metadata = if let Ok(metadata) = entry.metadata() {
+            metadata
+        } else {
+            warn!("Couldn't read metadata: {entry:?}");
+            continue;
+        };
+        if metadata.is_file() {
+            result += metadata.len();
+        }
+    }
+    result
 }
 
 #[cfg(test)]

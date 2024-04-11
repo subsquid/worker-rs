@@ -47,6 +47,7 @@ tower-http = { version = "0.5.1", features = ["catch-panic"] }
 tracing = { version = "0.1.40", features = ["async-await"] }
 tracing-opentelemetry = "0.22.0"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+walkdir = "2.5.0"
 
 [profile.release]
 debug = true

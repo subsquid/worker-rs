@@ -385,6 +385,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
                 .collect(),
             worker_id: Some(self.worker_id.to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            stored_bytes: Some(state.stored_bytes),
             ..Default::default()
         };
         ping.sign(&self.keypair)?;
@@ -439,7 +440,6 @@ fn bundle_messages<T: prost::Message>(
     }
     bundles
 }
-
 
 #[cfg(test)]
 mod tests {

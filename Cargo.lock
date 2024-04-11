@@ -7815,6 +7815,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
