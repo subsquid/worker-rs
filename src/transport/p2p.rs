@@ -1,8 +1,9 @@
-use std::env;
+use std::{env, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
+use lazy_static::lazy_static;
 use subsquid_messages::{
     envelope::Msg, query_executed, signatures::SignedMessage, DatasetRanges, InputAndOutput,
     LogsCollected, Ping, Pong, ProstMsg, Query, QueryExecuted, SizeAndHash,
@@ -32,8 +33,15 @@ const PING_TOPIC: &str = "worker_ping";
 const LOGS_TOPIC: &str = "worker_query_logs";
 const SERVICE_QUEUE_SIZE: usize = 16;
 const CONCURRENT_MESSAGES: usize = 32;
-const LOGS_SEND_INTERVAL_SEC: u64 = 600;
 const LOGS_MESSAGE_MAX_BYTES: usize = 64000;
+
+lazy_static! {
+    static ref LOGS_SEND_INTERVAL: Duration = Duration::from_secs(
+        env::var("LOGS_SEND_INTERVAL_SEC")
+            .map(|s| s.parse().expect("Invalid LOGS_SEND_INTERVAL_SEC"))
+            .unwrap_or(600)
+    );
+}
 
 pub struct P2PTransport<MsgStream> {
     raw_msg_stream: UseOnce<MsgStream>,
@@ -412,7 +420,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
             self.run_receive_loop(cancellation_token.clone()),
             self.run_send_logs_loop(
                 cancellation_token,
-                std::time::Duration::from_secs(LOGS_SEND_INTERVAL_SEC)
+                *LOGS_SEND_INTERVAL
             ),
         );
     }

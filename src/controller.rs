@@ -12,8 +12,17 @@ use tokio::{task::JoinError, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
-const PARALLEL_QUERIES: usize = 4;
-const NETWORK_POLLING_INTERVAL: Duration = Duration::from_secs(30);
+lazy_static::lazy_static! {
+    static ref PARALLEL_QUERIES: usize = std::env::var("PARALLEL_QUERIES")
+        .map(|s| s.parse().expect("Invalid PARALLEL_QUERIES"))
+        .unwrap_or(4);
+
+    static ref NETWORK_POLLING_INTERVAL: Duration = Duration::from_secs(
+        std::env::var("NETWORK_POLLING_INTERVAL_SECS")
+            .map(|s| s.parse().expect("Invalid NETWORK_POLLING_INTERVAL_SECS"))
+            .unwrap_or(30)
+    );
+}
 
 pub struct Worker<T: Transport> {
     state_manager: Arc<StateManager>,
@@ -94,7 +103,7 @@ impl<T: Transport + 'static> Worker<T> {
                     let allocations_checker = self.allocations_checker.clone();
                     async move {
                         allocations_checker
-                            .run(NETWORK_POLLING_INTERVAL, cancellation_token)
+                            .run(*NETWORK_POLLING_INTERVAL, cancellation_token)
                             .await
                     }
                 }),
@@ -141,7 +150,6 @@ impl<T: Transport + 'static> Worker<T> {
                 .send_ping(crate::transport::State {
                     datasets: status.available,
                     stored_bytes: status.stored_bytes,
-
                 })
                 .await;
             if let Err(err) = result {
@@ -184,7 +192,7 @@ impl<T: Transport + 'static> Worker<T> {
         let queries = transport.stream_queries();
         queries
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(PARALLEL_QUERIES, |query_task| {
+            .for_each_concurrent(*PARALLEL_QUERIES, |query_task| {
                 let state_manager = state_manager.clone();
                 let allocations_checker = allocations_checker.clone();
                 async move {
