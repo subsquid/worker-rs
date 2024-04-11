@@ -67,7 +67,6 @@ impl LogsStorage {
         if self.is_initialized() {
             self.db
                 .call_unwrap(move |db| {
-                    tracing::debug!("Deleting collected logs up to {}", next_seq_no);
                     db.prepare_cached("DELETE FROM query_logs WHERE seq_no < ?")
                         .expect("Couldn't prepare logs deletion query")
                         .execute([next_seq_no])
