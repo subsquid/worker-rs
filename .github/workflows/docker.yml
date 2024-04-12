@@ -25,9 +25,8 @@ jobs:
       - name: Docker login
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_LOGIN }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Docker build
         uses: docker/build-push-action@v5
@@ -47,8 +46,8 @@ jobs:
           platforms: linux/amd64,linux/arm/v7,linux/arm64/v8,linux/386
           push: true
           tags: |
-            ghcr.io/subsquid/worker-rs:${{ env.WORKER_VERSION }}
-            ghcr.io/subsquid/worker-rs:${{ inputs.tag }}
+            subsquid/p2p-worker:${{ env.WORKER_VERSION }}
+            subsquid/p2p-worker:${{ inputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           ssh: default=${{ env.SSH_AUTH_SOCK }}

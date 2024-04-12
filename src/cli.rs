@@ -37,7 +37,7 @@ pub struct Args {
     #[clap(env, hide(true), default_value_t = 3)]
     pub concurrent_downloads: usize,
 
-    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "3")]
+    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "10")]
     pub ping_interval_sec: Duration,
 
     #[clap(env, hide(true))]
