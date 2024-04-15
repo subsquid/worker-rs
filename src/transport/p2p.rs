@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
@@ -59,8 +59,8 @@ pub struct P2PTransport<MsgStream> {
 
 pub async fn create_p2p_transport(
     args: TransportArgs,
-    scheduler_id: String,
-    logs_collector_id: String,
+    scheduler_id: PeerId,
+    logs_collector_id: PeerId,
     logs_db_path: PathBuf,
 ) -> Result<P2PTransport<impl Stream<Item = Message>>> {
     let transport_builder = P2PTransportBuilder::from_cli(args).await?;
@@ -78,12 +78,8 @@ pub async fn create_p2p_transport(
         raw_msg_stream: UseOnce::new(msg_receiver),
         transport_handle,
         logs_storage: LogsStorage::new(logs_db_path.as_str()).await?,
-        scheduler_id: scheduler_id
-            .parse()
-            .context("Couldn't parse scheduler id")?,
-        logs_collector_id: logs_collector_id
-            .parse()
-            .context("Couldn't parse logs collector id")?,
+        scheduler_id,
+        logs_collector_id,
         worker_id,
         keypair,
         assignments_tx,
@@ -146,20 +142,18 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 },
             );
 
-            let logs = {
-                if !self.logs_storage.is_initialized() {
+            if !self.logs_storage.is_initialized() {
+                continue;
+            }
+            let logs = match self.logs_storage.get_logs().await {
+                Ok(logs) => logs,
+                Err(e) => {
+                    warn!("Couldn't get logs from storage: {e:?}");
                     continue;
-                }
-                match self.logs_storage.get_logs().await {
-                    Ok(logs) => logs,
-                    Err(e) => {
-                        warn!("Couldn't get logs from storage: {e:?}");
-                        continue;
-                    }
                 }
             };
 
-            self.send_logs(logs);
+            self.try_send_logs(logs);
         }
     }
 
@@ -272,7 +266,9 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 _ => {}
             }
         } else {
-            Err(anyhow!("Some fields are missing in proto message"))?;
+            Err(QueryError::BadRequest(
+                "Some fields are missing in proto message".to_owned(),
+            ))?;
         }
         resp_rx
             .await
@@ -315,7 +311,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         self.worker_id
     }
 
-    fn send_logs(&self, logs: Vec<QueryExecuted>) {
+    fn try_send_logs(&self, logs: Vec<QueryExecuted>) {
         info!("Sending {} logs to the logs collector", logs.len());
         let signed_logs = logs.into_iter().map(|mut log| {
             log.sign(&self.keypair).expect("Couldn't sign query log");
@@ -338,7 +334,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 .transport_handle
                 .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC);
             if let Err(e) = result {
-                panic!("Couldn't send logs: {e:?}");
+                warn!("Couldn't send logs: {e:?}");
             }
         }
     }
@@ -418,10 +414,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
     async fn run(&self, cancellation_token: CancellationToken) {
         tokio::join!(
             self.run_receive_loop(cancellation_token.clone()),
-            self.run_send_logs_loop(
-                cancellation_token,
-                *LOGS_SEND_INTERVAL
-            ),
+            self.run_send_logs_loop(cancellation_token, *LOGS_SEND_INTERVAL),
         );
     }
 }

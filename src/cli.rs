@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
-use subsquid_network_transport::cli::TransportArgs;
+use subsquid_network_transport::{cli::TransportArgs, PeerId};
 use contract_client::RpcArgs;
 
 #[derive(Parser)]
@@ -67,11 +67,11 @@ pub struct HttpArgs {
 pub struct P2PArgs {
     /// Peer ID of the scheduler
     #[clap(long, env)]
-    pub scheduler_id: String,
+    pub scheduler_id: PeerId,
 
     /// Peer ID of the logs collector
     #[clap(long, env)]
-    pub logs_collector_id: String,
+    pub logs_collector_id: PeerId,
 
     #[command(flatten)]
     pub transport: TransportArgs,

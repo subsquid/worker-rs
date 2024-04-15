@@ -58,7 +58,7 @@ impl<T: Transport + 'static> Worker<T> {
                     self.state_manager.clone(),
                     self.transport.clone(),
                     ping_interval,
-                    cancellation_token.clone(),
+                    cancellation_token.child_token(),
                 )),
             ),
             (
@@ -66,7 +66,7 @@ impl<T: Transport + 'static> Worker<T> {
                 tokio::spawn(Self::handle_assignments_forever(
                     self.state_manager.clone(),
                     self.transport.clone(),
-                    cancellation_token.clone(),
+                    cancellation_token.child_token(),
                 )),
             ),
             (
@@ -75,20 +75,20 @@ impl<T: Transport + 'static> Worker<T> {
                     self.state_manager.clone(),
                     self.transport.clone(),
                     self.allocations_checker.clone(),
-                    cancellation_token.clone(),
+                    cancellation_token.child_token(),
                 )),
             ),
             (
                 "transport_process",
                 tokio::spawn({
-                    let cancellation_token = cancellation_token.clone();
+                    let cancellation_token = cancellation_token.child_token();
                     async move { transport.run(cancellation_token).await }
                 }),
             ),
             (
                 "state_manager",
                 tokio::spawn({
-                    let cancellation_token = cancellation_token.clone();
+                    let cancellation_token = cancellation_token.child_token();
                     async move {
                         state_manager
                             .run(cancellation_token, concurrent_downloads)
@@ -99,7 +99,7 @@ impl<T: Transport + 'static> Worker<T> {
             (
                 "allocations_updater",
                 tokio::spawn({
-                    let cancellation_token = cancellation_token.clone();
+                    let cancellation_token = cancellation_token.child_token();
                     let allocations_checker = self.allocations_checker.clone();
                     async move {
                         allocations_checker

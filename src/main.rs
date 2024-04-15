@@ -9,7 +9,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use worker_rust::cli::{self, Args, P2PArgs};
 use worker_rust::controller::Worker;
 use worker_rust::gateway_allocations::allocations_checker::{self, AllocationsChecker};
-use worker_rust::http_server::Server;
+use worker_rust::http_server::Server as HttpServer;
 use worker_rust::storage::manager::StateManager;
 use worker_rust::transport::http::HttpTransport;
 use worker_rust::transport::p2p::create_p2p_transport;
@@ -23,6 +23,21 @@ fn setup_tracing() -> Result<()> {
         .with(sentry::integrations::tracing::layer())
         .try_init()?;
     Ok(())
+}
+
+fn setup_sentry(args: &Args) -> Option<sentry::ClientInitGuard> {
+    if let Some(dsn) = &args.sentry_dsn {
+        Some(sentry::init((
+            dsn.as_str(),
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                traces_sample_rate: 1.0,
+                ..Default::default()
+            },
+        )))
+    } else {
+        None
+    }
 }
 
 fn create_cancellation_token() -> Result<CancellationToken> {
@@ -49,18 +64,7 @@ fn create_cancellation_token() -> Result<CancellationToken> {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     setup_tracing()?;
-
-    let _sentry_guard;
-    if let Some(sentry_dsn) = &args.sentry_dsn {
-        _sentry_guard = sentry::init((
-            sentry_dsn.as_str(),
-            sentry::ClientOptions {
-                release: sentry::release_name!(),
-                traces_sample_rate: 1.0,
-                ..Default::default()
-            },
-        ));
-    }
+    let _sentry_guard = setup_sentry(&args);
 
     let state_manager = Arc::new(StateManager::new(args.data_dir.clone()).await?);
 
@@ -83,8 +87,9 @@ async fn main() -> anyhow::Result<()> {
                 cancellation_token.clone(),
                 args.concurrent_downloads,
             );
-            let server_future =
-                tokio::spawn(Server::new(state_manager, http_args).run(cancellation_token));
+            let server_future = tokio::spawn(
+                HttpServer::new(state_manager, http_args).run(cancellation_token.clone()),
+            );
             let result = worker_future.await;
             server_future.await??;
             result?;
