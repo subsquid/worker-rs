@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
-use subsquid_network_transport::{cli::TransportArgs, PeerId};
 use contract_client::RpcArgs;
+use subsquid_network_transport::{cli::TransportArgs, PeerId};
 
 #[derive(Parser)]
 #[command(version)]
@@ -18,6 +18,10 @@ pub struct Args {
         hide_default_value(true)
     )]
     pub data_dir: PathBuf,
+
+    /// Port to listen on
+    #[clap(short, long, env, default_value_t = 8000)]
+    pub port: u16,
 
     #[command(subcommand)]
     pub mode: Mode,
@@ -44,7 +48,7 @@ pub struct Args {
     pub sentry_dsn: Option<String>,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug, Clone)]
 pub struct HttpArgs {
     /// URL of the router to connect to
     #[clap(long, env, value_name = "URL")]
@@ -57,10 +61,6 @@ pub struct HttpArgs {
     /// Externally visible URL of this worker
     #[clap(long, env, value_name = "URL")]
     pub worker_url: String,
-
-    /// Port to listen on
-    #[clap(short, long, env, default_value_t = 8000)]
-    pub port: u16,
 }
 
 #[derive(clap::Args)]

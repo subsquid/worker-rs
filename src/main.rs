@@ -82,17 +82,18 @@ async fn main() -> anyhow::Result<()> {
                 transport,
                 Arc::new(allocations_checker::NoopAllocationsChecker {}),
             );
-            let worker_future = worker.run(
-                args.ping_interval_sec,
-                cancellation_token.clone(),
-                args.concurrent_downloads,
-            );
-            let server_future = tokio::spawn(
-                HttpServer::new(state_manager, http_args).run(cancellation_token.clone()),
-            );
-            let result = worker_future.await;
-            server_future.await??;
-            result?;
+            let (_, server_result) = tokio::try_join!(
+                worker.run(
+                    args.ping_interval_sec,
+                    cancellation_token.clone(),
+                    args.concurrent_downloads,
+                ),
+                tokio::spawn(
+                    HttpServer::with_http(state_manager, http_args)
+                        .run(args.port, cancellation_token.clone()),
+                )
+            )?;
+            server_result?;
         }
         cli::Mode::P2P(P2PArgs {
             scheduler_id,
@@ -127,13 +128,15 @@ async fn main() -> anyhow::Result<()> {
                 transport.clone(),
                 allocations_checker,
             );
-            worker
-                .run(
+            let (_, server_result) = tokio::try_join!(
+                worker.run(
                     args.ping_interval_sec,
-                    cancellation_token,
+                    cancellation_token.clone(),
                     args.concurrent_downloads,
-                )
-                .await?;
+                ),
+                tokio::spawn(HttpServer::with_p2p().run(args.port, cancellation_token.clone()),)
+            )?;
+            server_result?;
         }
     };
     Ok(())

@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::{mpsc, watch};
-use tokio_stream::wrappers::{ReceiverStream, WatchStream};
+use tokio::sync::watch;
+use tokio_stream::wrappers::WatchStream;
 
 use crate::{types::state::Ranges, util::UseOnce};
 
-use super::{QueryTask, State, Transport};
+use super::{State, Transport};
 
 const PING_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -16,22 +16,17 @@ pub struct HttpTransport {
     router_url: String,
     assignments_rx: UseOnce<watch::Receiver<Ranges>>,
     assignments_tx: watch::Sender<Ranges>,
-    queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
-    queries_tx: mpsc::Sender<QueryTask>,
 }
 
 impl HttpTransport {
     pub fn new(worker_id: String, worker_url: String, router_url: String) -> Self {
         let (assignments_tx, assignments_rx) = watch::channel(Default::default());
-        let (queries_tx, queries_rx) = mpsc::channel(16);
         Self {
             worker_id,
             worker_url,
             router_url,
             assignments_rx: UseOnce::new(assignments_rx),
             assignments_tx,
-            queries_rx: UseOnce::new(queries_rx),
-            queries_tx,
         }
     }
 }
@@ -62,7 +57,7 @@ impl Transport for HttpTransport {
     }
 
     fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {
-        let rx = self.queries_rx.take().unwrap();
-        ReceiverStream::new(rx)
+        // In case of HTTP transport, the queries are handled by the HTTP server directly
+        futures::stream::pending()
     }
 }
