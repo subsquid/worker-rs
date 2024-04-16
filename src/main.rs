@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
+use prometheus_client::metrics::info::Info;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
@@ -10,6 +11,7 @@ use worker_rust::cli::{self, Args, P2PArgs};
 use worker_rust::controller::Worker;
 use worker_rust::gateway_allocations::allocations_checker::{self, AllocationsChecker};
 use worker_rust::http_server::Server as HttpServer;
+use worker_rust::metrics;
 use worker_rust::storage::manager::StateManager;
 use worker_rust::transport::http::HttpTransport;
 use worker_rust::transport::p2p::create_p2p_transport;
@@ -66,12 +68,19 @@ async fn main() -> anyhow::Result<()> {
     setup_tracing()?;
     let _sentry_guard = setup_sentry(&args);
 
+    let mut metrics_registry = Default::default();
+
     let state_manager = Arc::new(StateManager::new(args.data_dir.clone()).await?);
 
     let cancellation_token = create_cancellation_token()?;
 
     match args.mode {
         cli::Mode::Http(http_args) => {
+            let info = Info::new(vec![(
+                "version".to_owned(),
+                env!("CARGO_PKG_VERSION").to_owned(),
+            )]);
+            metrics::register_metrics(&mut metrics_registry, info);
             let transport = Arc::new(HttpTransport::new(
                 http_args.worker_id.clone(),
                 http_args.worker_url.clone(),
@@ -89,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
                     args.concurrent_downloads,
                 ),
                 tokio::spawn(
-                    HttpServer::with_http(state_manager, http_args)
+                    HttpServer::with_http(state_manager, http_args, metrics_registry)
                         .run(args.port, cancellation_token.clone()),
                 )
             )?;
@@ -108,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
                     scheduler_id,
                     logs_collector_id,
                     args.data_dir.join("logs.db"),
+                    &mut metrics_registry,
                 )
                 .await?,
             );
@@ -123,6 +133,13 @@ async fn main() -> anyhow::Result<()> {
                 warn!("RPC endpoint was not provided. Skipping gateway allocations checks");
                 Arc::new(allocations_checker::NoopAllocationsChecker {})
             };
+
+            let info = Info::new(vec![
+                ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
+                ("peer_id".to_owned(), transport.local_peer_id().to_string()),
+            ]);
+            metrics::register_metrics(&mut metrics_registry, info);
+
             let worker = Worker::new(
                 state_manager.clone(),
                 transport.clone(),
@@ -134,7 +151,10 @@ async fn main() -> anyhow::Result<()> {
                     cancellation_token.clone(),
                     args.concurrent_downloads,
                 ),
-                tokio::spawn(HttpServer::with_p2p().run(args.port, cancellation_token.clone()),)
+                tokio::spawn(
+                    HttpServer::with_p2p(metrics_registry)
+                        .run(args.port, cancellation_token.clone()),
+                )
             )?;
             server_result?;
         }

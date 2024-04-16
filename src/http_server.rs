@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
     Json,
 };
-use prometheus::{gather, TextEncoder};
+use prometheus_client::{encoding::text::encode, registry::Registry};
 use tokio_util::sync::CancellationToken;
 
 async fn get_status(state_manager: Arc<StateManager>, args: HttpArgs) -> Json<serde_json::Value> {
@@ -38,11 +38,10 @@ async fn run_query(
         .into_response()
 }
 
-async fn get_metrics() -> String {
-    let encoder = TextEncoder::new();
-    encoder
-        .encode_to_string(&gather())
-        .expect("Failed to encode metrics")
+async fn get_metrics(registry: Arc<Registry>) -> String {
+    let mut buffer = String::new();
+    encode(&mut buffer, &registry).unwrap();
+    buffer
 }
 
 pub struct Server {
@@ -50,7 +49,12 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn with_http(state_manager: Arc<StateManager>, args: HttpArgs) -> Self {
+    pub fn with_http(
+        state_manager: Arc<StateManager>,
+        args: HttpArgs,
+        metrics_registry: Registry,
+    ) -> Self {
+        let metrics_registry = Arc::new(metrics_registry);
         let router = axum::Router::new()
             .route(
                 "/status",
@@ -66,14 +70,15 @@ impl Server {
                     move |path, body| run_query(state_manager, path, body)
                 }),
             )
-            .route("/metrics", get(get_metrics));
+            .route("/metrics", get(move || get_metrics(metrics_registry)));
         let router = Self::add_common_layers(router);
         Self { router }
     }
 
-    pub fn with_p2p() -> Self {
-        let router = axum::Router::new()
-            .route("/metrics", get(get_metrics));
+    pub fn with_p2p(metrics_registry: Registry) -> Self {
+        let metrics_registry = Arc::new(metrics_registry);
+        let router =
+            axum::Router::new().route("/metrics", get(move || get_metrics(metrics_registry)));
         let router = Self::add_common_layers(router);
         Self { router }
     }

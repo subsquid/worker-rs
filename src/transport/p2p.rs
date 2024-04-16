@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     logs_storage::LogsStorage,
+    metrics,
     query::{error::QueryError, result::QueryResult},
     types::state::Ranges,
     util::{hash::sha3_256, UseOnce},
@@ -62,8 +63,10 @@ pub async fn create_p2p_transport(
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     logs_db_path: PathBuf,
+    metrics_registry: &mut prometheus_client::registry::Registry,
 ) -> Result<P2PTransport<impl Stream<Item = Message>>> {
-    let transport_builder = P2PTransportBuilder::from_cli(args).await?;
+    let mut transport_builder = P2PTransportBuilder::from_cli(args).await?;
+    transport_builder.with_registry(metrics_registry);
     let worker_id = transport_builder.local_peer_id();
     let keypair = transport_builder.keypair();
     info!("Local peer ID: {worker_id}");
@@ -234,6 +237,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         } else {
             Some(self.generate_log(&result, query, peer_id))
         };
+        report_metrics(&result);
         self.send_query_result(query_id, peer_id, result).await;
         if let Some(log) = log {
             let result = self.logs_storage.save_log(log).await;
@@ -376,6 +380,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         }
     }
 }
+
 impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport<MsgStream> {
     async fn send_ping(&self, state: super::State) -> Result<()> {
         let mut ping = Ping {
@@ -440,6 +445,16 @@ fn bundle_messages<T: prost::Message>(
         bundles.push(bundle);
     }
     bundles
+}
+
+fn report_metrics(result: &std::result::Result<QueryResult, QueryError>) {
+    match result {
+        Ok(_) => metrics::QUERY_OK.inc(),
+        Err(QueryError::NotFound | QueryError::NoAllocation | QueryError::BadRequest(_)) => {
+            metrics::BAD_REQUEST.inc()
+        }
+        Err(QueryError::Other(_)) => metrics::SERVER_ERROR.inc(),
+    };
 }
 
 #[cfg(test)]
