@@ -4,7 +4,6 @@ use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use worker_rust::cli::{self, Args, P2PArgs};
@@ -121,18 +120,10 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?,
             );
-            let allocations_checker: Arc<dyn AllocationsChecker> = if let Some(rpc) = rpc {
-                Arc::new(
-                    allocations_checker::RpcAllocationsChecker::new(
-                        &rpc,
-                        transport.local_peer_id(),
-                    )
+            let allocations_checker: Arc<dyn AllocationsChecker> = Arc::new(
+                allocations_checker::RpcAllocationsChecker::new(&rpc, transport.local_peer_id())
                     .await?,
-                )
-            } else {
-                warn!("RPC endpoint was not provided. Skipping gateway allocations checks");
-                Arc::new(allocations_checker::NoopAllocationsChecker {})
-            };
+            );
 
             let info = Info::new(vec![
                 ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),

@@ -77,7 +77,7 @@ pub struct P2PArgs {
     pub transport: TransportArgs,
 
     #[command(flatten)]
-    pub rpc: Option<RpcArgs>,
+    pub rpc: RpcArgs,
 }
 
 #[derive(clap::Subcommand)]
