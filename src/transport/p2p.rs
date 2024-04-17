@@ -179,6 +179,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 warn!("Worker jailed until the end of epoch: {reason}");
             }
             Some(Status::Active(assignment)) => {
+                info!("Received pong from the scheduler");
                 self.assignments_tx
                     .send(assignment.datasets)
                     .expect("Assignment subscriber dropped");
