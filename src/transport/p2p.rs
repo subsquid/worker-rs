@@ -402,7 +402,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
             msg: Some(Msg::Ping(ping)),
         };
         self.transport_handle
-            .send_direct_msg(envelope.encode_to_vec(), self.scheduler_id)?;
+            .broadcast_msg(envelope.encode_to_vec(), PING_TOPIC)?;
         Ok(())
     }
 
