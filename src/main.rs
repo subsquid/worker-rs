@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut metrics_registry = Default::default();
 
-    let state_manager = Arc::new(StateManager::new(args.data_dir.clone()).await?);
+    let state_manager = Arc::new(StateManager::new(args.data_dir.join("worker")).await?);
 
     let cancellation_token = create_cancellation_token()?;
 
