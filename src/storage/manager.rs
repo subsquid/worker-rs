@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
-use futures::StreamExt;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
@@ -13,19 +12,21 @@ use crate::types::{
 };
 
 use super::{
+    data_source::DataSource,
     downloader::ChunkDownloader,
     layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
-    s3_fs::S3Filesystem,
     state::{State, UpdateStatus},
     Filesystem,
 };
 
+#[derive(Default)]
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
     desired_ranges: Mutex<Ranges>,
     notify: tokio::sync::Notify,
+    data_source: DataSource,
 }
 
 pub struct Status {
@@ -44,12 +45,12 @@ impl StateManager {
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
-            desired_ranges: Default::default(),
-            notify: tokio::sync::Notify::new(),
+            ..Default::default()
         })
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken, concurrency: usize) {
+        temp_preload_chunks(&self.data_source).await;
         let mut downloader = ChunkDownloader::default();
         loop {
             self.state.lock().report_status();
@@ -105,10 +106,10 @@ impl StateManager {
     }
 
     // TODO: prevent accidental massive removals
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
         if *self.desired_ranges.lock() != ranges {
-            let chunks = find_all_chunks(ranges.clone()).await?;
+            let chunks = self.data_source.find_all_chunks(ranges.clone()).await?;
 
             let mut cache = self.desired_ranges.lock();
             let mut state = self.state.lock();
@@ -161,47 +162,6 @@ impl StateManager {
             .join(dataset::encode_dataset(&chunk.dataset))
             .join(chunk.chunk.path())
     }
-}
-
-// TODO: make it faster by only iterating added ranges
-#[instrument(ret, level = "debug")]
-async fn find_all_chunks(desired: Ranges) -> Result<ChunkSet> {
-    let mut items = Vec::new();
-    for (dataset, ranges) in desired {
-        let rfs = S3Filesystem::with_bucket(&dataset)?;
-        let dataset = Arc::new(dataset);
-        let mut streams = Vec::new();
-        for range in ranges.ranges {
-            let rfs = rfs.clone();
-            let stream_fut = async move {
-                let results =
-                    layout::stream_chunks(&rfs, Some(&range.begin.into()), Some(&range.end.into()))
-                        .collect::<Vec<_>>()
-                        .await;
-                results.into_iter().collect::<Result<Vec<_>>>()
-            };
-            streams.push(stream_fut);
-        }
-        items.push(async move {
-            futures::future::try_join_all(streams.into_iter())
-                .await
-                .map(|x| {
-                    x.into_iter()
-                        .flatten()
-                        .map(|chunk| ChunkRef {
-                            dataset: dataset.clone(),
-                            chunk,
-                        })
-                        .collect::<ChunkSet>()
-                })
-        });
-    }
-    let chunks = futures::future::try_join_all(items.into_iter())
-        .await?
-        .into_iter()
-        .flatten()
-        .collect();
-    Ok(chunks)
 }
 
 #[instrument(skip_all)]
@@ -267,6 +227,23 @@ fn get_directory_size(path: &Path) -> u64 {
         }
     }
     result
+}
+
+// TODO: remove this once the network stabilizes
+async fn temp_preload_chunks(data_source: &DataSource) {
+    info!("Listing S3 buckets...");
+    for ds in [
+        "s3://ethereum-mainnet-1",
+        "s3://base-1",
+        "s3://moonbeam-evm-1",
+        "s3://bsc-mainnet-1",
+    ] {
+        let result = data_source.update_dataset(ds.to_string()).await;
+        if let Err(err) = result {
+            warn!("Couldn't preload chunks for '{ds}': {err:?}");
+        }
+    }
+    info!("Listing S3 buckets done");
 }
 
 #[cfg(test)]

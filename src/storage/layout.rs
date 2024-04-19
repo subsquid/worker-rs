@@ -2,9 +2,7 @@ use std::ops::Deref;
 
 use crate::util::iterator::WithLookahead;
 use anyhow::{anyhow, bail, Context, Result};
-use async_stream::try_stream;
 use camino::Utf8Path as Path;
-use futures::Stream;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -130,44 +128,6 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
     Ok(entries)
 }
 
-// TODO: test it
-#[instrument(skip_all, level = "debug")]
-pub fn stream_chunks<'a>(
-    fs: &'a impl Filesystem,
-    first_block: Option<&BlockNumber>,
-    last_block: Option<&BlockNumber>,
-) -> impl Stream<Item = Result<DataChunk>> + 'a {
-    let first_block = match first_block {
-        Some(&block) => block,
-        None => 0.into(),
-    };
-    let last_block = match last_block {
-        Some(&block) => block,
-        None => u32::MAX.into(),
-    };
-    try_stream! {
-        let tops = list_top_dirs(fs).await?;
-        for (i, &top) in tops.iter().enumerate() {
-            if i + 1 < tops.len() && tops[i + 1] <= first_block {
-                continue;
-            }
-            if last_block < top {
-                break;
-            }
-            let chunks = list_chunks(fs, &top).await?;
-            for chunk in chunks {
-                if last_block < chunk.first_block {
-                    break;
-                }
-                if first_block > chunk.last_block {
-                    continue;
-                }
-                yield chunk;
-            }
-        }
-    }
-}
-
 pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     let tops = list_top_dirs(fs).await?;
     let mut handles = Vec::new();
@@ -238,13 +198,10 @@ fn is_dir_empty(path: impl AsRef<Path>) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use anyhow::Result;
-    use futures::StreamExt;
-
     use crate::storage::{local_fs::LocalFs, tests::TestFilesystem};
     use crate::util::tests::tests_data;
 
-    use super::{read_all_chunks, stream_chunks, BlockNumber, DataChunk};
+    use super::{read_all_chunks, BlockNumber, DataChunk};
 
     #[test]
     fn test_block_number_conversion() {
@@ -333,17 +290,10 @@ mod tests {
     #[tokio::test]
     async fn test_sample() {
         let fs = LocalFs::new(tests_data());
-        read_all_chunks(&fs).await.unwrap();
-
-        let stream = stream_chunks(&fs, Some(&17881400.into()), None);
-        let results: Vec<Result<DataChunk>> = stream.collect().await;
-        let from_stream = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        let chunks = read_all_chunks(&fs).await.unwrap();
         assert_eq!(
-            from_stream,
+            chunks,
             vec![DataChunk::parse_range("0017881390/0017881390-0017882786-32ee9457").unwrap()]
         );
-
-        let from_read = read_all_chunks(&fs).await.unwrap();
-        assert_eq!(from_stream, from_read);
     }
 }
