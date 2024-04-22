@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use subsquid_messages::WorkerAssignment;
 use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
 
@@ -51,9 +52,8 @@ impl Transport for HttpTransport {
         Ok(())
     }
 
-    fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static {
-        let rx = self.assignments_rx.take().unwrap();
-        WatchStream::from_changes(rx)
+    fn stream_assignments(&self) -> impl futures::Stream<Item = WorkerAssignment> + 'static {
+        futures::stream::pending() // FIXME
     }
 
     fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {

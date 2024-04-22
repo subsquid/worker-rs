@@ -134,7 +134,7 @@ impl State {
                     .into_iter()
                     .map(|object| {
                         if let Some((dirname, _)) = object.key.rsplit_once('/') {
-                            DataChunk::parse_range(dirname)
+                            dirname.parse()
                         } else {
                             Err(anyhow::anyhow!("Invalid key: {}", object.key))
                         }

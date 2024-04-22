@@ -1,4 +1,5 @@
 use std::ops::Deref;
+use std::str::FromStr;
 
 use crate::util::iterator::WithLookahead;
 use anyhow::{anyhow, bail, Context, Result};
@@ -68,7 +69,7 @@ impl DataChunk {
     }
 
     // TODO: synchronize with other language implementations
-    pub fn parse_range(dirname: &str) -> Result<Self> {
+    pub fn from_path(dirname: &str) -> Result<Self> {
         lazy_static! {
             static ref RE: Regex = Regex::new(r"(\d{10})/(\d{10})-(\d{10})-(\w{8})$").unwrap();
         }
@@ -89,6 +90,14 @@ impl DataChunk {
             last_hash: hash.into(),
             top: BlockNumber::try_from(top)?,
         })
+    }
+}
+
+impl FromStr for DataChunk {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::from_path(s)
     }
 }
 
@@ -122,7 +131,7 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
         .ls(&top.to_string())
         .await?
         .into_iter()
-        .filter_map(|dirname| DataChunk::parse_range(dirname.as_str()).ok())
+        .filter_map(|dirname| dirname.as_str().parse().ok())
         .collect();
     entries.sort_unstable();
     Ok(entries)
@@ -225,7 +234,7 @@ mod tests {
         let path = "0000001000/0000001024-0000002047-0xabcdef";
         assert_eq!(chunk.path(), path);
 
-        assert_eq!(DataChunk::parse_range(&path).unwrap(), chunk);
+        assert_eq!(DataChunk::from_path(&path).unwrap(), chunk);
     }
 
     #[tokio::test]
@@ -293,7 +302,7 @@ mod tests {
         let chunks = read_all_chunks(&fs).await.unwrap();
         assert_eq!(
             chunks,
-            vec![DataChunk::parse_range("0017881390/0017881390-0017882786-32ee9457").unwrap()]
+            vec![DataChunk::from_path("0017881390/0017881390-0017882786-32ee9457").unwrap()]
         );
     }
 }

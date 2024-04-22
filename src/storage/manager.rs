@@ -6,6 +6,8 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
+use subsquid_messages::{DatasetChunks, WorkerAssignment};
+
 use crate::types::{
     dataset,
     state::{to_ranges, ChunkRef, ChunkSet, Ranges},
@@ -24,7 +26,6 @@ use super::{
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
-    desired_ranges: Mutex<Ranges>,
     notify: tokio::sync::Notify,
     data_source: DataSource,
 }
@@ -107,21 +108,13 @@ impl StateManager {
 
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
-    pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
-        if *self.desired_ranges.lock() != ranges {
-            let chunks = self.data_source.find_all_chunks(ranges.clone()).await?;
-
-            let mut cache = self.desired_ranges.lock();
-            let mut state = self.state.lock();
-            let result = state.set_desired_chunks(chunks);
-            *cache = ranges;
-
-            match result {
-                UpdateStatus::Updated => {
-                    info!("Got new assignment");
-                    self.notify.notify_one();
-                }
-                UpdateStatus::Unchanged => {}
+    pub fn set_assignment(&self, assignment: WorkerAssignment) -> Result<()> {
+        let desired_chunks = assignment_to_chunk_set(assignment)?;
+        match self.state.lock().set_desired_chunks(desired_chunks) {
+            UpdateStatus::Unchanged => {}
+            UpdateStatus::Updated => {
+                info!("Got new assignment");
+                self.notify.notify_one();
             }
         }
         Ok(())
@@ -244,6 +237,17 @@ async fn temp_preload_chunks(data_source: &DataSource) {
         }
     }
     info!("Listing S3 buckets done");
+}
+
+#[inline(always)]
+fn assignment_to_chunk_set(assignment: WorkerAssignment) -> Result<ChunkSet> {
+    assignment.dataset_chunks.into_iter().flat_map(|DatasetChunks { dataset_url, chunks }| {
+        let dataset = Arc::new(dataset_url);
+        chunks.into_iter().map(move |chunk_str| Ok(ChunkRef {
+            dataset: dataset.clone(),
+            chunk: chunk_str.parse()?,
+        }))
+    }).collect()
 }
 
 #[cfg(test)]

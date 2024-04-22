@@ -168,17 +168,10 @@ impl<T: Transport + 'static> Worker<T> {
             .stream_assignments()
             .take_until(cancellation_token.cancelled());
         tokio::pin!(assignments);
-        while let Some(ranges) = assignments.next().await {
-            let result = tokio::select!(
-                result = state_manager.set_desired_ranges(ranges) => result,
-                _ = cancellation_token.cancelled() => {
-                    warn!("Cancel setting assignment");
-                    break;
-                }
-            );
-            if let Err(err) = result {
-                warn!("Couldn't schedule assignment: {:?}", err)
-            }
+        while let Some(assignment) = assignments.next().await {
+            state_manager
+                .set_assignment(assignment)
+                .unwrap_or_else(|e| warn!("Couldn't schedule assignment: {e:?}"));
         }
     }
 
