@@ -101,10 +101,8 @@ impl State {
             .unwrap_or_else(|| panic!("Completing download of unknown chunk: {chunk}"));
         if success {
             self.available.insert(chunk);
-        } else {
-            if self.desired.contains(&chunk) {
-                self.to_download.insert(chunk);
-            }
+        } else if self.desired.contains(&chunk) {
+            self.to_download.insert(chunk);
         }
     }
 

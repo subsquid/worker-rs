@@ -6,15 +6,12 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use subsquid_messages::{DatasetChunks, WorkerAssignment};
-
 use crate::types::{
     dataset,
     state::{to_ranges, ChunkRef, ChunkSet, Ranges},
 };
 
 use super::{
-    data_source::DataSource,
     downloader::ChunkDownloader,
     layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -27,7 +24,6 @@ pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
     notify: tokio::sync::Notify,
-    data_source: DataSource,
 }
 
 pub struct Status {
@@ -51,7 +47,6 @@ impl StateManager {
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken, concurrency: usize) {
-        temp_preload_chunks(&self.data_source).await;
         let mut downloader = ChunkDownloader::default();
         loop {
             self.state.lock().report_status();
@@ -108,8 +103,7 @@ impl StateManager {
 
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
-    pub fn set_assignment(&self, assignment: WorkerAssignment) -> Result<()> {
-        let desired_chunks = assignment_to_chunk_set(assignment)?;
+    pub fn set_desired_chunks(&self, desired_chunks: ChunkSet) {
         match self.state.lock().set_desired_chunks(desired_chunks) {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
@@ -117,7 +111,6 @@ impl StateManager {
                 self.notify.notify_one();
             }
         }
-        Ok(())
     }
 
     pub fn find_chunks<'s>(
@@ -220,34 +213,6 @@ fn get_directory_size(path: &Path) -> u64 {
         }
     }
     result
-}
-
-// TODO: remove this once the network stabilizes
-async fn temp_preload_chunks(data_source: &DataSource) {
-    info!("Listing S3 buckets...");
-    for ds in [
-        "s3://ethereum-mainnet-1",
-        "s3://base-1",
-        "s3://moonbeam-evm-1",
-        "s3://bsc-mainnet-1",
-    ] {
-        let result = data_source.update_dataset(ds.to_string()).await;
-        if let Err(err) = result {
-            warn!("Couldn't preload chunks for '{ds}': {err:?}");
-        }
-    }
-    info!("Listing S3 buckets done");
-}
-
-#[inline(always)]
-fn assignment_to_chunk_set(assignment: WorkerAssignment) -> Result<ChunkSet> {
-    assignment.dataset_chunks.into_iter().flat_map(|DatasetChunks { dataset_url, chunks }| {
-        let dataset = Arc::new(dataset_url);
-        chunks.into_iter().map(move |chunk_str| Ok(ChunkRef {
-            dataset: dataset.clone(),
-            chunk: chunk_str.parse()?,
-        }))
-    }).collect()
 }
 
 #[cfg(test)]

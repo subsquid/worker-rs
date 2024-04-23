@@ -90,7 +90,7 @@ fn register_parquet(
     schema: &Schema,
     pk_indices: Vec<usize>,
 ) -> Result<()> {
-    let options = ParquetReadOptions::default().schema(&schema);
+    let options = ParquetReadOptions::default().schema(schema);
     let constraints = Constraints::new_unverified(vec![Constraint::PrimaryKey(pk_indices)]);
     let listing_options = options.to_listing_options(&ctx.copied_config());
     let table_url = ListingTableUrl::parse(table_path.as_ref())?;

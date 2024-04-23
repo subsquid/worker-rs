@@ -27,18 +27,14 @@ fn setup_tracing() -> Result<()> {
 }
 
 fn setup_sentry(args: &Args) -> Option<sentry::ClientInitGuard> {
-    if let Some(dsn) = &args.sentry_dsn {
-        Some(sentry::init((
-            dsn.as_str(),
-            sentry::ClientOptions {
-                release: sentry::release_name!(),
-                traces_sample_rate: 1.0,
-                ..Default::default()
-            },
-        )))
-    } else {
-        None
-    }
+    args.sentry_dsn.as_ref().map(|dsn| sentry::init((
+        dsn.as_str(),
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            traces_sample_rate: 1.0,
+            ..Default::default()
+        },
+    )))
 }
 
 fn create_cancellation_token() -> Result<CancellationToken> {
