@@ -42,8 +42,10 @@ impl Transport for HttpTransport {
         Ok(())
     }
 
+    #[allow(unreachable_code)]
     fn stream_assignments(&self) -> impl futures::Stream<Item = WorkerAssignment> + 'static {
-        futures::stream::pending() // FIXME
+        unimplemented!();
+        futures::stream::empty()
     }
 
     fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {
