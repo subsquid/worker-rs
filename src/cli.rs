@@ -80,6 +80,7 @@ pub struct P2PArgs {
     pub rpc: RpcArgs,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 pub enum Mode {
     Http(HttpArgs),

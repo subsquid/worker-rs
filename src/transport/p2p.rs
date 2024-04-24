@@ -6,7 +6,7 @@ use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
 use subsquid_messages::{
     envelope::Msg, query_executed, signatures::SignedMessage, DatasetRanges, InputAndOutput,
-    LogsCollected, Ping, Pong, ProstMsg, Query, QueryExecuted, SizeAndHash,
+    LogsCollected, Ping, Pong, ProstMsg, Query, QueryExecuted, SizeAndHash, WorkerAssignment,
 };
 use subsquid_network_transport::{
     cli::TransportArgs,
@@ -22,7 +22,6 @@ use crate::{
     logs_storage::LogsStorage,
     metrics,
     query::{error::QueryError, result::QueryResult},
-    types::state::Ranges,
     util::{hash::sha3_256, UseOnce},
 };
 
@@ -52,8 +51,8 @@ pub struct P2PTransport<MsgStream> {
     logs_collector_id: PeerId,
     worker_id: PeerId,
     keypair: Keypair,
-    assignments_tx: watch::Sender<Ranges>,
-    assignments_rx: UseOnce<watch::Receiver<Ranges>>,
+    assignments_tx: watch::Sender<WorkerAssignment>,
+    assignments_rx: UseOnce<watch::Receiver<WorkerAssignment>>,
     queries_tx: mpsc::Sender<QueryTask>,
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
 }
@@ -172,16 +171,15 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             Some(Status::UnsupportedVersion(())) => {
                 error!("Worker version not supported by the scheduler");
             }
-            Some(Status::JailedV1(())) => {
-                warn!("Worker jailed until the end of epoch");
-            }
             Some(Status::Jailed(reason)) => {
                 warn!("Worker jailed until the end of epoch: {reason}");
             }
-            Some(Status::Active(assignment)) => {
-                info!("Received pong from the scheduler");
+            Some(Status::Active(_)) => {
+                error!("Deprecated pong message format");
+            }
+            Some(Status::ActiveV2(assignment)) => {
                 self.assignments_tx
-                    .send(assignment.datasets)
+                    .send(assignment)
                     .expect("Assignment subscriber dropped");
             }
             None => {
@@ -407,7 +405,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
         Ok(())
     }
 
-    fn stream_assignments(&self) -> impl futures::Stream<Item = Ranges> + 'static {
+    fn stream_assignments(&self) -> impl futures::Stream<Item = WorkerAssignment> + 'static {
         let rx = self.assignments_rx.take().unwrap();
         WatchStream::from_changes(rx)
     }

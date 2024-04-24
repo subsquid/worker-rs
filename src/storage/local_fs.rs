@@ -67,20 +67,23 @@ mod tests {
             fs.ls("0017881390").await.unwrap(),
             [tests_data.join("0017881390/0017881390-0017882786-32ee9457")]
         );
+        let mut listed = fs
+            .cd("0017881390")
+            .ls("0017881390-0017882786-32ee9457")
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string())
+            .collect::<Vec<_>>();
+        listed.sort();
         assert_eq!(
-            fs.cd("0017881390")
-                .ls("0017881390-0017882786-32ee9457")
-                .await
-                .unwrap()
-                .iter()
-                .map(|p| p.file_name().unwrap())
-                .collect::<Vec<_>>(),
+            listed,
             [
                 "blocks.parquet",
+                "logs.parquet",
                 "statediffs.parquet",
                 "traces.parquet",
                 "transactions.parquet",
-                "logs.parquet"
             ]
         );
     }

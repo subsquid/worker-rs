@@ -12,7 +12,6 @@ use crate::types::{
 };
 
 use super::{
-    data_source::DataSource,
     downloader::ChunkDownloader,
     layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -24,9 +23,7 @@ use super::{
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
-    desired_ranges: Mutex<Ranges>,
     notify: tokio::sync::Notify,
-    data_source: DataSource,
 }
 
 pub struct Status {
@@ -50,7 +47,6 @@ impl StateManager {
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken, concurrency: usize) {
-        temp_preload_chunks(&self.data_source).await;
         let mut downloader = ChunkDownloader::default();
         loop {
             self.state.lock().report_status();
@@ -107,24 +103,14 @@ impl StateManager {
 
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
-    pub async fn set_desired_ranges(&self, ranges: Ranges) -> Result<()> {
-        if *self.desired_ranges.lock() != ranges {
-            let chunks = self.data_source.find_all_chunks(ranges.clone()).await?;
-
-            let mut cache = self.desired_ranges.lock();
-            let mut state = self.state.lock();
-            let result = state.set_desired_chunks(chunks);
-            *cache = ranges;
-
-            match result {
-                UpdateStatus::Updated => {
-                    info!("Got new assignment");
-                    self.notify.notify_one();
-                }
-                UpdateStatus::Unchanged => {}
+    pub fn set_desired_chunks(&self, desired_chunks: ChunkSet) {
+        match self.state.lock().set_desired_chunks(desired_chunks) {
+            UpdateStatus::Unchanged => {}
+            UpdateStatus::Updated => {
+                info!("Got new assignment");
+                self.notify.notify_one();
             }
         }
-        Ok(())
     }
 
     pub fn find_chunks<'s>(
@@ -227,23 +213,6 @@ fn get_directory_size(path: &Path) -> u64 {
         }
     }
     result
-}
-
-// TODO: remove this once the network stabilizes
-async fn temp_preload_chunks(data_source: &DataSource) {
-    info!("Listing S3 buckets...");
-    for ds in [
-        "s3://ethereum-mainnet-1",
-        "s3://base-1",
-        "s3://moonbeam-evm-1",
-        "s3://bsc-mainnet-1",
-    ] {
-        let result = data_source.update_dataset(ds.to_string()).await;
-        if let Err(err) = result {
-            warn!("Couldn't preload chunks for '{ds}': {err:?}");
-        }
-    }
-    info!("Listing S3 buckets done");
 }
 
 #[cfg(test)]
