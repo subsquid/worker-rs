@@ -178,6 +178,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 error!("Deprecated pong message format");
             }
             Some(Status::ActiveV2(assignment)) => {
+                info!("Received pong from the scheduler");
                 self.assignments_tx
                     .send(assignment)
                     .expect("Assignment subscriber dropped");
