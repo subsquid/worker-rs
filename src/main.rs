@@ -59,6 +59,7 @@ fn create_cancellation_token() -> Result<CancellationToken> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenv::dotenv().ok();
     let args = Args::parse();
     setup_tracing()?;
     let _sentry_guard = setup_sentry(&args);
