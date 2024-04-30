@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
@@ -254,7 +254,8 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
     ) -> std::result::Result<QueryResult, QueryError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) {
-            let query = serde_json::from_str(query_str).map_err(anyhow::Error::from)?;
+            let query = serde_json::from_str(query_str)
+                .map_err(|e| QueryError::BadRequest(e.to_string()))?;
             match self.queries_tx.try_send(QueryTask {
                 dataset: dataset.clone(),
                 peer_id,
@@ -262,7 +263,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 response_sender: resp_tx,
             }) {
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    Err(anyhow!("Service overloaded"))?;
+                    return Err(QueryError::ServiceOverloaded);
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     panic!("Query subscriber dropped");
@@ -294,6 +295,9 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             Err(e @ QueryError::NotFound) => query_result::Result::BadRequest(e.to_string()),
             Err(QueryError::NoAllocation) => query_result::Result::NoAllocation(()),
             Err(QueryError::BadRequest(e)) => query_result::Result::BadRequest(e),
+            Err(e @ QueryError::ServiceOverloaded) => {
+                query_result::Result::ServerError(e.to_string())
+            }
             Err(QueryError::Other(e)) => query_result::Result::ServerError(e.to_string()),
         };
         let envelope = subsquid_messages::Envelope {
@@ -359,6 +363,9 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             }),
             Err(e @ QueryError::NotFound) => query_executed::Result::BadRequest(e.to_string()),
             Err(QueryError::BadRequest(e)) => query_executed::Result::BadRequest(e.clone()),
+            Err(e @ QueryError::ServiceOverloaded) => {
+                query_executed::Result::ServerError(e.to_string())
+            }
             Err(QueryError::Other(e)) => query_executed::Result::ServerError(e.to_string()),
             Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
         };
@@ -453,7 +460,7 @@ fn report_metrics(result: &std::result::Result<QueryResult, QueryError>) {
         Err(QueryError::NotFound | QueryError::NoAllocation | QueryError::BadRequest(_)) => {
             metrics::BAD_REQUEST.inc()
         }
-        Err(QueryError::Other(_)) => metrics::SERVER_ERROR.inc(),
+        Err(QueryError::Other(_) | QueryError::ServiceOverloaded) => metrics::SERVER_ERROR.inc(),
     };
 }
 

@@ -1,7 +1,10 @@
 use std::{collections::HashSet, hash::Hash, pin::Pin};
 
-use super::eth::{BatchRequest, NetworkType};
-use anyhow::{ensure, Context, Result};
+use super::{
+    error::QueryError,
+    eth::{BatchRequest, NetworkType},
+};
+use anyhow::Context;
 use async_stream::try_stream;
 use datafusion::{
     arrow::{
@@ -28,27 +31,36 @@ pub(super) type QueryResult = Vec<Value>;
 // - generalize this code
 
 #[instrument(skip_all)]
-pub async fn process_query(ctx: &SessionContext, query: BatchRequest) -> Result<QueryResult> {
-    anyhow::ensure!(
-        query.r#type == NetworkType::Eth,
-        "only eth queries are supported"
-    );
+pub async fn process_query(
+    ctx: &SessionContext,
+    query: BatchRequest,
+) -> Result<QueryResult, QueryError> {
+    if query.r#type != NetworkType::Eth {
+        return Err(QueryError::BadRequest(
+            "only eth queries are supported".to_owned(),
+        ));
+    }
     let (blocks, transactions, logs) = extract_data(ctx, &query).await?;
     let blocks = convert_to_json(blocks);
     let transactions = transactions.map(convert_to_json);
     let logs = logs.map(convert_to_json);
-    collect_result(build_response(&query, blocks, transactions, logs)).await
+    collect_result(build_response(&query, blocks, transactions, logs))
+        .await
+        .map_err(From::from)
 }
 
 #[instrument(skip_all)]
 async fn extract_data(
     ctx: &SessionContext,
     query: &BatchRequest,
-) -> Result<(
-    impl Stream<Item = Result<RecordBatch, DataFusionError>>,
-    Option<impl Stream<Item = Result<RecordBatch, DataFusionError>>>,
-    Option<impl Stream<Item = Result<RecordBatch, DataFusionError>>>,
-)> {
+) -> Result<
+    (
+        impl Stream<Item = Result<RecordBatch, DataFusionError>>,
+        Option<impl Stream<Item = Result<RecordBatch, DataFusionError>>>,
+        Option<impl Stream<Item = Result<RecordBatch, DataFusionError>>>,
+    ),
+    QueryError,
+> {
     let blocks = ctx.table("blocks").await?;
     let transactions = ctx.table("transactions").await?;
     let logs = ctx.table("logs").await?;
@@ -98,11 +110,16 @@ async fn extract_data(
         }
         tx_filters.push(predicate);
 
-        ensure!(!tx_request.traces, "Traces queries are not supported yet");
-        ensure!(
-            !tx_request.state_diffs,
-            "State diffs queries are not supported yet"
-        );
+        if tx_request.traces {
+            return Err(QueryError::BadRequest(
+                "Traces queries are not supported yet".to_owned(),
+            ));
+        }
+        if tx_request.state_diffs {
+            return Err(QueryError::BadRequest(
+                "State diffs queries are not supported yet".to_owned(),
+            ));
+        }
     }
 
     for log_request in query.logs.as_ref().unwrap_or(&Vec::new()) {
@@ -119,15 +136,17 @@ async fn extract_data(
         }
         logs_filters.push(predicate);
 
-        ensure!(
-            !log_request.transaction_traces,
-            "Traces queries are not supported yet"
-        );
+        if log_request.transaction_traces {
+            return Err(QueryError::BadRequest(
+                "Traces queries are not supported yet".to_owned(),
+            ));
+        }
     }
-    ensure!(
-        query.traces.is_none(),
-        "Traces queries are not supported yet"
-    );
+    if query.traces.is_some() {
+        return Err(QueryError::BadRequest(
+            "Traces queries are not supported yet".to_owned(),
+        ));
+    }
 
     let blocks = camel_case_columns(all_blocks)?.select_columns(&block_columns(query))?;
 
@@ -199,7 +218,8 @@ async fn extract_data(
             None => Ok(None),
         }
     });
-    let (blocks_result, tx_result, logs_result) = try_join!(blocks_future, tx_future, logs_future)?;
+    let (blocks_result, tx_result, logs_result) = try_join!(blocks_future, tx_future, logs_future)
+        .context("Subqueries execution panicked")?;
 
     Ok((blocks_result?, tx_result?, logs_result?))
 }
@@ -207,13 +227,13 @@ async fn extract_data(
 #[instrument(skip_all)]
 fn convert_to_json(
     stream: impl Stream<Item = Result<RecordBatch, DataFusionError>>,
-) -> impl Stream<Item = Result<JsonMap<String, Value>>> {
+) -> impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> {
     stream.flat_map(|record_batch| {
         let entries = match record_batch
             .and_then(|batch| record_batches_to_json_rows(&[&batch]).map_err(From::from))
         {
             Ok(vec) => vec.into_iter().map(Ok).collect_vec(),
-            Err(e) => vec![Err(e.into())],
+            Err(e) => vec![Err(e)],
         };
         futures::stream::iter(entries)
     })
@@ -221,24 +241,24 @@ fn convert_to_json(
 #[instrument(skip_all)]
 fn build_response<'l>(
     query: &'l BatchRequest,
-    headers: impl Stream<Item = Result<JsonMap<String, Value>>> + Unpin + 'l,
-    transactions: Option<impl Stream<Item = Result<JsonMap<String, Value>>> + 'l>,
-    logs: Option<impl Stream<Item = Result<JsonMap<String, Value>>> + 'l>,
-) -> impl Stream<Item = Result<Value>> + 'l {
+    headers: impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> + Unpin + 'l,
+    transactions: Option<impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> + 'l>,
+    logs: Option<impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> + 'l>,
+) -> impl Stream<Item = anyhow::Result<Value>> + 'l {
     let include_tx = transactions.is_some();
     let include_logs = logs.is_some();
     let mut transactions = transactions.map(|stream| Box::pin(stream.peekable()));
     let mut logs = logs.map(|stream| Box::pin(stream.peekable()));
 
-    async fn block_rows<S: Stream<Item = Result<JsonMap<String, Value>>>>(
+    async fn block_rows<S: Stream<Item = Result<JsonMap<String, Value>, DataFusionError>>>(
         stream: &mut Option<Pin<Box<Peekable<S>>>>,
         block_number: u64,
-    ) -> Result<Vec<JsonMap<String, Value>>>
-    {
+    ) -> Result<Vec<JsonMap<String, Value>>, DataFusionError> {
         if let Some(stream) = stream.as_mut() {
             consume_while(stream.as_mut(), |tx: &JsonMap<String, Value>| {
                 tx.get("blockNumber").unwrap().as_u64().unwrap() == block_number
-            }).await
+            })
+            .await
         } else {
             Ok(Vec::new())
         }
@@ -302,10 +322,10 @@ fn build_response<'l>(
     }
 }
 
-async fn consume_while<T>(
-    mut stream: std::pin::Pin<&mut Peekable<impl Stream<Item = Result<T>>>>,
+async fn consume_while<T, E>(
+    mut stream: std::pin::Pin<&mut Peekable<impl Stream<Item = Result<T, E>>>>,
     f: impl Fn(&T) -> bool,
-) -> Result<Vec<T>> {
+) -> Result<Vec<T>, E> {
     let mut result = Vec::new();
     while let Some(item) = stream
         .as_mut()
@@ -326,7 +346,9 @@ async fn consume_while<T>(
 }
 
 #[instrument(skip_all)]
-async fn collect_result(stream: impl Stream<Item = Result<Value>>) -> Result<QueryResult> {
+async fn collect_result(
+    stream: impl Stream<Item = anyhow::Result<Value>>,
+) -> anyhow::Result<QueryResult> {
     let mut result = Vec::new();
     tokio::pin!(stream);
     while let Some(row) = stream.next().await {
@@ -339,7 +361,7 @@ async fn collect_result(stream: impl Stream<Item = Result<Value>>) -> Result<Que
     Ok(result)
 }
 
-fn camel_case_columns(df: DataFrame) -> Result<DataFrame> {
+fn camel_case_columns(df: DataFrame) -> Result<DataFrame, DataFusionError> {
     let columns = df
         .schema()
         .fields()
@@ -352,7 +374,6 @@ fn camel_case_columns(df: DataFrame) -> Result<DataFrame> {
             .map(|c| col(c.clone()).alias(RenameRule::CamelCase.apply_to_field(&c.name)))
             .collect_vec(),
     )
-    .map_err(Into::into)
 }
 
 fn block_columns(query: &BatchRequest) -> Vec<&str> {
@@ -424,7 +445,7 @@ fn any_of(predicates: Vec<Expr>) -> Option<Expr> {
     predicates.into_iter().reduce(or)
 }
 
-fn union_all(dataframes: Vec<DataFrame>) -> Result<Option<DataFrame>> {
+fn union_all(dataframes: Vec<DataFrame>) -> Result<Option<DataFrame>, DataFusionError> {
     let mut iter = dataframes.into_iter();
     if let Some(first) = iter.next() {
         let mut result = first;
