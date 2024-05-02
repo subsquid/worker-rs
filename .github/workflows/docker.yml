@@ -12,7 +12,7 @@ env:
 jobs:
   publish:
     name: Build and publish docker image
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-server]
     steps:
       - name: Load ssh key to fetch private dependencies
         uses: webfactory/ssh-agent@v0.9.0
