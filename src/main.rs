@@ -127,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
                 ("peer_id".to_owned(), transport.local_peer_id().to_string()),
             ]);
             metrics::register_metrics(&mut metrics_registry, info);
+            metrics::register_p2p_metrics(&mut metrics_registry);
 
             let worker = Worker::new(
                 state_manager.clone(),

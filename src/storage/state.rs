@@ -3,9 +3,12 @@ use std::{collections::BTreeMap, sync::Arc};
 use tracing::{info, instrument};
 
 use super::layout::{BlockNumber, DataChunk};
-use crate::types::{
-    dataset::Dataset,
-    state::{ChunkRef, ChunkSet},
+use crate::{
+    metrics,
+    types::{
+        dataset::Dataset,
+        state::{ChunkRef, ChunkSet},
+    },
 };
 
 #[derive(Debug, Default)]
@@ -190,7 +193,10 @@ impl State {
             self.available.len(),
             self.downloading.len(),
             self.to_download.len()
-        )
+        );
+        metrics::CHUNKS_AVAILABLE.set(self.available.len() as i64);
+        metrics::CHUNKS_DOWNLOADING.set(self.downloading.len() as i64);
+        metrics::CHUNKS_PENDING.set(self.to_download.len() as i64);
     }
 }
 

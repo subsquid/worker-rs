@@ -167,12 +167,15 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         match pong.status {
             Some(Status::NotRegistered(())) => {
                 error!("Worker not registered on chain");
+                metrics::set_status(metrics::WorkerStatus::NotRegistered);
             }
             Some(Status::UnsupportedVersion(())) => {
                 error!("Worker version not supported by the scheduler");
+                metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
             }
             Some(Status::Jailed(reason)) => {
                 warn!("Worker jailed until the end of epoch: {reason}");
+                metrics::set_status(metrics::WorkerStatus::Jailed);
             }
             Some(Status::Active(_)) => {
                 error!("Deprecated pong message format");
@@ -182,6 +185,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 self.assignments_tx
                     .send(assignment)
                     .expect("Assignment subscriber dropped");
+                metrics::set_status(metrics::WorkerStatus::Active);
             }
             None => {
                 warn!("Invalid pong message: no status field");
@@ -237,7 +241,6 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         } else {
             Some(self.generate_log(&result, query, peer_id))
         };
-        report_metrics(&result);
         self.send_query_result(query_id, peer_id, result).await;
         if let Some(log) = log {
             let result = self.logs_storage.save_log(log).await;
@@ -268,7 +271,9 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     panic!("Query subscriber dropped");
                 }
-                _ => {}
+                Ok(_) => {
+                    metrics::PENDING_QUERIES.inc();
+                }
             }
         } else {
             Err(QueryError::BadRequest(
@@ -420,7 +425,9 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
 
     fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {
         let rx = self.queries_rx.take().unwrap();
-        ReceiverStream::new(rx)
+        ReceiverStream::new(rx).inspect(|_| {
+            metrics::PENDING_QUERIES.dec();
+        })
     }
 
     async fn run(&self, cancellation_token: CancellationToken) {
@@ -452,16 +459,6 @@ fn bundle_messages<T: prost::Message>(
         bundles.push(bundle);
     }
     bundles
-}
-
-fn report_metrics(result: &std::result::Result<QueryResult, QueryError>) {
-    match result {
-        Ok(_) => metrics::QUERY_OK.inc(),
-        Err(QueryError::NotFound | QueryError::NoAllocation | QueryError::BadRequest(_)) => {
-            metrics::BAD_REQUEST.inc()
-        }
-        Err(QueryError::Other(_) | QueryError::ServiceOverloaded) => metrics::SERVER_ERROR.inc(),
-    };
 }
 
 #[cfg(test)]

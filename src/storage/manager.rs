@@ -6,10 +6,10 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::types::{
+use crate::{metrics, types::{
     dataset,
     state::{to_ranges, ChunkRef, ChunkSet, Ranges},
-};
+}};
 
 use super::{
     downloader::ChunkDownloader,
@@ -50,6 +50,8 @@ impl StateManager {
         let mut downloader = ChunkDownloader::default();
         loop {
             self.state.lock().report_status();
+            let stored_bytes = get_directory_size(&self.fs.root);
+            metrics::STORED_BYTES.set(stored_bytes as i64);
 
             tokio::select! {
                 _ = self.notify.notified() => {}
@@ -57,11 +59,13 @@ impl StateManager {
                     match result {
                         Ok(()) => {
                             self.state.lock().complete_download(&chunk, true);
+                            metrics::CHUNKS_DOWNLOADED.inc();
                         }
                         Err(e) => {
                             // TODO: skip logging if the download was cancelled
                             warn!("Failed to download chunk '{chunk}':\n{e:?}");
                             self.state.lock().complete_download(&chunk, false);
+                            metrics::CHUNKS_FAILED_DOWNLOAD.inc();
                         }
                     }
                 }
@@ -76,6 +80,7 @@ impl StateManager {
                 info!("Removing chunk {chunk}");
                 self.drop_chunk(&chunk)
                     .unwrap_or_else(|_| panic!("Couldn't remove chunk {chunk}"));
+                metrics::CHUNKS_REMOVED.inc();
             }
 
             while downloader.download_count() < concurrency {

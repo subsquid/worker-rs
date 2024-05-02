@@ -9,6 +9,7 @@ pub struct QueryResult {
     pub raw_data: Vec<u8>,
     pub compressed_data: Vec<u8>,
     pub data_size: usize,
+    pub compressed_size: usize,
     pub data_sha3_256: Vec<u8>,
     pub num_read_chunks: usize,
 }
@@ -24,6 +25,7 @@ impl QueryResult {
         let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&data)?;
         let compressed_data = encoder.finish()?;
+        let compressed_size = compressed_data.len();
 
         let hash = sha3_256(&data);
 
@@ -31,6 +33,7 @@ impl QueryResult {
             raw_data: data,
             compressed_data,
             data_size,
+            compressed_size,
             data_sha3_256: hash,
             num_read_chunks,
         })
