@@ -6393,7 +6393,7 @@ dependencies = [
 [[package]]
 name = "subsquid-messages"
 version = "0.2.0"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=e5fad4e#e5fad4eb128c1e30a45d4027b50b9a0f20b94ac7"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=4753ce6#4753ce6291f3fbb03bd3e41e92307af7d0c13e4a"
 dependencies = [
  "anyhow",
  "hex",
@@ -6432,7 +6432,7 @@ dependencies = [
 [[package]]
 name = "subsquid-network-transport"
 version = "0.4.0"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=e5fad4e#e5fad4eb128c1e30a45d4027b50b9a0f20b94ac7"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git?rev=4753ce6#4753ce6291f3fbb03bd3e41e92307af7d0c13e4a"
 dependencies = [
  "anyhow",
  "async-trait",

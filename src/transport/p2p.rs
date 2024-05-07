@@ -52,10 +52,7 @@ pub async fn create_p2p_transport(
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     logs_db_path: PathBuf,
-    metrics_registry: &mut prometheus_client::registry::Registry,
 ) -> Result<P2PTransport<impl Stream<Item = WorkerEvent>>> {
-    subsquid_network_transport::metrics::register_metrics(metrics_registry);
-
     let transport_builder = P2PTransportBuilder::from_cli(args).await?;
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
@@ -157,15 +154,15 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
         }
     }
 
-    async fn handle_logs_collected(&self, last_collected_seq_no: u64) {
+    async fn handle_logs_collected(&self, last_collected_seq_no: Option<u64>) {
         self.logs_storage
-            .logs_collected(Some(last_collected_seq_no as usize))
+            .logs_collected(last_collected_seq_no)
             .await;
     }
 
     // Completes only when the query is processed and the result is sent
     async fn handle_query(&self, peer_id: PeerId, query: Query) {
-        let query_id = query.query_id.clone().expect("checked by transport");
+        let query_id = query.query_id.clone().expect("got query without query_id");
 
         if !self.logs_storage.is_initialized() {
             warn!("Logs storage not initialized. Cannot execute queries yet.");
