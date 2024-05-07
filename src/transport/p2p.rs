@@ -5,18 +5,16 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
 use subsquid_messages::{
-    envelope::Msg, query_executed, signatures::SignedMessage, DatasetRanges, InputAndOutput,
-    LogsCollected, Ping, Pong, ProstMsg, Query, QueryExecuted, SizeAndHash, WorkerAssignment,
+    query_executed, DatasetRanges, InputAndOutput, Ping, Pong, Query, QueryExecuted, SizeAndHash,
+    WorkerAssignment,
 };
 use subsquid_network_transport::{
-    cli::TransportArgs,
-    transport::{P2PTransportBuilder, P2PTransportHandle},
-    Keypair, PeerId,
+    P2PTransportBuilder, PeerId, TransportArgs, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, log, warn};
 
 use crate::{
     logs_storage::LogsStorage,
@@ -27,13 +25,8 @@ use crate::{
 
 use super::QueryTask;
 
-type MsgContent = Vec<u8>;
-type Message = subsquid_network_transport::Message<MsgContent>;
-const PING_TOPIC: &str = "worker_ping";
-const LOGS_TOPIC: &str = "worker_query_logs";
 const SERVICE_QUEUE_SIZE: usize = 16;
 const CONCURRENT_MESSAGES: usize = 32;
-const LOGS_MESSAGE_MAX_BYTES: usize = 64000;
 
 lazy_static! {
     static ref LOGS_SEND_INTERVAL: Duration = Duration::from_secs(
@@ -43,14 +36,11 @@ lazy_static! {
     );
 }
 
-pub struct P2PTransport<MsgStream> {
-    raw_msg_stream: UseOnce<MsgStream>,
-    transport_handle: P2PTransportHandle<MsgContent>,
+pub struct P2PTransport<EventStream> {
+    raw_event_stream: UseOnce<EventStream>,
+    transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
-    scheduler_id: PeerId,
-    logs_collector_id: PeerId,
     worker_id: PeerId,
-    keypair: Keypair,
     assignments_tx: watch::Sender<WorkerAssignment>,
     assignments_rx: UseOnce<watch::Receiver<WorkerAssignment>>,
     queries_tx: mpsc::Sender<QueryTask>,
@@ -63,27 +53,23 @@ pub async fn create_p2p_transport(
     logs_collector_id: PeerId,
     logs_db_path: PathBuf,
     metrics_registry: &mut prometheus_client::registry::Registry,
-) -> Result<P2PTransport<impl Stream<Item = Message>>> {
-    let mut transport_builder = P2PTransportBuilder::from_cli(args).await?;
-    transport_builder.with_registry(metrics_registry);
+) -> Result<P2PTransport<impl Stream<Item = WorkerEvent>>> {
+    subsquid_network_transport::metrics::register_metrics(metrics_registry);
+
+    let transport_builder = P2PTransportBuilder::from_cli(args).await?;
     let worker_id = transport_builder.local_peer_id();
-    let keypair = transport_builder.keypair();
     info!("Local peer ID: {worker_id}");
 
     let (assignments_tx, assignments_rx) = watch::channel(Default::default());
     let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
-    let (msg_receiver, transport_handle) = transport_builder.run().await?;
-    transport_handle.subscribe(PING_TOPIC).await?;
-    transport_handle.subscribe(LOGS_TOPIC).await?;
+    let (event_stream, transport_handle) =
+        transport_builder.build_worker(WorkerConfig::new(scheduler_id, logs_collector_id))?;
 
     Ok(P2PTransport {
-        raw_msg_stream: UseOnce::new(msg_receiver),
+        raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(logs_db_path.as_str()).await?,
-        scheduler_id,
-        logs_collector_id,
         worker_id,
-        keypair,
         assignments_tx,
         assignments_rx: UseOnce::new(assignments_rx),
         queries_tx,
@@ -91,38 +77,19 @@ pub async fn create_p2p_transport(
     })
 }
 
-impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
+impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
     async fn run_receive_loop(&self, cancellation_token: CancellationToken) {
-        let msg_stream = self.raw_msg_stream.take().unwrap();
-        msg_stream
+        let event_stream = self.raw_event_stream.take().unwrap();
+        event_stream
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_MESSAGES, |msg| async move {
-                let envelope = match subsquid_messages::Envelope::decode(msg.content.as_slice()) {
-                    Ok(envelope) => envelope,
-                    Err(e) => {
-                        warn!("Couldn't parse p2p message: {e}");
-                        return;
+            .for_each_concurrent(CONCURRENT_MESSAGES, |ev| async move {
+                match ev {
+                    WorkerEvent::Pong(pong) => self.handle_pong(pong),
+                    WorkerEvent::Query { peer_id, query } => {
+                        self.handle_query(peer_id, query).await
                     }
-                };
-                let peer_id = match msg.peer_id {
-                    Some(peer_id) => peer_id,
-                    None => {
-                        warn!("Received p2p message without peer_id: '{:?}'", msg);
-                        return;
-                    }
-                };
-                match envelope.msg {
-                    Some(Msg::Pong(pong)) => {
-                        self.handle_pong(peer_id, pong);
-                    }
-                    Some(Msg::Query(query)) => {
-                        self.handle_query(peer_id, query).await;
-                    }
-                    Some(Msg::LogsCollected(collected)) => {
-                        self.handle_logs_collected(collected, peer_id).await;
-                    }
-                    _ => {
-                        // ignore all other events
+                    WorkerEvent::LogsCollected { last_seq_no } => {
+                        self.handle_logs_collected(last_seq_no).await
                     }
                 }
             })
@@ -159,11 +126,8 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         }
     }
 
-    fn handle_pong(&self, peer_id: PeerId, pong: Pong) {
+    fn handle_pong(&self, pong: Pong) {
         use subsquid_messages::pong::Status;
-        if peer_id != self.scheduler_id {
-            warn!("Wrong pong message origin: '{}'", peer_id.to_string());
-        }
         match pong.status {
             Some(Status::NotRegistered(())) => {
                 error!("Worker not registered on chain");
@@ -193,38 +157,15 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         }
     }
 
-    async fn handle_logs_collected(&self, collected: LogsCollected, peer_id: PeerId) {
-        if peer_id != self.logs_collector_id {
-            warn!("Wrong LogsCollected message origin: {peer_id}");
-            return;
-        }
-        let last_collected_seq_no = collected
-            .sequence_numbers
-            .get(&self.worker_id.to_base58())
-            .map(|&x| x as usize);
+    async fn handle_logs_collected(&self, last_collected_seq_no: u64) {
         self.logs_storage
-            .logs_collected(last_collected_seq_no)
+            .logs_collected(Some(last_collected_seq_no as usize))
             .await;
     }
 
     // Completes only when the query is processed and the result is sent
-    async fn handle_query(&self, peer_id: PeerId, mut query: Query) {
-        if !query.verify_signature(&peer_id) {
-            warn!(
-                "Query with invalid signature received from {}",
-                peer_id.to_string()
-            );
-            return;
-        }
-        let query_id = if let Some(query_id) = query.query_id.clone() {
-            query_id
-        } else {
-            warn!(
-                "Query without query_id received from {}",
-                peer_id.to_string()
-            );
-            return;
-        };
+    async fn handle_query(&self, peer_id: PeerId, query: Query) {
+        let query_id = query.query_id.clone().expect("checked by transport");
 
         if !self.logs_storage.is_initialized() {
             warn!("Logs storage not initialized. Cannot execute queries yet.");
@@ -241,7 +182,7 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
         } else {
             Some(self.generate_log(&result, query, peer_id))
         };
-        self.send_query_result(query_id, peer_id, result).await;
+        self.send_query_result(query_id, result).await;
         if let Some(log) = log {
             let result = self.logs_storage.save_log(log).await;
             if let Err(e) = result {
@@ -288,7 +229,6 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
     async fn send_query_result(
         &self,
         query_id: String,
-        peer_id: PeerId,
         result: std::result::Result<QueryResult, QueryError>,
     ) {
         use subsquid_messages::query_result;
@@ -305,19 +245,14 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
             }
             Err(QueryError::Other(e)) => query_result::Result::ServerError(e.to_string()),
         };
-        let envelope = subsquid_messages::Envelope {
-            msg: Some(Msg::QueryResult(subsquid_messages::QueryResult {
-                query_id,
-                result: Some(query_result),
-            })),
+        let query_result = subsquid_messages::QueryResult {
+            query_id,
+            result: Some(query_result),
         };
-        if let Err(e) = self
-            .transport_handle
-            .send_direct_msg(envelope.encode_to_vec(), peer_id)
-        {
-            error!("Couldn't send query result: {e:?}");
-            // TODO: add retries
-        }
+        self.transport_handle
+            .send_query_result(query_result)
+            .unwrap_or_else(|_| error!("Cannot send query result: queue full"));
+        // TODO: add retries
     }
 
     pub fn local_peer_id(&self) -> PeerId {
@@ -326,30 +261,9 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
 
     fn try_send_logs(&self, logs: Vec<QueryExecuted>) {
         info!("Sending {} logs to the logs collector", logs.len());
-        let signed_logs = logs.into_iter().map(|mut log| {
-            log.sign(&self.keypair).expect("Couldn't sign query log");
-            log
-        });
-        for bundle in bundle_messages(signed_logs, LOGS_MESSAGE_MAX_BYTES) {
-            if let [log] = &bundle[..] {
-                if log.encoded_len() > LOGS_MESSAGE_MAX_BYTES {
-                    error!("Query log too big to be sent");
-                    debug!("Dropped log: {log:?}");
-                    continue;
-                }
-            }
-            let envelope = subsquid_messages::Envelope {
-                msg: Some(Msg::QueryLogs(subsquid_messages::QueryLogs {
-                    queries_executed: bundle,
-                })),
-            };
-            let result = self
-                .transport_handle
-                .broadcast_msg(envelope.encode_to_vec(), LOGS_TOPIC);
-            if let Err(e) = result {
-                warn!("Couldn't send logs: {e:?}");
-            }
-        }
+        self.transport_handle
+            .send_logs(logs)
+            .unwrap_or_else(|_| log::warn!("Cannot send query logs: queue full"));
     }
 
     fn generate_log(
@@ -393,9 +307,11 @@ impl<MsgStream: Stream<Item = Message>> P2PTransport<MsgStream> {
     }
 }
 
-impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport<MsgStream> {
+impl<EventStream: Stream<Item = WorkerEvent> + Send> super::Transport
+    for P2PTransport<EventStream>
+{
     async fn send_ping(&self, state: super::State) -> Result<()> {
-        let mut ping = Ping {
+        let ping = Ping {
             stored_ranges: state
                 .datasets
                 .into_iter()
@@ -409,12 +325,7 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
             stored_bytes: Some(state.stored_bytes),
             ..Default::default()
         };
-        ping.sign(&self.keypair)?;
-        let envelope = subsquid_messages::Envelope {
-            msg: Some(Msg::Ping(ping)),
-        };
-        self.transport_handle
-            .broadcast_msg(envelope.encode_to_vec(), PING_TOPIC)?;
+        self.transport_handle.send_ping(ping)?;
         Ok(())
     }
 
@@ -435,44 +346,5 @@ impl<MsgStream: Stream<Item = Message> + Send> super::Transport for P2PTransport
             self.run_receive_loop(cancellation_token.clone()),
             self.run_send_logs_loop(cancellation_token, *LOGS_SEND_INTERVAL),
         );
-    }
-}
-
-fn bundle_messages<T: prost::Message>(
-    messages: impl IntoIterator<Item = T>,
-    size_limit: usize,
-) -> Vec<Vec<T>> {
-    let mut bundles = Vec::new();
-    let mut bundle = Vec::new();
-    let mut bundle_size = 0;
-    for msg in messages {
-        let msg_size = msg.encoded_len();
-        if bundle_size + msg_size > size_limit {
-            bundles.push(bundle);
-            bundle = Vec::new();
-            bundle_size = 0;
-        }
-        bundle.push(msg);
-        bundle_size += msg_size;
-    }
-    if !bundle.is_empty() {
-        bundles.push(bundle);
-    }
-    bundles
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bundle_messages() {
-        let messages = vec![vec![0u8; 40], vec![0u8; 40], vec![0u8; 200], vec![0u8; 90]];
-        let bundles = bundle_messages(messages, 100);
-
-        assert_eq!(bundles.len(), 3);
-        assert_eq!(bundles[0].len(), 2);
-        assert_eq!(bundles[1].len(), 1);
-        assert_eq!(bundles[2].len(), 1);
     }
 }

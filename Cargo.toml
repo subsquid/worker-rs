@@ -1,6 +1,6 @@
 [package]
 name = "worker-rust"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2021"
 
 [[bin]]
@@ -37,8 +37,8 @@ serde = "1.0.195"
 serde-rename-rule = "0.2.2"
 serde_json = { version = "1.0.111", features = ["preserve_order"] }
 sha3 = "0.10.8"
-subsquid-messages = { git = "ssh://git@github.com/subsquid/archive-router.git", version = "0.1.2", features = ["signatures"] }
-subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "3075211", features = ["metrics"] }
+subsquid-messages = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "e5fad4e" }
+subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", rev = "e5fad4e", features = ["worker", "metrics"] }
 thiserror = "1.0.57"
 tokio = { version = "1.35.1", features = ["full", "tracing"] }
 tokio-rusqlite = "0.5.1"
