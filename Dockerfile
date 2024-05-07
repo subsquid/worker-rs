@@ -19,7 +19,7 @@ RUN --mount=type=ssh cargo build --release
 
 
 FROM chef AS worker
-RUN apt-get update && apt-get install -y net-tools
+RUN apt-get update && apt-get install -y net-tools libsqlite3-dev
 COPY --from=builder /app/target/release/worker /app/worker
 
 ENV P2P_LISTEN_ADDRS="/ip4/0.0.0.0/udp/12345/quic-v1"
