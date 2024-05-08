@@ -108,7 +108,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
                 },
             );
 
-            if !self.logs_storage.is_initialized() {
+            if !self.logs_storage.is_initialized().await {
                 continue;
             }
             let logs = match self.logs_storage.get_logs().await {
@@ -164,7 +164,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
     async fn handle_query(&self, peer_id: PeerId, query: Query) {
         let query_id = query.query_id.clone().expect("got query without query_id");
 
-        if !self.logs_storage.is_initialized() {
+        if !self.logs_storage.is_initialized().await {
             warn!("Logs storage not initialized. Cannot execute queries yet.");
             return;
         }
