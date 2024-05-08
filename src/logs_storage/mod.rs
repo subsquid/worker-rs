@@ -58,7 +58,7 @@ impl LogsStorage {
 
     /// All logs with sequence numbers up to `last_collected_seq_no` have been saved by the logs collector
     /// and should be discarded from the storage.
-    pub async fn logs_collected(&self, last_collected_seq_no: Option<usize>) {
+    pub async fn logs_collected(&self, last_collected_seq_no: Option<u64>) {
         tracing::debug!(
             "Logs up to {} collected",
             last_collected_seq_no.unwrap_or(0)

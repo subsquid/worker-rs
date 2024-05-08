@@ -4,7 +4,7 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
 use contract_client::RpcArgs;
-use subsquid_network_transport::{cli::TransportArgs, PeerId};
+use subsquid_network_transport::{TransportArgs, PeerId};
 
 #[derive(Parser)]
 #[command(version)]

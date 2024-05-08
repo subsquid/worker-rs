@@ -1235,7 +1235,7 @@ dependencies = [
  "clap",
  "ethers",
  "log",
- "subsquid-network-transport",
+ "subsquid-network-transport 0.3.0",
  "thiserror",
  "tokio",
  "url",
@@ -2521,6 +2521,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-bounded"
+version = "0.2.3"
+source = "git+https://github.com/Wiezzel/rust-futures-bounded.git?rev=579106d#579106d700faac4c52d42dcfb29c711078ba8552"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3600,7 +3609,7 @@ dependencies = [
  "asynchronous-codec",
  "either",
  "futures",
- "futures-bounded",
+ "futures-bounded 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-timer",
  "instant",
  "libp2p-core",
@@ -3668,7 +3677,7 @@ dependencies = [
  "asynchronous-codec",
  "either",
  "futures",
- "futures-bounded",
+ "futures-bounded 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-timer",
  "libp2p-core",
  "libp2p-identity",
@@ -3712,7 +3721,7 @@ dependencies = [
  "either",
  "fnv",
  "futures",
- "futures-bounded",
+ "futures-bounded 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-timer",
  "instant",
  "libp2p-core",
@@ -3844,7 +3853,7 @@ dependencies = [
  "bytes",
  "either",
  "futures",
- "futures-bounded",
+ "futures-bounded 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-timer",
  "instant",
  "libp2p-core",
@@ -3866,7 +3875,7 @@ source = "git+https://github.com/Wiezzel/rust-libp2p.git?rev=299b66e4#299b66e477
 dependencies = [
  "async-trait",
  "futures",
- "futures-bounded",
+ "futures-bounded 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-timer",
  "instant",
  "libp2p-core",
@@ -6383,16 +6392,16 @@ dependencies = [
 
 [[package]]
 name = "subsquid-messages"
-version = "0.1.2"
-source = "git+ssh://git@github.com/subsquid/archive-router.git#143499a9440ee962918cf1bb1cad7fdc512eeb04"
+version = "0.2.0"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#16acbbf1e689e0cad45ad7fbe53de9d35545b186"
 dependencies = [
  "anyhow",
  "hex",
+ "libp2p",
  "prost",
  "prost-build",
  "serde",
  "sha3",
- "subsquid-network-transport",
 ]
 
 [[package]]
@@ -6413,8 +6422,36 @@ dependencies = [
  "libp2p-connection-limits",
  "libp2p-swarm-derive",
  "log",
- "prometheus-client",
  "rand",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+]
+
+[[package]]
+name = "subsquid-network-transport"
+version = "0.4.0"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#16acbbf1e689e0cad45ad7fbe53de9d35545b186"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bimap",
+ "clap",
+ "derivative",
+ "env_logger",
+ "futures",
+ "futures-bounded 0.2.3 (git+https://github.com/Wiezzel/rust-futures-bounded.git?rev=579106d)",
+ "futures-core",
+ "lazy_static",
+ "libp2p",
+ "libp2p-connection-limits",
+ "libp2p-swarm-derive",
+ "log",
+ "prometheus-client",
+ "prost",
+ "serde",
+ "subsquid-messages",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -7547,7 +7584,7 @@ dependencies = [
 
 [[package]]
 name = "worker-rust"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -7579,7 +7616,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "subsquid-messages",
- "subsquid-network-transport",
+ "subsquid-network-transport 0.4.0",
  "thiserror",
  "tokio",
  "tokio-rusqlite",

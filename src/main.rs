@@ -27,14 +27,16 @@ fn setup_tracing() -> Result<()> {
 }
 
 fn setup_sentry(args: &Args) -> Option<sentry::ClientInitGuard> {
-    args.sentry_dsn.as_ref().map(|dsn| sentry::init((
-        dsn.as_str(),
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            traces_sample_rate: 1.0,
-            ..Default::default()
-        },
-    )))
+    args.sentry_dsn.as_ref().map(|dsn| {
+        sentry::init((
+            dsn.as_str(),
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                traces_sample_rate: 1.0,
+                ..Default::default()
+            },
+        ))
+    })
 }
 
 fn create_cancellation_token() -> Result<CancellationToken> {
@@ -107,13 +109,13 @@ async fn main() -> anyhow::Result<()> {
             rpc,
             ..
         }) => {
+            subsquid_network_transport::metrics::register_metrics(&mut metrics_registry);
             let transport = Arc::new(
                 create_p2p_transport(
                     transport_args,
                     scheduler_id,
                     logs_collector_id,
                     args.data_dir.join("logs.db"),
-                    &mut metrics_registry,
                 )
                 .await?,
             );
