@@ -1,13 +1,14 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use prost::Message;
 use subsquid_messages::QueryExecuted;
+use tokio::sync::RwLock;
 use tokio_rusqlite::Connection;
 
 pub struct LogsStorage {
     db: Connection,
-    has_next_seq_no: AtomicBool,
+    has_next_seq_no: Arc<RwLock<bool>>,
 }
 
 impl LogsStorage {
@@ -29,16 +30,16 @@ impl LogsStorage {
 
         Ok(Self {
             db,
-            has_next_seq_no: AtomicBool::new(has_next_seq_no),
+            has_next_seq_no: Arc::new(RwLock::new(has_next_seq_no)),
         })
     }
 
-    pub fn is_initialized(&self) -> bool {
-        self.has_next_seq_no.load(Ordering::SeqCst)
+    pub async fn is_initialized(&self) -> bool {
+        *self.has_next_seq_no.read().await
     }
 
     pub async fn save_log(&self, mut log: QueryExecuted) -> Result<()> {
-        assert!(self.is_initialized());
+        assert!(self.is_initialized().await);
         self.db
             .call(move |db| {
                 let tx = db.transaction()?;
@@ -64,7 +65,9 @@ impl LogsStorage {
             last_collected_seq_no.unwrap_or(0)
         );
         let next_seq_no = last_collected_seq_no.map(|x| x + 1).unwrap_or(0);
-        if self.is_initialized() {
+        let mut is_init_guard = self.has_next_seq_no.write().await;
+        if *is_init_guard {
+            drop(is_init_guard);
             self.db
                 .call_unwrap(move |db| {
                     db.prepare_cached("DELETE FROM query_logs WHERE seq_no < ?")
@@ -80,9 +83,7 @@ impl LogsStorage {
                 })
                 .await
                 .expect("Couldn't initialize logs storage");
-            if self.has_next_seq_no.swap(true, Ordering::SeqCst) {
-                panic!("Tried to initialize logs storage twice");
-            }
+            *is_init_guard = true;
             tracing::info!("Initialized logs storage");
         }
     }
