@@ -46,6 +46,9 @@ pub struct Args {
 
     #[clap(env, hide(true))]
     pub sentry_dsn: Option<String>,
+
+    #[clap(env, hide(true), default_value_t = 0.001)]
+    pub sentry_traces_sample_rate: f32,
 }
 
 #[derive(clap::Args, Debug, Clone)]

@@ -32,7 +32,7 @@ fn setup_sentry(args: &Args) -> Option<sentry::ClientInitGuard> {
             dsn.as_str(),
             sentry::ClientOptions {
                 release: sentry::release_name!(),
-                traces_sample_rate: 1.0,
+                traces_sample_rate: args.sentry_traces_sample_rate,
                 ..Default::default()
             },
         ))
