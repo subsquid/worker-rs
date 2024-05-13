@@ -1,4 +1,4 @@
-use crate::types::state::{ChunkRef, ChunkSet};
+use crate::storage::datasets_index::parse_assignment;
 use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
@@ -10,7 +10,6 @@ use crate::{
 use futures::{self, StreamExt};
 use itertools::Itertools;
 use std::{sync::Arc, time::Duration};
-use subsquid_messages::{DatasetChunks, WorkerAssignment};
 use tokio::{task::JoinError, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
@@ -172,8 +171,11 @@ impl<T: Transport + 'static> Worker<T> {
             .take_until(cancellation_token.cancelled());
         tokio::pin!(assignments);
         while let Some(assignment) = assignments.next().await {
-            match assignment_to_chunk_set(assignment) {
-                Ok(chunks) => state_manager.set_desired_chunks(chunks),
+            match parse_assignment(assignment) {
+                Ok((chunks, datasets_index)) => {
+                    state_manager.set_desired_chunks(chunks);
+                    state_manager.set_datasets_index(datasets_index);
+                },
                 Err(e) => warn!("Invalid assignment: {e:?}"),
             }
         }
@@ -237,28 +239,6 @@ pub async fn run_query(
     }
 }
 
-#[inline(always)]
-fn assignment_to_chunk_set(assignment: WorkerAssignment) -> anyhow::Result<ChunkSet> {
-    assignment
-        .dataset_chunks
-        .into_iter()
-        .flat_map(
-            |DatasetChunks {
-                 dataset_url,
-                 chunks,
-             }| {
-                let dataset = Arc::new(dataset_url);
-                chunks.into_iter().map(move |chunk_str| {
-                    Ok(ChunkRef {
-                        dataset: dataset.clone(),
-                        chunk: chunk_str.parse()?,
-                    })
-                })
-            },
-        )
-        .collect()
-}
-
 fn report_metrics(result: &std::result::Result<QueryResult, QueryError>) {
     let (status, query_result) = match result {
         Ok(result) => (metrics::QueryStatus::Ok, Some(result)),
@@ -271,91 +251,4 @@ fn report_metrics(result: &std::result::Result<QueryResult, QueryError>) {
         }
     };
     metrics::query_executed(status, query_result);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        assignment_to_chunk_set, Arc, ChunkRef, ChunkSet, DatasetChunks, WorkerAssignment,
-    };
-    use crate::storage::layout::DataChunk;
-
-    #[test]
-    fn test_assignment_to_chunk_set() {
-        let dataset_1 = "s3://ethereum-mainnet".to_string();
-        let dataset_2 = "s3://moonbeam-evm".to_string();
-        let assignment = WorkerAssignment {
-            dataset_chunks: vec![
-                DatasetChunks {
-                    dataset_url: dataset_1.clone(),
-                    chunks: vec![
-                        "0000000000/0000000000-0000697499-f6275b81".to_string(),
-                        "0000000000/0000697500-0000962739-4eff9837".to_string(),
-                        "0007293060/0007300860-0007308199-6aeb1a56".to_string(),
-                    ],
-                },
-                DatasetChunks {
-                    dataset_url: dataset_2.clone(),
-                    chunks: vec![
-                        "0000000000/0000190280-0000192679-0999c6ce".to_string(),
-                        "0003510340/0003515280-0003518379-b8613f00".to_string(),
-                    ],
-                },
-            ],
-        };
-        let dataset_1 = Arc::new(dataset_1);
-        let dataset_2 = Arc::new(dataset_2);
-        let exp_chunk_set: ChunkSet = [
-            ChunkRef {
-                dataset: dataset_1.clone(),
-                chunk: DataChunk {
-                    last_block: 697499.into(),
-                    first_block: 0.into(),
-                    last_hash: "f6275b81".into(),
-                    top: 0.into(),
-                },
-            },
-            ChunkRef {
-                dataset: dataset_1.clone(),
-                chunk: DataChunk {
-                    last_block: 962739.into(),
-                    first_block: 697500.into(),
-                    last_hash: "4eff9837".into(),
-                    top: 0.into(),
-                },
-            },
-            ChunkRef {
-                dataset: dataset_1.clone(),
-                chunk: DataChunk {
-                    last_block: 7308199.into(),
-                    first_block: 7300860.into(),
-                    last_hash: "6aeb1a56".into(),
-                    top: 7293060.into(),
-                },
-            },
-            ChunkRef {
-                dataset: dataset_2.clone(),
-                chunk: DataChunk {
-                    last_block: 192679.into(),
-                    first_block: 190280.into(),
-                    last_hash: "0999c6ce".into(),
-                    top: 0.into(),
-                },
-            },
-            ChunkRef {
-                dataset: dataset_2.clone(),
-                chunk: DataChunk {
-                    last_block: 3518379.into(),
-                    first_block: 3515280.into(),
-                    last_hash: "b8613f00".into(),
-                    top: 3510340.into(),
-                },
-            },
-        ]
-        .into_iter()
-        .collect();
-
-        let chunk_set = assignment_to_chunk_set(assignment).expect("Valid assignment");
-        assert_eq!(chunk_set, exp_chunk_set);
-    }
 }

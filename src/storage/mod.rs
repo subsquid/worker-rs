@@ -2,6 +2,7 @@ use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 
 use anyhow::Result;
 
+pub mod datasets_index;
 pub mod downloader;
 pub mod guard;
 pub mod layout;
