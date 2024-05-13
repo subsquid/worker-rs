@@ -1,5 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
+use reqwest::Url;
 use subsquid_messages::{DatasetChunks, WorkerAssignment};
 
 use crate::types::{
@@ -12,17 +13,17 @@ use super::layout::DataChunk;
 #[derive(Default)]
 pub struct DatasetsIndex {
     datasets: HashMap<Arc<Dataset>, DatasetIndex>,
-    http_headers: Vec<(String, String)>,
+    http_headers: reqwest::header::HeaderMap,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteFile {
-    pub url: String,
+    pub url: Url,
     pub name: Arc<str>,
 }
 
 struct DatasetIndex {
-    url: String,
+    url: Url,
     files: HashMap<DataChunk, Vec<Arc<str>>>,
 }
 
@@ -33,14 +34,17 @@ impl DatasetsIndex {
             files
                 .iter()
                 .map(|filename| RemoteFile {
-                    url: format!("{}/{}/{}", ds.url, chunk.path(), filename),
+                    url: ds
+                        .url
+                        .join(&format!("{}/{}", chunk.path(), filename))
+                        .unwrap_or_else(|_| panic!("Couldn't form URL for {chunk}")),
                     name: filename.clone(),
                 })
                 .collect()
         })
     }
 
-    pub fn get_headers(&self) -> &[(String, String)] {
+    pub fn get_headers(&self) -> &reqwest::header::HeaderMap {
         &self.http_headers
     }
 }
@@ -83,7 +87,7 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
         datasets.insert(
             dataset_id,
             DatasetIndex {
-                url: download_url,
+                url: Url::parse(&download_url)?,
                 files: dataset_files,
             },
         );
@@ -95,7 +99,16 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
             http_headers: assignment
                 .http_headers
                 .into_iter()
-                .map(|header| (header.name, header.value))
+                .map(|header| {
+                    (
+                        reqwest::header::HeaderName::from_str(&header.name).unwrap_or_else(|e| {
+                            panic!("Couldn't parse header name: {}: {e:?}", header.name)
+                        }),
+                        reqwest::header::HeaderValue::from_str(&header.value).unwrap_or_else(|e| {
+                            panic!("Couldn't parse header value: {}: {e:?}", header.value)
+                        }),
+                    )
+                })
                 .collect(),
         },
     ))
@@ -103,6 +116,7 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
 
 #[cfg(test)]
 mod tests {
+    use reqwest::Url;
     use subsquid_messages::{AssignedChunk, HttpHeader};
 
     use super::{parse_assignment, Arc, ChunkRef, ChunkSet, DatasetChunks, WorkerAssignment};
@@ -149,12 +163,10 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            http_headers: vec![
-                HttpHeader {
-                    name: "Auth".to_string(),
-                    value: "None".to_string(),
-                }
-            ],
+            http_headers: vec![HttpHeader {
+                name: "Auth".to_string(),
+                value: "None".to_string(),
+            }],
             known_filenames: vec![
                 "blocks.parquet".to_string(),
                 "transactions.parquet".to_string(),
@@ -217,18 +229,18 @@ mod tests {
 
         let (chunk_set, ds_index) = parse_assignment(assignment).expect("Valid assignment");
         assert_eq!(chunk_set, exp_chunk_set);
-        assert_eq!(ds_index.get_headers(), &[("Auth".to_string(), "None".to_string())]);
+        assert_eq!(ds_index.get_headers()["Auth"], "None");
         assert_eq!(ds_index.list_files(&dataset_1, &chunk_set.first().unwrap().chunk), Some(vec![
             super::RemoteFile {
-                url: "https://example.com/0000000000/0000000000-0000697499-f6275b81/blocks.parquet".to_string(),
+                url: Url::parse("https://example.com/0000000000/0000000000-0000697499-f6275b81/blocks.parquet").unwrap(),
                 name: "blocks.parquet".into(),
             },
             super::RemoteFile {
-                url: "https://example.com/0000000000/0000000000-0000697499-f6275b81/transactions.parquet".to_string(),
+                url: Url::parse("https://example.com/0000000000/0000000000-0000697499-f6275b81/transactions.parquet").unwrap(),
                 name: "transactions.parquet".into(),
             },
             super::RemoteFile {
-                url: "https://example.com/0000000000/0000000000-0000697499-f6275b81/logs.parquet".to_string(),
+                url: Url::parse("https://example.com/0000000000/0000000000-0000697499-f6275b81/logs.parquet").unwrap(),
                 name: "logs.parquet".into(),
             },
         ]));

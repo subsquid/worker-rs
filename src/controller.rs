@@ -173,8 +173,8 @@ impl<T: Transport + 'static> Worker<T> {
         while let Some(assignment) = assignments.next().await {
             match parse_assignment(assignment) {
                 Ok((chunks, datasets_index)) => {
-                    state_manager.set_desired_chunks(chunks);
                     state_manager.set_datasets_index(datasets_index);
+                    state_manager.set_desired_chunks(chunks);
                 },
                 Err(e) => warn!("Invalid assignment: {e:?}"),
             }

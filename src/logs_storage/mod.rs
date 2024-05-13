@@ -125,9 +125,9 @@ mod tests {
     #[tokio::test]
     async fn test_logs_storage() {
         let logs_storage = LogsStorage::new(":memory:").await.unwrap();
-        assert!(!logs_storage.is_initialized());
+        assert!(!logs_storage.is_initialized().await);
         logs_storage.logs_collected(Some(2)).await;
-        assert!(logs_storage.is_initialized());
+        assert!(logs_storage.is_initialized().await);
         logs_storage
             .save_log(QueryExecuted {
                 query: Some(subsquid_messages::Query {
