@@ -136,13 +136,12 @@ impl<T: Transport + 'static> Worker<T> {
         interval: Duration,
         cancellation_token: CancellationToken,
     ) {
-        let mut timer = tokio::time::interval(interval);
+        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select!(
                 _ = timer.tick() => {},
                 _ = cancellation_token.cancelled() => {
-                    // TODO: send pause request
                     break;
                 },
             );
@@ -175,7 +174,7 @@ impl<T: Transport + 'static> Worker<T> {
                 Ok((chunks, datasets_index)) => {
                     state_manager.set_datasets_index(datasets_index);
                     state_manager.set_desired_chunks(chunks);
-                },
+                }
                 Err(e) => warn!("Invalid assignment: {e:?}"),
             }
         }
