@@ -138,10 +138,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
                 warn!("Worker jailed until the end of epoch: {reason}");
                 metrics::set_status(metrics::WorkerStatus::Jailed);
             }
-            Some(Status::Active(_)) => {
-                error!("Deprecated pong message format");
-            }
-            Some(Status::ActiveV2(assignment)) => {
+            Some(Status::Active(assignment)) => {
                 info!("Received pong from the scheduler");
                 self.assignments_tx
                     .send(assignment)

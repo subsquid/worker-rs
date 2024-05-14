@@ -1177,8 +1177,8 @@ checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 
 [[package]]
 name = "contract-client"
-version = "0.1.4"
-source = "git+ssh://git@github.com/subsquid/archive-router.git#c6b50412e97eb0dd1587a2274d5bb1838e5cd133"
+version = "0.1.5"
+source = "git+ssh://git@github.com/subsquid/archive-router.git#96b8f73f9bb54b88c95520821669596e351be767"
 dependencies = [
  "async-trait",
  "clap",
@@ -5059,7 +5059,7 @@ checksum = "80b776a1b2dc779f5ee0641f8ade0125bc1298dd41a9a0c16d8bd57b42d222b1"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -5079,7 +5079,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19de2de2a00075bf566bee3bd4db014b11587e84184d3f7a791bc17f1a8e9e48"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.59",
@@ -6188,8 +6188,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-messages"
-version = "0.2.1"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git#e7ffe79c6ae1636a9b3549ab6423f289e2c1f972"
+version = "0.2.2"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#0f71127c9cd16c088ae04db91f80482c2e4565c4"
 dependencies = [
  "anyhow",
  "hex",
@@ -6203,8 +6203,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-network-transport"
-version = "0.4.4"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git#e7ffe79c6ae1636a9b3549ab6423f289e2c1f972"
+version = "0.4.5"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#0f71127c9cd16c088ae04db91f80482c2e4565c4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6222,12 +6222,10 @@ dependencies = [
  "log",
  "prometheus-client",
  "prost",
- "semver",
  "serde",
  "subsquid-messages",
  "thiserror",
  "tokio",
- "tokio-stream",
  "tokio-util",
 ]
 
