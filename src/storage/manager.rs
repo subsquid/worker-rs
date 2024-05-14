@@ -6,12 +6,16 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::{metrics, types::{
-    dataset,
-    state::{to_ranges, ChunkRef, ChunkSet, Ranges},
-}};
+use crate::{
+    metrics,
+    types::{
+        dataset,
+        state::{to_ranges, ChunkRef, ChunkSet, Ranges},
+    },
+};
 
 use super::{
+    datasets_index::DatasetsIndex,
     downloader::ChunkDownloader,
     layout::{self, BlockNumber, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -24,6 +28,7 @@ pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
     notify: tokio::sync::Notify,
+    datasets_index: Mutex<DatasetsIndex>,
 }
 
 pub struct Status {
@@ -83,11 +88,12 @@ impl StateManager {
                 metrics::CHUNKS_REMOVED.inc();
             }
 
+            let index = self.datasets_index.lock();
             while downloader.download_count() < concurrency {
                 if let Some(chunk) = self.state.lock().take_next_download() {
                     info!("Downloading chunk {chunk}");
                     let dst = self.chunk_path(&chunk);
-                    downloader.start_download(chunk, dst);
+                    downloader.start_download(chunk, dst, &index);
                 } else {
                     break;
                 }
@@ -116,6 +122,10 @@ impl StateManager {
                 self.notify.notify_one();
             }
         }
+    }
+
+    pub fn set_datasets_index(&self, index: DatasetsIndex) {
+        *self.datasets_index.lock() = index;
     }
 
     pub fn find_chunks<'s>(

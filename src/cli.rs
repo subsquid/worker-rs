@@ -26,18 +26,6 @@ pub struct Args {
     #[command(subcommand)]
     pub mode: Mode,
 
-    #[clap(env, hide(true))]
-    pub aws_access_key_id: Option<String>,
-
-    #[clap(env, hide(true))]
-    pub aws_secret_access_key: Option<String>,
-
-    #[clap(env, hide(true))]
-    pub aws_s3_endpoint: Option<String>,
-
-    #[clap(env, hide(true), default_value = "auto")]
-    pub aws_region: String,
-
     #[clap(env, hide(true), default_value_t = 3)]
     pub concurrent_downloads: usize,
 
