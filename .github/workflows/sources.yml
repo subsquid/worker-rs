@@ -1,7 +1,6 @@
 name: source archive
 on:
   workflow_dispatch: # manually run
-    inputs:
 
 env:
   CI: true
@@ -24,29 +23,24 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: origin
 
       - name: Get version
-        working-directory: origin
-        env:
-          CARGO_NET_GIT_FETCH_WITH_CLI: true
         run: echo "WORKER_VERSION=$(cargo metadata --no-deps --format-version=1 | jq '.packages[].version' -r)" >> $GITHUB_ENV
 
       - name: Create archive
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
         run: |
+          cargo fetch
+          cargo vendor
           BUILD=$(mktemp -d)/worker-rs
           mkdir -pv $BUILD
           mkdir $BUILD/.cargo
-          cp -rv origin/{Cargo.toml,Cargo.lock,src,benches} $BUILD
-          cp origin/.env.testnet $BUILD/.env
-          cp origin/.vendor-config.toml $BUILD/.cargo/config.toml
-          cd $BUILD
-          cargo vendor tmp
-          mkdir vendor
-          cp -rv tmp/{contract-client,subsquid-*} vendor
-          rm -r tmp
-          cd -
+          mkdir $BUILD/vendor
+          cp -rv Cargo.toml Cargo.lock src benches $BUILD
+          cp .env.testnet $BUILD/.env
+          cp .vendor-config.toml $BUILD/.cargo/config.toml
+          cp -rv vendor/{contract-client,subsquid-*} $BUILD/vendor
           tar --owner=root --group=root -czf worker-${{ env.WORKER_VERSION }}.tar.gz $BUILD
           rm -r $BUILD
         shell: bash
