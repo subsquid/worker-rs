@@ -39,8 +39,7 @@ pub struct RpcAllocationsChecker {
 }
 
 impl RpcAllocationsChecker {
-    pub async fn new(rpc_args: &contract_client::RpcArgs, peer_id: PeerId) -> Result<Self> {
-        let client = contract_client::get_client(rpc_args).await?;
+    pub async fn new(client: Box<dyn contract_client::Client>, peer_id: PeerId) -> Result<Self> {
         let own_id = client.worker_id(peer_id).await?;
         Ok(Self {
             client,
@@ -73,7 +72,7 @@ impl AllocationsChecker for RpcAllocationsChecker {
             };
             if epoch > current_epoch {
                 info!("New epoch started. Updating allocations");
-                let clusters = match self.client.all_gateways(self.own_id).await {
+                let clusters = match self.client.gateway_clusters(self.own_id).await {
                     Ok(clusters) => clusters,
                     Err(e) => {
                         warn!("Couldn't fetch gateway allocations: {e:?}");

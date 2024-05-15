@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
+use subsquid_network_transport::P2PTransportBuilder;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
@@ -106,13 +107,14 @@ async fn main() -> anyhow::Result<()> {
             scheduler_id,
             logs_collector_id,
             transport: transport_args,
-            rpc,
             ..
         }) => {
             subsquid_network_transport::metrics::register_metrics(&mut metrics_registry);
+            let transport_builder = P2PTransportBuilder::from_cli(transport_args).await?;
+            let contract_client = transport_builder.contract_client();
             let transport = Arc::new(
                 create_p2p_transport(
-                    transport_args,
+                    transport_builder,
                     scheduler_id,
                     logs_collector_id,
                     args.data_dir.join("logs.db"),
@@ -120,8 +122,11 @@ async fn main() -> anyhow::Result<()> {
                 .await?,
             );
             let allocations_checker: Arc<dyn AllocationsChecker> = Arc::new(
-                allocations_checker::RpcAllocationsChecker::new(&rpc, transport.local_peer_id())
-                    .await?,
+                allocations_checker::RpcAllocationsChecker::new(
+                    contract_client,
+                    transport.local_peer_id(),
+                )
+                .await?,
             );
 
             let info = Info::new(vec![

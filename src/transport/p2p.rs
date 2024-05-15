@@ -9,7 +9,7 @@ use subsquid_messages::{
     WorkerAssignment,
 };
 use subsquid_network_transport::{
-    P2PTransportBuilder, PeerId, TransportArgs, WorkerConfig, WorkerEvent, WorkerTransportHandle,
+    P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::wrappers::{ReceiverStream, WatchStream};
@@ -48,12 +48,11 @@ pub struct P2PTransport<EventStream> {
 }
 
 pub async fn create_p2p_transport(
-    args: TransportArgs,
+    transport_builder: P2PTransportBuilder,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     logs_db_path: PathBuf,
 ) -> Result<P2PTransport<impl Stream<Item = WorkerEvent>>> {
-    let transport_builder = P2PTransportBuilder::from_cli(args).await?;
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
 

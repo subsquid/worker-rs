@@ -3,8 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
-use contract_client::RpcArgs;
-use subsquid_network_transport::{TransportArgs, PeerId};
+use subsquid_network_transport::{PeerId, TransportArgs};
 
 #[derive(Parser)]
 #[command(version)]
@@ -66,9 +65,6 @@ pub struct P2PArgs {
 
     #[command(flatten)]
     pub transport: TransportArgs,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
 }
 
 #[allow(clippy::large_enum_variant)]
