@@ -3,7 +3,7 @@ use itertools::{EitherOrBoth, Itertools};
 pub trait WithLookahead: Iterator {
     fn lookahead(self) -> impl Iterator<Item = (Self::Item, Option<Self::Item>)>
     where
-        Self: Clone
+        Self: Clone,
     {
         self.clone().zip_longest(self.skip(1)).map(|x| match x {
             EitherOrBoth::Both(cur, next) => (cur, Some(next)),

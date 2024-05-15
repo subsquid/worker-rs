@@ -1,7 +1,7 @@
 // Copied from https://github.com/subsquid/firehose-grpc/blob/80bc1da04e4197df6fdf632937dec372794ddea0/src/archive.rs
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Number, map::Map as JsonMap};
+use serde_json::{map::Map as JsonMap, Number};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase"))]
@@ -51,7 +51,7 @@ pub struct LogRequest {
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub transaction: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    pub transaction_traces: bool
+    pub transaction_traces: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -295,7 +295,7 @@ fn parse_selection<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let map =JsonMap::deserialize(deserializer)?;
+    let map = JsonMap::deserialize(deserializer)?;
     let mut result = Vec::new();
     for (key, value) in map {
         if value.as_bool() == Some(true) {

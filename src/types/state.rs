@@ -1,10 +1,10 @@
 use super::dataset::Dataset;
 use crate::storage::layout::DataChunk;
+use itertools::Itertools;
 use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
 };
-use itertools::Itertools;
 use subsquid_messages::{Range, RangeSet};
 
 pub type ChunkSet = BTreeSet<ChunkRef>;

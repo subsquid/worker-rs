@@ -25,12 +25,16 @@ impl ComputeUnitsStorage {
         self.operator_by_gateway_id.drain();
 
         for cluster in clusters {
-            self.operators.insert(cluster.operator_addr, Operator {
-                allocated_cus: cluster.allocated_computation_units,
-                spent_cus: 0.into(),
-            });
+            self.operators.insert(
+                cluster.operator_addr,
+                Operator {
+                    allocated_cus: cluster.allocated_computation_units,
+                    spent_cus: 0.into(),
+                },
+            );
             for gateway in cluster.gateway_ids {
-                self.operator_by_gateway_id.insert(gateway, cluster.operator_addr);
+                self.operator_by_gateway_id
+                    .insert(gateway, cluster.operator_addr);
             }
         }
     }

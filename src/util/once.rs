@@ -3,19 +3,18 @@ use std::sync::Mutex;
 use anyhow::{anyhow, Result};
 
 pub struct UseOnce<T> {
-    inner: Mutex<Option<T>>
+    inner: Mutex<Option<T>>,
 }
 
 impl<T> UseOnce<T> {
     pub fn new(value: T) -> Self {
         UseOnce {
-            inner: Mutex::new(Some(value))
+            inner: Mutex::new(Some(value)),
         }
     }
 
     pub fn take(&self) -> Result<T> {
-        self
-            .inner
+        self.inner
             .try_lock()
             .ok()
             .and_then(|mut opt| opt.take())
