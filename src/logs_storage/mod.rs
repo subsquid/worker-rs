@@ -1,20 +1,28 @@
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
+use atomic_enum::atomic_enum;
 use prost::Message;
 use subsquid_messages::QueryExecuted;
-use tokio::sync::RwLock;
 use tokio_rusqlite::Connection;
 
 pub struct LogsStorage {
     db: Connection,
-    has_next_seq_no: Arc<RwLock<bool>>,
+    init_state: AtomicInitState,
+}
+
+#[atomic_enum]
+#[derive(PartialEq)]
+enum InitState {
+    NotInitialized = 0,
+    Initializing = 1,
+    Initialized = 2,
 }
 
 impl LogsStorage {
     pub async fn new(logs_path: &str) -> Result<Self> {
         let db = Connection::open(logs_path).await?;
-        let has_next_seq_no = db
+        let state = db
             .call(|db| {
                 db.execute_batch(
                     r#"
@@ -24,22 +32,25 @@ impl LogsStorage {
                     COMMIT;"#,
                 )?;
                 let has_next_seq_no = db.prepare("SELECT seq_no FROM next_seq_no")?.exists(())?;
-                Ok(has_next_seq_no)
+                match has_next_seq_no {
+                    false => Ok(InitState::NotInitialized),
+                    true => Ok(InitState::Initialized),
+                }
             })
             .await?;
 
         Ok(Self {
             db,
-            has_next_seq_no: Arc::new(RwLock::new(has_next_seq_no)),
+            init_state: state.into(),
         })
     }
 
-    pub async fn is_initialized(&self) -> bool {
-        *self.has_next_seq_no.read().await
+    pub fn is_initialized(&self) -> bool {
+        self.init_state.load(Ordering::SeqCst) == InitState::Initialized
     }
 
     pub async fn save_log(&self, mut log: QueryExecuted) -> Result<()> {
-        assert!(self.is_initialized().await);
+        assert!(self.is_initialized());
         self.db
             .call(move |db| {
                 let tx = db.transaction()?;
@@ -65,27 +76,38 @@ impl LogsStorage {
             last_collected_seq_no.unwrap_or(0)
         );
         let next_seq_no = last_collected_seq_no.map(|x| x + 1).unwrap_or(0);
-        let mut is_init_guard = self.has_next_seq_no.write().await;
-        if *is_init_guard {
-            drop(is_init_guard);
-            self.db
-                .call_unwrap(move |db| {
-                    db.prepare_cached("DELETE FROM query_logs WHERE seq_no < ?")
-                        .expect("Couldn't prepare logs deletion query")
-                        .execute([next_seq_no])
-                })
-                .await
-                .expect("Couldn't delete logs from DB");
-        } else {
-            self.db
-                .call_unwrap(move |db| {
-                    db.execute("INSERT INTO next_seq_no VALUES(?)", [next_seq_no])
-                })
-                .await
-                .expect("Couldn't initialize logs storage");
-            *is_init_guard = true;
-            tracing::info!("Initialized logs storage");
-        }
+        match self.init_state.compare_exchange(
+            InitState::NotInitialized,
+            InitState::Initializing,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(InitState::NotInitialized) => {
+                self.db
+                    .call_unwrap(move |db| {
+                        db.execute("INSERT INTO next_seq_no VALUES(?)", [next_seq_no])
+                    })
+                    .await
+                    .expect("Couldn't initialize logs storage");
+                self.init_state
+                    .store(InitState::Initialized, Ordering::SeqCst);
+                tracing::info!("Initialized logs storage");
+            }
+            Err(InitState::Initializing) => {
+                tracing::warn!("Trying to initialize logs storage concurrently");
+            }
+            Err(InitState::Initialized) => {
+                self.db
+                    .call_unwrap(move |db| {
+                        db.prepare_cached("DELETE FROM query_logs WHERE seq_no < ?")
+                            .expect("Couldn't prepare logs deletion query")
+                            .execute([next_seq_no])
+                    })
+                    .await
+                    .expect("Couldn't delete logs from DB");
+            }
+            _ => unreachable!("Invalid compare_exchange result while handling collected logs"),
+        };
     }
 
     pub async fn get_logs(&self) -> Result<Vec<QueryExecuted>> {
@@ -125,9 +147,9 @@ mod tests {
     #[tokio::test]
     async fn test_logs_storage() {
         let logs_storage = LogsStorage::new(":memory:").await.unwrap();
-        assert!(!logs_storage.is_initialized().await);
+        assert!(!logs_storage.is_initialized());
         logs_storage.logs_collected(Some(2)).await;
-        assert!(logs_storage.is_initialized().await);
+        assert!(logs_storage.is_initialized());
         logs_storage
             .save_log(QueryExecuted {
                 query: Some(subsquid_messages::Query {
