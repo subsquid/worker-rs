@@ -1,5 +1,5 @@
 [package]
-name = "worker-rust"
+name = "subsquid-worker"
 version = "1.0.0-rc1"
 edition = "2021"
 

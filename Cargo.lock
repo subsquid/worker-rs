@@ -6319,6 +6319,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "subsquid-worker"
+version = "1.0.0-rc1"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "atomic_enum",
+ "axum",
+ "base64 0.21.7",
+ "camino",
+ "clap",
+ "contract-client",
+ "criterion",
+ "datafusion",
+ "dotenv",
+ "flate2",
+ "futures",
+ "glob",
+ "itertools 0.12.1",
+ "lazy_static",
+ "parking_lot",
+ "prometheus-client",
+ "prost",
+ "regex",
+ "reqwest 0.11.27",
+ "scopeguard",
+ "sentry",
+ "sentry-tower",
+ "serde",
+ "serde-rename-rule",
+ "serde_json",
+ "sha3",
+ "subsquid-messages",
+ "subsquid-network-transport",
+ "thiserror",
+ "tokio",
+ "tokio-rusqlite",
+ "tokio-stream",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
 name = "subtle"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7447,53 +7494,6 @@ checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "worker-rust"
-version = "1.0.0-rc1"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "atomic_enum",
- "axum",
- "base64 0.21.7",
- "camino",
- "clap",
- "contract-client",
- "criterion",
- "datafusion",
- "dotenv",
- "flate2",
- "futures",
- "glob",
- "itertools 0.12.1",
- "lazy_static",
- "parking_lot",
- "prometheus-client",
- "prost",
- "regex",
- "reqwest 0.11.27",
- "scopeguard",
- "sentry",
- "sentry-tower",
- "serde",
- "serde-rename-rule",
- "serde_json",
- "sha3",
- "subsquid-messages",
- "subsquid-network-transport",
- "thiserror",
- "tokio",
- "tokio-rusqlite",
- "tokio-stream",
- "tokio-util",
- "tower-http",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "walkdir",
 ]
 
 [[package]]

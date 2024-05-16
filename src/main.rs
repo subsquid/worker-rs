@@ -7,14 +7,14 @@ use subsquid_network_transport::P2PTransportBuilder;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use worker_rust::cli::{self, Args, P2PArgs};
-use worker_rust::controller::Worker;
-use worker_rust::gateway_allocations::allocations_checker::{self, AllocationsChecker};
-use worker_rust::http_server::Server as HttpServer;
-use worker_rust::metrics;
-use worker_rust::storage::manager::StateManager;
-use worker_rust::transport::http::HttpTransport;
-use worker_rust::transport::p2p::create_p2p_transport;
+use subsquid_worker::cli::{self, Args, P2PArgs};
+use subsquid_worker::controller::Worker;
+use subsquid_worker::gateway_allocations::allocations_checker::{self, AllocationsChecker};
+use subsquid_worker::http_server::Server as HttpServer;
+use subsquid_worker::metrics;
+use subsquid_worker::storage::manager::StateManager;
+use subsquid_worker::transport::http::HttpTransport;
+use subsquid_worker::transport::p2p::create_p2p_transport;
 
 fn setup_tracing() -> Result<()> {
     let fmt = tracing_subscriber::fmt::layer()
