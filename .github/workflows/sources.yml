@@ -33,7 +33,7 @@ jobs:
         run: |
           cargo fetch
           cargo vendor
-          BUILD=$(mktemp -d)/worker-rs
+          BUILD=$(mktemp -d)/subsquid-worker
           mkdir -pv $BUILD
           mkdir $BUILD/.cargo
           mkdir $BUILD/vendor
@@ -41,7 +41,7 @@ jobs:
           cp .env.testnet $BUILD/.env
           cp .vendor-config.toml $BUILD/.cargo/config.toml
           cp -rv vendor/{contract-client,subsquid-*} $BUILD/vendor
-          tar --owner=root --group=root -czf worker-${{ env.WORKER_VERSION }}.tar.gz $BUILD
+          tar -C "$BUILD/.." --owner=root --group=root -czf worker-${{ env.WORKER_VERSION }}.tar.gz $BUILD
           rm -r $BUILD
         shell: bash
 
