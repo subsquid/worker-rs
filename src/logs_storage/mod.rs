@@ -31,7 +31,9 @@ impl LogsStorage {
                     CREATE TABLE IF NOT EXISTS next_seq_no(seq_no);
                     COMMIT;"#,
                 )?;
-                let has_next_seq_no = db.prepare("SELECT seq_no FROM next_seq_no")?.exists(())?;
+                let has_next_seq_no = db
+                    .prepare_cached("SELECT seq_no FROM next_seq_no")?
+                    .exists(())?;
                 match has_next_seq_no {
                     false => Ok(InitState::NotInitialized),
                     true => Ok(InitState::Initialized),
@@ -71,7 +73,7 @@ impl LogsStorage {
     /// All logs with sequence numbers up to `last_collected_seq_no` have been saved by the logs collector
     /// and should be discarded from the storage.
     pub async fn logs_collected(&self, last_collected_seq_no: Option<u64>) {
-        tracing::debug!(
+        tracing::info!(
             "Logs up to {} collected",
             last_collected_seq_no.unwrap_or(0)
         );
@@ -99,6 +101,17 @@ impl LogsStorage {
             Err(InitState::Initialized) => {
                 self.db
                     .call_unwrap(move |db| {
+                        let stored_next_seq_no: u64 = db
+                            .prepare_cached("SELECT seq_no FROM next_seq_no")
+                            .expect("Couldn't prepare next_seq_no query")
+                            .query_row((), |row| row.get(0))
+                            .expect("Couldn't find next_seq_no");
+                        if stored_next_seq_no < next_seq_no {
+                            panic!(
+                                "Trying to collect logs up to seq_no {} while next_seq_no is {}",
+                                next_seq_no, stored_next_seq_no
+                            );
+                        }
                         db.prepare_cached("DELETE FROM query_logs WHERE seq_no < ?")
                             .expect("Couldn't prepare logs deletion query")
                             .execute([next_seq_no])
