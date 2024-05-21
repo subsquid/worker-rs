@@ -5,9 +5,9 @@ use datafusion::prelude::SessionContext;
 use tokio::runtime::Runtime;
 
 use crate::query::eth::BatchRequest;
-use worker_rust::query;
+use subsquid_worker::query;
 #[cfg(test)]
-use worker_rust::util::tests::tests_data;
+use subsquid_worker::util::tests::tests_data;
 
 async fn prepare_context() -> Result<SessionContext> {
     let root = tests_data().join("0017881390/0017881390-0017882786-32ee9457");
