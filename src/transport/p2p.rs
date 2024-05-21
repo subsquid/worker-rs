@@ -51,10 +51,11 @@ pub async fn create_p2p_transport(
     transport_builder: P2PTransportBuilder,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
-    logs_db_path: PathBuf,
+    data_dir: PathBuf,
 ) -> Result<P2PTransport<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
+    check_peer_id(worker_id, data_dir.join("peer_id"));
 
     let (assignments_tx, assignments_rx) = watch::channel(Default::default());
     let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
@@ -64,7 +65,7 @@ pub async fn create_p2p_transport(
     Ok(P2PTransport {
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
-        logs_storage: LogsStorage::new(logs_db_path.as_str()).await?,
+        logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
         worker_id,
         assignments_tx,
         assignments_rx: UseOnce::new(assignments_rx),
@@ -339,5 +340,28 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send> super::Transport
             self.run_receive_loop(cancellation_token.clone()),
             self.run_send_logs_loop(cancellation_token, *LOGS_SEND_INTERVAL),
         );
+    }
+}
+
+fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
+    use std::fs::File;
+    use std::io::{Read, Write};
+
+    if filename.exists() {
+        let mut file = File::open(&filename).expect("Couldn't open peer_id file");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .expect("Couldn't read peer_id file");
+        if contents.trim() != peer_id.to_string() {
+            panic!(
+                "Data dir {} is already used by peer ID {}",
+                &filename.parent().unwrap(),
+                contents.trim()
+            );
+        }
+    } else {
+        let mut file = File::create(&filename).expect("Couldn't create peer_id file");
+        file.write_all(peer_id.to_string().as_bytes())
+            .expect("Couldn't write peer_id file");
     }
 }

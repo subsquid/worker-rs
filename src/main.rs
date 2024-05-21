@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
                     transport_builder,
                     scheduler_id,
                     logs_collector_id,
-                    args.data_dir.join("logs.db"),
+                    args.data_dir,
                 )
                 .await?,
             );
