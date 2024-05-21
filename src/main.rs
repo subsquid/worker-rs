@@ -16,6 +16,13 @@ use subsquid_worker::storage::manager::StateManager;
 use subsquid_worker::transport::http::HttpTransport;
 use subsquid_worker::transport::p2p::create_p2p_transport;
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 fn setup_tracing() -> Result<()> {
     let fmt = tracing_subscriber::fmt::layer()
         .compact()

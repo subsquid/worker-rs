@@ -1191,7 +1191,7 @@ checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 [[package]]
 name = "contract-client"
 version = "1.0.0-rc1"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git#7412a2c565da669a6845d7c5080a5b77d5f53828"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#ed9ee4e612b407729cd59d90d2e1749e93f83981"
 dependencies = [
  "async-trait",
  "clap",
@@ -6263,8 +6263,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-messages"
-version = "1.0.0-rc1"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git#7412a2c565da669a6845d7c5080a5b77d5f53828"
+version = "1.0.0-rc2"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#ed9ee4e612b407729cd59d90d2e1749e93f83981"
 dependencies = [
  "anyhow",
  "hex",
@@ -6278,8 +6278,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-network-transport"
-version = "1.0.0-rc1"
-source = "git+ssh://git@github.com/subsquid/subsquid-network.git#7412a2c565da669a6845d7c5080a5b77d5f53828"
+version = "1.0.0-rc2"
+source = "git+ssh://git@github.com/subsquid/subsquid-network.git#ed9ee4e612b407729cd59d90d2e1749e93f83981"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6307,7 +6307,7 @@ dependencies = [
 
 [[package]]
 name = "subsquid-worker"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -6341,6 +6341,7 @@ dependencies = [
  "subsquid-messages",
  "subsquid-network-transport",
  "thiserror",
+ "tikv-jemallocator",
  "tokio",
  "tokio-rusqlite",
  "tokio-stream",
@@ -6512,6 +6513,26 @@ dependencies = [
  "byteorder",
  "integer-encoding",
  "ordered-float 2.10.1",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.5.4+5.3.0-patched"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9402443cb8fd499b6f327e40565234ff34dbda27460c5b47db0db77443dd85d1"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "965fe0c26be5c56c94e38ba547249074803efd52adfb66de62107d95aab3eaca"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

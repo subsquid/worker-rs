@@ -9,7 +9,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 
 FROM chef AS builder
-RUN apt-get update && apt-get install protobuf-compiler pkg-config libssl-dev libsqlite3-dev  -y
+RUN apt-get update && apt-get install protobuf-compiler pkg-config libssl-dev libsqlite3-dev build-essential  -y
 
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=ssh cargo chef cook --release --recipe-path recipe.json

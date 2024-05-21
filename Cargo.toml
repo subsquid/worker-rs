@@ -1,6 +1,6 @@
 [package]
 name = "subsquid-worker"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 edition = "2021"
 
 [[bin]]
@@ -11,6 +11,7 @@ path = "src/main.rs"
 anyhow = "1.0.79"
 async-stream = "0.3.5"
 async-trait = "0.1.79"
+atomic_enum = { version = "0.3.0", features = ["cas"] }
 axum = { version = "0.7.4", features = ["http2"] }
 base64 = "0.21.7"
 camino = "1.1.6"
@@ -47,9 +48,11 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 walkdir = "2.5.0"
 
 contract-client = { git = "ssh://git@github.com/subsquid/subsquid-network.git", version = "1.0.0-rc1" }
-subsquid-messages = { git = "ssh://git@github.com/subsquid/subsquid-network.git", version = "1.0.0-rc1" }
-subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", version = "1.0.0-rc1", features = ["worker", "metrics"] }
-atomic_enum = { version = "0.3.0", features = ["cas"] }
+subsquid-messages = { git = "ssh://git@github.com/subsquid/subsquid-network.git", version = "1.0.0-rc2" }
+subsquid-network-transport = { git = "ssh://git@github.com/subsquid/subsquid-network.git", version = "1.0.0-rc2", features = ["worker", "metrics"] }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.5"
 
 [profile.release]
 debug = true
