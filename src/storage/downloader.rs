@@ -16,6 +16,19 @@ use super::{
     local_fs::add_temp_prefix,
 };
 
+lazy_static::lazy_static! {
+    static ref S3_TIMEOUT: std::time::Duration = std::env::var("S3_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(60));
+    static ref S3_READ_TIMEOUT: std::time::Duration = std::env::var("S3_READ_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(3));
+}
+
 #[derive(Default)]
 pub struct ChunkDownloader {
     futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
@@ -43,15 +56,21 @@ impl ChunkDownloader {
             .unwrap_or_else(|| {
                 panic!("Dataset {} not found", chunk.dataset);
             });
+        let num_files = files.len();
         let headers = datasets_index.get_headers();
         let client = reqwest::ClientBuilder::new()
             .default_headers(headers.clone())
+            .timeout(*S3_TIMEOUT)
+            .read_timeout(*S3_READ_TIMEOUT)
             .build()
             .expect("Can't create HTTP client");
         self.futures.push(tokio::spawn(async move {
             tokio::select! {
                 result = download_dir(files, dst, &client) => {
                     (chunk, result)
+                }
+                _ = tokio::time::sleep(*S3_TIMEOUT * num_files as u32) => {
+                    (chunk, Err(anyhow!("Download timed out")))
                 }
                 _ = cancel_token.cancelled_owned() => {
                     (chunk, Err(anyhow!("Download cancelled")))
