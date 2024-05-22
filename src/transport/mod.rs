@@ -28,7 +28,9 @@ pub struct QueryTask {
 
 pub trait Transport: Send + Sync {
     fn send_ping(&self, state: State) -> impl futures::Future<Output = Result<()>> + Send;
-    fn stream_assignments(&self) -> impl futures::Stream<Item = WorkerAssignment> + 'static + Send;
+    fn stream_assignments(
+        &self,
+    ) -> impl futures::Stream<Item = Option<WorkerAssignment>> + 'static + Send;
     fn stream_queries(&self) -> impl futures::Stream<Item = QueryTask> + 'static + Send;
     fn run(
         &self,

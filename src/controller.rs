@@ -170,12 +170,16 @@ impl<T: Transport + 'static> Worker<T> {
             .take_until(cancellation_token.cancelled());
         tokio::pin!(assignments);
         while let Some(assignment) = assignments.next().await {
-            match parse_assignment(assignment) {
-                Ok((chunks, datasets_index)) => {
+            match assignment.map(parse_assignment) {
+                Some(Ok((chunks, datasets_index))) => {
                     state_manager.set_datasets_index(datasets_index);
                     state_manager.set_desired_chunks(chunks);
                 }
-                Err(e) => warn!("Invalid assignment: {e:?}"),
+                Some(Err(e)) => warn!("Invalid assignment: {e:?}"),
+                None => {
+                    // Don't waste resources because the last assignment is stale
+                    state_manager.stop_downloads();
+                }
             }
         }
     }

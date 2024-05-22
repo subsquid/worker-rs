@@ -41,8 +41,8 @@ pub struct P2PTransport<EventStream> {
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
     worker_id: PeerId,
-    assignments_tx: watch::Sender<WorkerAssignment>,
-    assignments_rx: UseOnce<watch::Receiver<WorkerAssignment>>,
+    assignments_tx: watch::Sender<Option<WorkerAssignment>>,
+    assignments_rx: UseOnce<watch::Receiver<Option<WorkerAssignment>>>,
     queries_tx: mpsc::Sender<QueryTask>,
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
 }
@@ -136,12 +136,15 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
             }
             Some(Status::Jailed(reason)) => {
                 warn!("Worker jailed until the end of epoch: {reason}");
+                self.assignments_tx
+                    .send(None)
+                    .expect("Assignment subscriber dropped");
                 metrics::set_status(metrics::WorkerStatus::Jailed);
             }
             Some(Status::Active(assignment)) => {
                 info!("Received pong from the scheduler");
                 self.assignments_tx
-                    .send(assignment)
+                    .send(Some(assignment))
                     .expect("Assignment subscriber dropped");
                 metrics::set_status(metrics::WorkerStatus::Active);
             }
@@ -323,7 +326,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send> super::Transport
         Ok(())
     }
 
-    fn stream_assignments(&self) -> impl futures::Stream<Item = WorkerAssignment> + 'static {
+    fn stream_assignments(
+        &self,
+    ) -> impl futures::Stream<Item = Option<WorkerAssignment>> + 'static {
         let rx = self.assignments_rx.take().unwrap();
         WatchStream::from_changes(rx)
     }

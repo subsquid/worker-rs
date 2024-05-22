@@ -59,6 +59,17 @@ impl State {
         status
     }
 
+    // make desired = available + downloading
+    pub fn stop_downloads(&mut self) -> UpdateStatus {
+        if self.to_download.is_empty() {
+            return UpdateStatus::Unchanged;
+        };
+        self.desired
+            .retain(|chunk| !self.to_download.contains(chunk));
+        self.to_download.clear();
+        UpdateStatus::Updated
+    }
+
     pub fn take_next_download(&mut self) -> Option<ChunkRef> {
         let chunk_ref = {
             // TODO: use priority queue if it's slow

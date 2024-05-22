@@ -128,6 +128,15 @@ impl StateManager {
         *self.datasets_index.lock() = index;
     }
 
+    pub fn stop_downloads(&self) {
+        match self.state.lock().stop_downloads() {
+            UpdateStatus::Unchanged => {}
+            UpdateStatus::Updated => {
+                self.notify.notify_one();
+            }
+        }
+    }
+
     pub fn find_chunks<'s>(
         &'s self,
         encoded_dataset: &str,

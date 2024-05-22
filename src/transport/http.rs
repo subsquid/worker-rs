@@ -43,7 +43,9 @@ impl Transport for HttpTransport {
     }
 
     #[allow(unreachable_code)]
-    fn stream_assignments(&self) -> impl futures::Stream<Item = WorkerAssignment> + 'static {
+    fn stream_assignments(
+        &self,
+    ) -> impl futures::Stream<Item = Option<WorkerAssignment>> + 'static {
         unimplemented!();
         futures::stream::empty()
     }
