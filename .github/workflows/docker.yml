@@ -12,7 +12,7 @@ env:
 jobs:
   publish:
     name: Build and publish docker image
-    runs-on: [self-hosted, dev-server]
+    runs-on: ubuntu-latest
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
