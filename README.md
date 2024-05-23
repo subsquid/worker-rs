@@ -5,3 +5,6 @@ A worker is a service that downloads assigned data chunks from persistent storag
 - Decentralized. In this setup, the assignment comes from a [scheduler](https://github.com/subsquid/archive-router/tree/b01d86aaf9fb5e14b16c3d24eb7419d413ce8b46/crates/network-scheduler) via a [P2P communication protocol](https://github.com/subsquid/subsquid-network/tree/main/transport). The chunks can be reassigned as the workers join and leave the network.
 
 The full network architecture can be found [here](https://github.com/subsquid/subsquid-network-contracts/wiki/Network-architecture#panthalassa-testnet).
+
+## Usage
+You can find instructions for how to run your own worker [here](https://github.com/subsquid/subsquid-network-contracts/wiki/Tethys-worker-installation).
