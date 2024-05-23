@@ -4,7 +4,10 @@ WORKDIR /app
 
 
 FROM chef AS planner
-COPY . .
+COPY Cargo.toml .
+COPY Cargo.lock .
+COPY src ./src
+COPY benches ./benches
 RUN cargo chef prepare --recipe-path recipe.json
 
 
@@ -14,7 +17,10 @@ RUN apt-get update && apt-get install protobuf-compiler pkg-config libssl-dev li
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=ssh cargo chef cook --release --recipe-path recipe.json
 
-COPY . .
+COPY Cargo.toml .
+COPY Cargo.lock .
+COPY src ./src
+COPY benches ./benches
 RUN --mount=type=ssh cargo build --release
 
 
