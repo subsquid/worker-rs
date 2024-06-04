@@ -5,8 +5,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::{family::Family, gauge::Gauge, histogram::Histogram, info::Info};
 use prometheus_client::registry::{Registry, Unit};
 
-use crate::query::error::QueryError;
-use crate::query::result::QueryResult;
+use crate::query::result::{QueryError, QueryResult};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum WorkerStatus {
@@ -60,7 +59,7 @@ pub fn set_status(status: WorkerStatus) {
         .set(1);
 }
 
-pub fn query_executed(result: &Result<QueryResult, QueryError>) {
+pub fn query_executed(result: &QueryResult) {
     let (status, result) = match result {
         Ok(result) => (QueryStatus::Ok, Some(result)),
         Err(QueryError::NoAllocation) => (QueryStatus::NoAllocation, None),

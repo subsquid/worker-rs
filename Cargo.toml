@@ -18,7 +18,6 @@ base64 = "0.21.7"
 camino = "1.1.6"
 clap = { version = "4.4.18", features = ["derive", "env"] }
 criterion = { version = "0.5.1", features = ["async_tokio"] }
-datafusion = "34.0.0"
 dotenv = "0.15.0"
 flate2 = "1.0.28"
 futures = "0.3.30"
@@ -51,6 +50,7 @@ walkdir = "2.5.0"
 contract-client = { git = "https://github.com/subsquid/subsquid-network.git", version = "1.0.2" }
 subsquid-messages = { git = "https://github.com/subsquid/subsquid-network.git", version = "1.0.1" }
 subsquid-network-transport = { git = "https://github.com/subsquid/subsquid-network.git", version = "1.0.3", features = ["worker", "metrics"] }
+sqn-query = { git = "ssh://git@github.com/subsquid/sqn-query.git", version = "0.1.0" }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
@@ -58,7 +58,3 @@ tikv-jemallocator = "0.5"
 [profile.release]
 debug = true
 opt-level = 3
-
-[[bench]]
-name = "query"
-harness = false

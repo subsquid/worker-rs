@@ -10,7 +10,7 @@ use subsquid_network_transport::PeerId;
 use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
-    query::{self, error::QueryError, eth::BatchRequest, result::QueryResult},
+    query::result::{QueryError, QueryResult},
     storage::{
         datasets_index::DatasetsIndex,
         manager::{self, StateManager},
@@ -41,7 +41,7 @@ pub struct QueryTask {
     pub dataset: Dataset,
     pub query_str: String,
     pub client_id: Option<PeerId>,
-    pub response_sender: oneshot::Sender<Result<QueryResult, QueryError>>,
+    pub response_sender: oneshot::Sender<QueryResult>,
 }
 
 impl<A: AllocationsChecker> Worker<A> {
@@ -82,7 +82,7 @@ impl<A: AllocationsChecker> Worker<A> {
         query_str: String,
         dataset: Dataset,
         client_id: Option<PeerId>,
-    ) -> Option<impl Future<Output = Result<QueryResult, QueryError>> + '_> {
+    ) -> Option<impl Future<Output = QueryResult> + '_> {
         let (resp_tx, resp_rx) = oneshot::channel();
         match self.queries_tx.try_send(QueryTask {
             dataset,
@@ -143,31 +143,7 @@ impl<A: AllocationsChecker> Worker<A> {
     }
 
     // TODO: process all chunks, not only the first one
-    async fn execute_query(
-        &self,
-        query_str: String,
-        dataset: String,
-    ) -> Result<QueryResult, QueryError> {
-        let query: BatchRequest = serde_json::from_str(query_str.as_str())
-            .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
-        let chunks_guard = self
-            .state_manager
-            .find_chunks(&dataset, (query.from_block as u32).into())?;
-        let path = chunks_guard.iter().next().cloned();
-        if let Some(path) = path {
-            tokio::spawn(async move {
-                let ctx = query::context::prepare_query_context(&path).await.unwrap();
-                let result = query::processor::process_query(&ctx, query).await?;
-                Ok(QueryResult::new(result, 1)?)
-            })
-            .await
-            .unwrap_or_else(|e| {
-                Err(QueryError::Other(
-                    anyhow::Error::new(e).context("Query processing task panicked"),
-                ))
-            })
-        } else {
-            Err(QueryError::NotFound)
-        }
+    async fn execute_query(&self, query_str: String, dataset: String) -> QueryResult {
+        todo!();
     }
 }
