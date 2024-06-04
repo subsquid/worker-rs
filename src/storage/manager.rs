@@ -29,6 +29,7 @@ pub struct StateManager {
     state: Mutex<State>,
     notify: tokio::sync::Notify,
     datasets_index: Mutex<DatasetsIndex>,
+    concurrent_downloads: usize,
 }
 
 pub struct Status {
@@ -38,7 +39,7 @@ pub struct Status {
 }
 
 impl StateManager {
-    pub async fn new(workdir: PathBuf) -> Result<Self> {
+    pub async fn new(workdir: PathBuf, concurrent_downloads: usize) -> Result<Self> {
         let fs = LocalFs::new(workdir);
         remove_temps(&fs)?;
         let existing_chunks = load_state(&fs).await?;
@@ -47,11 +48,12 @@ impl StateManager {
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
+            concurrent_downloads,
             ..Default::default()
         })
     }
 
-    pub async fn run(&self, cancellation_token: CancellationToken, concurrency: usize) {
+    pub async fn run(&self, cancellation_token: CancellationToken) {
         let mut downloader = ChunkDownloader::default();
         loop {
             self.state.lock().report_status();
@@ -89,7 +91,7 @@ impl StateManager {
             }
 
             let index = self.datasets_index.lock();
-            while downloader.download_count() < concurrency {
+            while downloader.download_count() < self.concurrent_downloads {
                 if let Some(chunk) = self.state.lock().take_next_download() {
                     info!("Downloading chunk {chunk}");
                     let dst = self.chunk_path(&chunk);

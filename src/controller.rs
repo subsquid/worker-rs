@@ -7,7 +7,7 @@ use crate::{
     transport::Transport,
     types::dataset::Dataset,
 };
-use futures::{self, StreamExt};
+use futures::{self, Future, StreamExt};
 use itertools::Itertools;
 use std::{sync::Arc, time::Duration};
 use tokio::{task::JoinError, time::MissedTickBehavior};
@@ -30,6 +30,7 @@ pub struct Worker<T: Transport> {
     state_manager: Arc<StateManager>,
     transport: Arc<T>,
     allocations_checker: Arc<dyn AllocationsChecker>,
+    ping_interval: Duration,
 }
 
 impl<T: Transport + 'static> Worker<T> {
@@ -37,66 +38,37 @@ impl<T: Transport + 'static> Worker<T> {
         state_manager: Arc<StateManager>,
         transport: Arc<T>,
         allocations_checker: Arc<dyn AllocationsChecker>,
+        ping_interval: Duration,
     ) -> Self {
         Self {
             state_manager,
             transport,
             allocations_checker,
+            ping_interval,
         }
     }
 
-    pub async fn run(
-        &self,
-        ping_interval: Duration,
-        cancellation_token: CancellationToken,
-        concurrent_downloads: usize,
-    ) -> Result<(), JoinError> {
-        let transport = self.transport.clone();
-        let state_manager = self.state_manager.clone();
+    pub async fn run(&self, cancellation_token: CancellationToken) -> Result<(), JoinError> {
         let tasks = [
             (
                 "ping_process",
-                tokio::spawn(Self::ping_forever(
-                    self.state_manager.clone(),
-                    self.transport.clone(),
-                    ping_interval,
-                    cancellation_token.child_token(),
-                )),
+                tokio::spawn(self.ping_forever(cancellation_token.child_token())),
             ),
             (
                 "assignment_handler",
-                tokio::spawn(Self::handle_assignments_forever(
-                    self.state_manager.clone(),
-                    self.transport.clone(),
-                    cancellation_token.child_token(),
-                )),
+                tokio::spawn(self.handle_assignments_forever(cancellation_token.child_token())),
             ),
             (
                 "queries_handler",
-                tokio::spawn(Self::handle_queries_forever(
-                    self.state_manager.clone(),
-                    self.transport.clone(),
-                    self.allocations_checker.clone(),
-                    cancellation_token.child_token(),
-                )),
+                tokio::spawn(self.handle_queries_forever(cancellation_token.child_token())),
             ),
             (
                 "transport_process",
-                tokio::spawn({
-                    let cancellation_token = cancellation_token.child_token();
-                    async move { transport.run(cancellation_token).await }
-                }),
+                tokio::spawn(self.run_transport(cancellation_token.child_token())),
             ),
             (
                 "state_manager",
-                tokio::spawn({
-                    let cancellation_token = cancellation_token.child_token();
-                    async move {
-                        state_manager
-                            .run(cancellation_token, concurrent_downloads)
-                            .await
-                    }
-                }),
+                tokio::spawn(self.run_state_manager(cancellation_token.child_token())),
             ),
             (
                 "allocations_updater",
@@ -130,77 +102,83 @@ impl<T: Transport + 'static> Worker<T> {
     }
 
     #[instrument(skip_all)]
-    async fn ping_forever(
-        state_manager: Arc<StateManager>,
-        transport: Arc<T>,
-        interval: Duration,
-        cancellation_token: CancellationToken,
-    ) {
-        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    fn ping_forever(&self, cancellation_token: CancellationToken) -> impl Future<Output = ()> {
+        let mut timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + self.ping_interval,
+            self.ping_interval,
+        );
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tokio::select!(
-                _ = timer.tick() => {},
-                _ = cancellation_token.cancelled() => {
-                    break;
-                },
-            );
-            debug!("Sending ping");
-            let status = state_manager.current_status();
-            let result = transport
-                .send_ping(crate::transport::State {
-                    datasets: status.available,
-                    stored_bytes: status.stored_bytes,
-                })
-                .await;
-            if let Err(err) = result {
-                warn!("Couldn't send ping: {:?}", err);
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
-    async fn handle_assignments_forever(
-        state_manager: Arc<StateManager>,
-        transport: Arc<T>,
-        cancellation_token: CancellationToken,
-    ) {
-        let assignments = transport
-            .stream_assignments()
-            .take_until(cancellation_token.cancelled());
-        tokio::pin!(assignments);
-        while let Some(assignment) = assignments.next().await {
-            match assignment.map(parse_assignment) {
-                Some(Ok((chunks, datasets_index))) => {
-                    state_manager.set_datasets_index(datasets_index);
-                    state_manager.set_desired_chunks(chunks);
-                }
-                Some(Err(e)) => warn!("Invalid assignment: {e:?}"),
-                None => {
-                    // Don't waste resources because the last assignment is stale
-                    state_manager.stop_downloads();
+        let state_manager = self.state_manager.clone();
+        let transport = self.transport.clone();
+        async {
+            loop {
+                tokio::select!(
+                    _ = timer.tick() => {},
+                    _ = cancellation_token.cancelled() => {
+                        break;
+                    },
+                );
+                debug!("Sending ping");
+                let status = state_manager.current_status();
+                let result = transport
+                    .send_ping(crate::transport::State {
+                        datasets: status.available,
+                        stored_bytes: status.stored_bytes,
+                    })
+                    .await;
+                if let Err(err) = result {
+                    warn!("Couldn't send ping: {:?}", err);
                 }
             }
         }
     }
 
     #[instrument(skip_all)]
-    async fn handle_queries_forever(
-        state_manager: Arc<StateManager>,
-        transport: Arc<T>,
-        allocations_checker: Arc<dyn AllocationsChecker>,
+    fn handle_assignments_forever(
+        &self,
         cancellation_token: CancellationToken,
-    ) {
-        let queries = transport.stream_queries();
-        queries
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(*PARALLEL_QUERIES, |query_task| {
-                let state_manager = state_manager.clone();
-                let allocations_checker = allocations_checker.clone();
-                async move {
-                    tracing::debug!("Running query from {}", query_task.peer_id);
-                    let result =
-                        match allocations_checker.try_spend(query_task.peer_id).await {
+    ) -> impl Future<Output = ()> {
+        let transport = self.transport.clone();
+        let state_manager = self.state_manager.clone();
+        async move {
+            let assignments = transport
+                .stream_assignments()
+                .take_until(cancellation_token.cancelled());
+            tokio::pin!(assignments);
+            while let Some(assignment) = assignments.next().await {
+                match assignment.map(parse_assignment) {
+                    Some(Ok((chunks, datasets_index))) => {
+                        state_manager.set_datasets_index(datasets_index);
+                        state_manager.set_desired_chunks(chunks);
+                    }
+                    Some(Err(e)) => warn!("Invalid assignment: {e:?}"),
+                    None => {
+                        // Don't waste resources because the last assignment is stale
+                        state_manager.stop_downloads();
+                    }
+                }
+            }
+        }
+    }
+
+    #[instrument(skip_all)]
+    fn handle_queries_forever(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> impl Future<Output = ()> {
+        let transport = self.transport.clone();
+        let state_manager = self.state_manager.clone();
+        let allocations_checker = self.allocations_checker.clone();
+        async move {
+            let queries = transport.stream_queries();
+            queries
+                .take_until(cancellation_token.cancelled_owned())
+                .for_each_concurrent(*PARALLEL_QUERIES, |query_task| {
+                    let state_manager = state_manager.clone();
+                    let allocations_checker = allocations_checker.clone();
+                    async move {
+                        tracing::debug!("Running query from {}", query_task.peer_id);
+                        let result = match allocations_checker.try_spend(query_task.peer_id).await {
                             Ok(gateway_allocations::Status::Spent) => tokio::task::spawn(
                                 run_query(state_manager, query_task.query, query_task.dataset),
                             )
@@ -215,13 +193,30 @@ impl<T: Transport + 'static> Worker<T> {
                             }
                             Err(e) => panic!("Couldn't check CU allocations: {e:?}"),
                         };
-                    report_metrics(&result);
-                    if query_task.response_sender.send(result).is_err() {
-                        tracing::error!("Query result couldn't be sent");
+                        report_metrics(&result);
+                        if query_task.response_sender.send(result).is_err() {
+                            tracing::error!("Query result couldn't be sent");
+                        }
                     }
-                }
-            })
-            .await;
+                })
+                .await;
+        }
+    }
+
+    #[instrument(skip_all)]
+    fn run_transport(&self, cancellation_token: CancellationToken) -> impl Future<Output = ()> {
+        let transport = self.transport.clone();
+        async move { transport.run(cancellation_token).await }
+    }
+
+    #[instrument(skip_all)]
+    fn run_state_manager(&self, cancellation_token: CancellationToken) -> impl Future<Output = ()> {
+        let state_manager = self.state_manager.clone();
+        async move {
+            state_manager
+                .run(cancellation_token)
+                .await
+        }
     }
 }
 

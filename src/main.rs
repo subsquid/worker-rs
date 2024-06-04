@@ -92,7 +92,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut metrics_registry = Default::default();
 
-    let state_manager = Arc::new(StateManager::new(args.data_dir.join("worker")).await?);
+    let state_manager =
+        Arc::new(StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?);
 
     let cancellation_token = create_cancellation_token()?;
 
@@ -112,13 +113,10 @@ async fn main() -> anyhow::Result<()> {
                 state_manager.clone(),
                 transport,
                 Arc::new(allocations_checker::NoopAllocationsChecker {}),
+                args.ping_interval_sec,
             );
             let (_, server_result) = tokio::try_join!(
-                worker.run(
-                    args.ping_interval_sec,
-                    cancellation_token.clone(),
-                    args.concurrent_downloads,
-                ),
+                worker.run(cancellation_token.clone()),
                 tokio::spawn(
                     HttpServer::with_http(state_manager, http_args, metrics_registry)
                         .run(args.port, cancellation_token.clone()),
@@ -163,13 +161,10 @@ async fn main() -> anyhow::Result<()> {
                 state_manager.clone(),
                 transport.clone(),
                 allocations_checker,
+                args.ping_interval_sec,
             );
             let (_, server_result) = tokio::try_join!(
-                worker.run(
-                    args.ping_interval_sec,
-                    cancellation_token.clone(),
-                    args.concurrent_downloads,
-                ),
+                worker.run(cancellation_token.clone()),
                 tokio::spawn(
                     HttpServer::with_p2p(metrics_registry)
                         .run(args.port, cancellation_token.clone()),
