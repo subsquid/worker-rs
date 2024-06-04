@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 state_manager.clone(),
                 transport,
                 Arc::new(allocations_checker::NoopAllocationsChecker {}),
-                args.ping_interval_sec,
+                args.ping_interval,
             );
             let (_, server_result) = tokio::try_join!(
                 worker.run(cancellation_token.clone()),
@@ -127,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Mode::P2P(P2PArgs {
             scheduler_id,
             logs_collector_id,
+            network_polling_interval,
             transport: transport_args,
             ..
         }) => {
@@ -146,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
                 allocations_checker::RpcAllocationsChecker::new(
                     contract_client,
                     transport.local_peer_id(),
+                    network_polling_interval,
                 )
                 .await?,
             );
@@ -161,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
                 state_manager.clone(),
                 transport.clone(),
                 allocations_checker,
-                args.ping_interval_sec,
+                args.ping_interval,
             );
             let (_, server_result) = tokio::try_join!(
                 worker.run(cancellation_token.clone()),

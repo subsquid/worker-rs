@@ -13,7 +13,7 @@ const SINGLE_EXECUTION_COST: u64 = 1;
 
 #[async_trait]
 pub trait AllocationsChecker: Sync + Send {
-    async fn run(&self, polling_interval: Duration, cancellation_token: CancellationToken);
+    async fn run(&self, cancellation_token: CancellationToken);
 
     async fn try_spend(&self, gateway_id: PeerId) -> Result<Status>;
 }
@@ -22,7 +22,7 @@ pub struct NoopAllocationsChecker {}
 
 #[async_trait]
 impl AllocationsChecker for NoopAllocationsChecker {
-    async fn run(&self, _polling_interval: Duration, cancellation_token: CancellationToken) {
+    async fn run(&self, cancellation_token: CancellationToken) {
         cancellation_token.cancelled_owned().await;
     }
 
@@ -31,30 +31,35 @@ impl AllocationsChecker for NoopAllocationsChecker {
     }
 }
 
-// TODO: persist data on disk
 pub struct RpcAllocationsChecker {
     client: Box<dyn contract_client::Client>,
     own_id: contract_client::U256,
     storage: Mutex<ComputeUnitsStorage>,
+    polling_interval: Duration,
 }
 
 impl RpcAllocationsChecker {
-    pub async fn new(client: Box<dyn contract_client::Client>, peer_id: PeerId) -> Result<Self> {
+    pub async fn new(
+        client: Box<dyn contract_client::Client>,
+        peer_id: PeerId,
+        polling_interval: Duration,
+    ) -> Result<Self> {
         let own_id = client.worker_id(peer_id).await?;
         Ok(Self {
             client,
             own_id,
             storage: Default::default(),
+            polling_interval,
         })
     }
 }
 
 #[async_trait]
 impl AllocationsChecker for RpcAllocationsChecker {
-    async fn run(&self, polling_interval: Duration, cancellation_token: CancellationToken) {
+    async fn run(&self, cancellation_token: CancellationToken) {
         let mut current_epoch = 0;
 
-        let mut timer = tokio::time::interval(polling_interval);
+        let mut timer = tokio::time::interval(self.polling_interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select!(

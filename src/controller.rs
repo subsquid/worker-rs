@@ -18,12 +18,6 @@ lazy_static::lazy_static! {
     static ref PARALLEL_QUERIES: usize = std::env::var("PARALLEL_QUERIES")
         .map(|s| s.parse().expect("Invalid PARALLEL_QUERIES"))
         .unwrap_or(4);
-
-    static ref NETWORK_POLLING_INTERVAL: Duration = Duration::from_secs(
-        std::env::var("NETWORK_POLLING_INTERVAL_SECS")
-            .map(|s| s.parse().expect("Invalid NETWORK_POLLING_INTERVAL_SECS"))
-            .unwrap_or(30)
-    );
 }
 
 pub struct Worker<T: Transport> {
@@ -77,7 +71,7 @@ impl<T: Transport + 'static> Worker<T> {
                     let allocations_checker = self.allocations_checker.clone();
                     async move {
                         allocations_checker
-                            .run(*NETWORK_POLLING_INTERVAL, cancellation_token)
+                            .run(cancellation_token)
                             .await
                     }
                 }),

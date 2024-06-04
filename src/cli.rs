@@ -28,8 +28,8 @@ pub struct Args {
     #[clap(env, hide(true), default_value_t = 3)]
     pub concurrent_downloads: usize,
 
-    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "10")]
-    pub ping_interval_sec: Duration,
+    #[clap(env = "PING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "10")]
+    pub ping_interval: Duration,
 
     #[clap(env, hide(true))]
     pub sentry_dsn: Option<String>,
@@ -62,6 +62,9 @@ pub struct P2PArgs {
     /// Peer ID of the logs collector
     #[clap(long, env)]
     pub logs_collector_id: PeerId,
+
+    #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30")]
+    pub network_polling_interval: Duration,
 
     #[command(flatten)]
     pub transport: TransportArgs,
