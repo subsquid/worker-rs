@@ -124,12 +124,15 @@ impl LogsStorage {
     }
 
     pub async fn get_logs(&self) -> Result<Vec<QueryExecuted>> {
+        const MAX_LOGS: usize = 256;
         self.db
             .call_unwrap(|db| {
                 let mut stmt = db
-                    .prepare_cached("SELECT seq_no, log_msg FROM query_logs")
+                    .prepare_cached(
+                        "SELECT seq_no, log_msg FROM query_logs ORDER BY seq_no LIMIT ?",
+                    )
                     .expect("Couldn't prepare logs query");
-                let logs = stmt.query([])?.and_then(|row| {
+                let logs = stmt.query([MAX_LOGS])?.and_then(|row| {
                     let seq_no: u64 = row.get(0)?;
                     let log_msg: Vec<u8> = row.get(1)?;
                     let mut log: QueryExecuted =
