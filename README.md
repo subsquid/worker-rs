@@ -7,4 +7,4 @@ A worker is a service that downloads assigned data chunks from persistent storag
 The full network architecture can be found [here](https://github.com/subsquid/subsquid-network-contracts/wiki/Network-architecture#panthalassa-testnet).
 
 ## Usage
-You can find instructions for how to run your own worker [here](https://github.com/subsquid/subsquid-network-contracts/wiki/Tethys-worker-installation).
+You can find instructions for how to run your own worker [here](https://docs.subsquid.io/subsquid-network/participate/worker/).
