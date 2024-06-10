@@ -20,17 +20,17 @@ use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
 use subsquid_network_transport::P2PTransportBuilder;
+use subsquid_worker::controller::http::HttpController;
+use subsquid_worker::controller::p2p::create_p2p_controller;
+use subsquid_worker::controller::worker::Worker;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use subsquid_worker::cli::{self, Args, P2PArgs};
-use subsquid_worker::controller::Worker;
-use subsquid_worker::gateway_allocations::allocations_checker::{self, AllocationsChecker};
+use subsquid_worker::gateway_allocations::allocations_checker;
 use subsquid_worker::http_server::Server as HttpServer;
 use subsquid_worker::metrics;
 use subsquid_worker::storage::manager::StateManager;
-use subsquid_worker::transport::http::HttpTransport;
-use subsquid_worker::transport::p2p::create_p2p_transport;
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let mut metrics_registry = Default::default();
 
     let state_manager =
-        Arc::new(StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?);
+        StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?;
 
     let cancellation_token = create_cancellation_token()?;
 
@@ -104,25 +104,25 @@ async fn main() -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION").to_owned(),
             )]);
             metrics::register_metrics(&mut metrics_registry, info);
-            let transport = Arc::new(HttpTransport::new(
+            let worker = Arc::new(Worker::new(
+                state_manager,
+                allocations_checker::NoopAllocationsChecker {},
+            ));
+            let controller = HttpController::new(
+                worker.clone(),
+                args.ping_interval,
                 http_args.worker_id.clone(),
                 http_args.worker_url.clone(),
                 http_args.router.clone(),
-            ));
-            let worker = Worker::new(
-                state_manager.clone(),
-                transport,
-                Arc::new(allocations_checker::NoopAllocationsChecker {}),
-                args.ping_interval,
             );
-            let (_, server_result) = tokio::try_join!(
-                worker.run(cancellation_token.clone()),
+            let (_, server_result) = tokio::join!(
+                controller.run(cancellation_token.clone()),
                 tokio::spawn(
-                    HttpServer::with_http(state_manager, http_args, metrics_registry)
+                    HttpServer::new(worker, Some(http_args), metrics_registry)
                         .run(args.port, cancellation_token.clone()),
                 )
-            )?;
-            server_result?;
+            );
+            server_result??;
         }
         cli::Mode::P2P(P2PArgs {
             scheduler_id,
@@ -133,46 +133,41 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             subsquid_network_transport::metrics::register_metrics(&mut metrics_registry);
             let transport_builder = P2PTransportBuilder::from_cli(transport_args).await?;
-            let contract_client = transport_builder.contract_client();
-            let transport = Arc::new(
-                create_p2p_transport(
-                    transport_builder,
-                    scheduler_id,
-                    logs_collector_id,
-                    args.data_dir,
-                )
-                .await?,
-            );
-            let allocations_checker: Arc<dyn AllocationsChecker> = Arc::new(
-                allocations_checker::RpcAllocationsChecker::new(
-                    contract_client,
-                    transport.local_peer_id(),
-                    network_polling_interval,
-                )
-                .await?,
-            );
-
             let info = Info::new(vec![
                 ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
-                ("peer_id".to_owned(), transport.local_peer_id().to_string()),
+                (
+                    "peer_id".to_owned(),
+                    transport_builder.local_peer_id().to_string(),
+                ),
             ]);
             metrics::register_metrics(&mut metrics_registry, info);
             metrics::register_p2p_metrics(&mut metrics_registry);
 
-            let worker = Worker::new(
-                state_manager.clone(),
-                transport.clone(),
-                allocations_checker,
+            let allocations_checker = allocations_checker::RpcAllocationsChecker::new(
+                transport_builder.contract_client(),
+                transport_builder.local_peer_id(),
+                network_polling_interval,
+            )
+            .await?;
+            let worker = Arc::new(Worker::new(state_manager, allocations_checker));
+            let controller = create_p2p_controller(
+                worker.clone(),
+                transport_builder,
+                scheduler_id,
+                logs_collector_id,
+                args.data_dir,
                 args.ping_interval,
-            );
-            let (_, server_result) = tokio::try_join!(
-                worker.run(cancellation_token.clone()),
+            )
+            .await?;
+
+            let (_, server_result) = tokio::join!(
+                controller.run(cancellation_token.clone()),
                 tokio::spawn(
-                    HttpServer::with_p2p(metrics_registry)
+                    HttpServer::new(worker, None, metrics_registry)
                         .run(args.port, cancellation_token.clone()),
                 )
-            )?;
-            server_result?;
+            );
+            server_result??;
         }
     };
     Ok(())

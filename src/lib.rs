@@ -6,6 +6,5 @@ pub mod logs_storage;
 pub mod metrics;
 pub mod query;
 pub mod storage;
-pub mod transport;
 pub mod types;
 pub mod util;

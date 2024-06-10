@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    cli::HttpArgs, controller, query::eth::BatchRequest, storage::manager::StateManager,
-    types::dataset::Dataset,
+    cli::HttpArgs, controller::worker::Worker,
+    gateway_allocations::allocations_checker::AllocationsChecker, types::dataset::Dataset,
 };
 
 use axum::{
@@ -15,28 +15,43 @@ use axum::{
 use prometheus_client::{encoding::text::encode, registry::Registry};
 use tokio_util::sync::CancellationToken;
 
-async fn get_status(state_manager: Arc<StateManager>, args: HttpArgs) -> Json<serde_json::Value> {
-    let status = state_manager.current_status();
-    Json(serde_json::json!({
-        "router_url": args.router,
-        "worker_id": args.worker_id,
-        "worker_url": args.worker_url,
-        "state": {
-            "available": status.available,
-            "downloading": status.downloading,
-        }
-    }))
+async fn get_status(
+    worker: Arc<Worker<impl AllocationsChecker>>,
+    args: Option<HttpArgs>,
+) -> Json<serde_json::Value> {
+    let status = worker.status();
+    match args {
+        Some(args) => Json(serde_json::json!({
+            "router_url": args.router,
+            "worker_id": args.worker_id,
+            "worker_url": args.worker_url,
+            "state": {
+                "available": status.available,
+                "downloading": status.downloading,
+            }
+        })),
+        None => Json(serde_json::json!({
+            "state": {
+                "available": status.available,
+                "downloading": status.downloading,
+            }
+        })),
+    }
 }
 
 async fn run_query(
-    state_manager: Arc<StateManager>,
+    worker: Arc<Worker<impl AllocationsChecker>>,
     Path(dataset): Path<Dataset>,
-    Json(query): Json<BatchRequest>,
+    query_str: String,
 ) -> Response {
-    controller::run_query(state_manager, query, dataset)
-        .await
-        .map(|result| result.raw_data)
-        .into_response()
+    if let Some(future) = worker.schedule_query(query_str, dataset, None) {
+        future.await.map(|result| result.raw_data).into_response()
+    } else {
+        Response::builder()
+            .status(529)
+            .body("Worker is overloaded".into())
+            .unwrap()
+    }
 }
 
 async fn get_metrics(registry: Arc<Registry>) -> impl IntoResponse {
@@ -64,9 +79,9 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn with_http(
-        state_manager: Arc<StateManager>,
-        args: HttpArgs,
+    pub fn new(
+        worker: Arc<Worker<impl AllocationsChecker + 'static>>,
+        args: Option<HttpArgs>,
         metrics_registry: Registry,
     ) -> Self {
         let metrics_registry = Arc::new(metrics_registry);
@@ -74,26 +89,18 @@ impl Server {
             .route(
                 "/status",
                 get({
-                    let state_manager = state_manager.clone();
-                    move || get_status(state_manager, args)
+                    let worker = worker.clone();
+                    move || get_status(worker, args)
                 }),
             )
             .route(
                 "/query/:dataset",
                 post({
-                    let state_manager = state_manager.clone();
-                    move |path, body| run_query(state_manager, path, body)
+                    let worker = worker.clone();
+                    move |path, body| run_query(worker, path, body)
                 }),
             )
             .route("/metrics", get(move || get_metrics(metrics_registry)));
-        let router = Self::add_common_layers(router);
-        Self { router }
-    }
-
-    pub fn with_p2p(metrics_registry: Registry) -> Self {
-        let metrics_registry = Arc::new(metrics_registry);
-        let router =
-            axum::Router::new().route("/metrics", get(move || get_metrics(metrics_registry)));
         let router = Self::add_common_layers(router);
         Self { router }
     }

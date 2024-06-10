@@ -5,6 +5,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::{family::Family, gauge::Gauge, histogram::Histogram, info::Info};
 use prometheus_client::registry::{Registry, Unit};
 
+use crate::query::error::QueryError;
 use crate::query::result::QueryResult;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -59,7 +60,17 @@ pub fn set_status(status: WorkerStatus) {
         .set(1);
 }
 
-pub fn query_executed(status: QueryStatus, result: Option<&QueryResult>) {
+pub fn query_executed(result: &Result<QueryResult, QueryError>) {
+    let (status, result) = match result {
+        Ok(result) => (QueryStatus::Ok, Some(result)),
+        Err(QueryError::NoAllocation) => (QueryStatus::NoAllocation, None),
+        Err(QueryError::NotFound | QueryError::BadRequest(_)) => {
+            (QueryStatus::BadRequest, None)
+        }
+        Err(QueryError::Other(_) | QueryError::ServiceOverloaded) => {
+            (QueryStatus::ServerError, None)
+        }
+    };
     QUERY_EXECUTED
         .get_or_create(&QueryExecutedLabels { status })
         .inc();

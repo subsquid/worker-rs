@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
@@ -6,27 +6,31 @@ use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
 use subsquid_messages::{
     query_executed, DatasetRanges, InputAndOutput, Ping, Pong, Query, QueryExecuted, SizeAndHash,
-    WorkerAssignment,
 };
 use subsquid_network_transport::{
     P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio_stream::wrappers::{ReceiverStream, WatchStream};
+use tokio::{
+    sync::{mpsc, watch},
+    time::MissedTickBehavior,
+};
+use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, log, warn};
 
 use crate::{
+    gateway_allocations::allocations_checker::RpcAllocationsChecker,
     logs_storage::LogsStorage,
     metrics,
     query::{error::QueryError, result::QueryResult},
+    storage::datasets_index::parse_assignment,
     util::{hash::sha3_256, UseOnce},
 };
 
-use super::QueryTask;
+use super::worker::Worker;
 
-const SERVICE_QUEUE_SIZE: usize = 16;
-const CONCURRENT_MESSAGES: usize = 32;
+const QUERIES_POOL_SIZE: usize = 16;
+const CONCURRENT_QUERY_MESSAGES: usize = 32;
 
 lazy_static! {
     static ref LOGS_SEND_INTERVAL: Duration = Duration::from_secs(
@@ -36,90 +40,166 @@ lazy_static! {
     );
 }
 
-pub struct P2PTransport<EventStream> {
+pub struct P2PController<EventStream> {
+    worker: Arc<Worker<RpcAllocationsChecker>>,
+    ping_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
     worker_id: PeerId,
-    assignments_tx: watch::Sender<Option<WorkerAssignment>>,
-    assignments_rx: UseOnce<watch::Receiver<Option<WorkerAssignment>>>,
-    queries_tx: mpsc::Sender<QueryTask>,
-    queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
+    queries_tx: mpsc::Sender<(PeerId, Query)>,
+    queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
+    last_collected_log_tx: watch::Sender<Option<u64>>,
 }
 
-pub async fn create_p2p_transport(
+pub async fn create_p2p_controller(
+    worker: Arc<Worker<RpcAllocationsChecker>>,
     transport_builder: P2PTransportBuilder,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     data_dir: PathBuf,
-) -> Result<P2PTransport<impl Stream<Item = WorkerEvent>>> {
+    ping_interval: Duration,
+) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
 
-    let (assignments_tx, assignments_rx) = watch::channel(Default::default());
-    let (queries_tx, queries_rx) = mpsc::channel(SERVICE_QUEUE_SIZE);
     let (event_stream, transport_handle) =
         transport_builder.build_worker(WorkerConfig::new(scheduler_id, logs_collector_id))?;
 
-    Ok(P2PTransport {
+    let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
+    let (last_collected_log_tx, _) = watch::channel(None);
+
+    Ok(P2PController {
+        worker,
+        ping_interval,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
         worker_id,
-        assignments_tx,
-        assignments_rx: UseOnce::new(assignments_rx),
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
+        last_collected_log_tx,
     })
 }
 
-impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
-    async fn run_receive_loop(&self, cancellation_token: CancellationToken) {
-        let event_stream = self.raw_event_stream.take().unwrap();
-        event_stream
+impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
+    pub async fn run(&self, cancellation_token: CancellationToken) {
+        // TODO: cancel all the tasks if one of them finishes
+        tokio::join!(
+            self.run_event_loop(cancellation_token.child_token()),
+            self.run_queries_loop(cancellation_token.child_token()),
+            self.run_ping_loop(cancellation_token.child_token(), self.ping_interval),
+            self.run_logs_loop(cancellation_token.child_token(), *LOGS_SEND_INTERVAL),
+            self.worker.run(cancellation_token.child_token()),
+        );
+    }
+
+    async fn run_queries_loop(&self, cancellation_token: CancellationToken) {
+        let queries_rx = self.queries_rx.take().unwrap();
+        ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_MESSAGES, |ev| async move {
-                match ev {
-                    WorkerEvent::Pong(pong) => self.handle_pong(pong),
-                    WorkerEvent::Query { peer_id, query } => {
-                        self.handle_query(peer_id, query).await
-                    }
-                    WorkerEvent::LogsCollected { last_seq_no } => {
-                        self.handle_logs_collected(last_seq_no).await
-                    }
-                }
+            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query)| async move {
+                self.handle_query(peer_id, query).await;
             })
             .await;
     }
 
-    async fn run_send_logs_loop(
+    async fn run_ping_loop(&self, cancellation_token: CancellationToken, ping_interval: Duration) {
+        let mut timer =
+            tokio::time::interval_at(tokio::time::Instant::now() + ping_interval, ping_interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        IntervalStream::new(timer)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each(|_| async move {
+                tracing::debug!("Sending ping");
+                let status = self.worker.status();
+                let ping = Ping {
+                    stored_ranges: status
+                        .available
+                        .into_iter()
+                        .map(|(dataset, ranges)| DatasetRanges {
+                            url: dataset,
+                            ranges: ranges.ranges,
+                        })
+                        .collect(),
+                    worker_id: Some(self.worker_id.to_string()),
+                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                    stored_bytes: Some(status.stored_bytes),
+                    ..Default::default()
+                };
+                let result = self.transport_handle.send_ping(ping);
+                if let Err(err) = result {
+                    warn!("Couldn't send ping: {:?}", err);
+                }
+            }).await;
+    }
+
+    async fn run_logs_loop(
         &self,
         cancellation_token: CancellationToken,
         interval: std::time::Duration,
     ) {
+        let mut last_collected_log_rx = self.last_collected_log_tx.subscribe();
+
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::select!(
-                _ = timer.tick() => {},
+            tokio::select! {
+                _ = timer.tick() => {
+                    if !self.logs_storage.is_initialized() {
+                        continue;
+                    }
+                    let logs = match self.logs_storage.get_logs().await {
+                        Ok(logs) => logs,
+                        Err(e) => {
+                            warn!("Couldn't get logs from storage: {e:?}");
+                            continue;
+                        }
+                    };
+
+                    self.try_send_logs(logs);
+                },
+                _ = last_collected_log_rx.changed() => {
+                    let last_seq_no = *last_collected_log_rx.borrow_and_update();
+                    self.logs_storage.logs_collected(last_seq_no).await;
+                }
                 _ = cancellation_token.cancelled() => {
                     break;
                 },
-            );
-
-            if !self.logs_storage.is_initialized() {
-                continue;
-            }
-            let logs = match self.logs_storage.get_logs().await {
-                Ok(logs) => logs,
-                Err(e) => {
-                    warn!("Couldn't get logs from storage: {e:?}");
-                    continue;
-                }
             };
+        }
+    }
 
-            self.try_send_logs(logs);
+    async fn run_event_loop(&self, cancellation_token: CancellationToken) {
+        let event_stream = self
+            .raw_event_stream
+            .take()
+            .unwrap()
+            .take_until(cancellation_token.cancelled_owned());
+        tokio::pin!(event_stream);
+
+        while let Some(ev) = event_stream.next().await {
+            match ev {
+                WorkerEvent::Pong(pong) => self.handle_pong(pong),
+                WorkerEvent::Query { peer_id, query } => {
+                    match self.queries_tx.try_send((peer_id, query)) {
+                        Ok(_) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!("Queries queue is full. Dropping query from {peer_id}");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            break;
+                        }
+                    }
+                }
+                WorkerEvent::LogsCollected { last_seq_no } => {
+                    let result = self.last_collected_log_tx.send(last_seq_no);
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -136,16 +216,18 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
             }
             Some(Status::Jailed(reason)) => {
                 warn!("Worker jailed until the end of epoch: {reason}");
-                self.assignments_tx
-                    .send(None)
-                    .expect("Assignment subscriber dropped");
+                self.worker.stop_downloads();
                 metrics::set_status(metrics::WorkerStatus::Jailed);
             }
             Some(Status::Active(assignment)) => {
                 info!("Received pong from the scheduler");
-                self.assignments_tx
-                    .send(Some(assignment))
-                    .expect("Assignment subscriber dropped");
+                match parse_assignment(assignment) {
+                    Ok((chunks, datasets_index)) => {
+                        self.worker.set_datasets_index(datasets_index);
+                        self.worker.set_desired_chunks(chunks);
+                    }
+                    Err(e) => warn!("Invalid assignment: {e:?}"),
+                }
                 metrics::set_status(metrics::WorkerStatus::Active);
             }
             None => {
@@ -154,13 +236,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
         }
     }
 
-    async fn handle_logs_collected(&self, last_collected_seq_no: Option<u64>) {
-        self.logs_storage
-            .logs_collected(last_collected_seq_no)
-            .await;
-    }
-
-    // Completes only when the query is processed and the result is sent
     async fn handle_query(&self, peer_id: PeerId, query: Query) {
         let query_id = query.query_id.clone().expect("got query without query_id");
 
@@ -173,13 +248,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
         if let Err(e) = &result {
             warn!("Query {query_id} execution failed: {e:?}");
         }
+        metrics::query_executed(&result);
 
         let log = if let Err(QueryError::NoAllocation) = result {
             None
         } else {
             Some(self.generate_log(&result, query, peer_id))
         };
-        self.send_query_result(query_id, result).await;
+        self.send_query_result(query_id, result);
         if let Some(log) = log {
             let result = self.logs_storage.save_log(log).await;
             if let Err(e) = result {
@@ -193,37 +269,22 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
         peer_id: PeerId,
         query: &Query,
     ) -> std::result::Result<QueryResult, QueryError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        if let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) {
-            let query = serde_json::from_str(query_str)
-                .map_err(|e| QueryError::BadRequest(e.to_string()))?;
-            match self.queries_tx.try_send(QueryTask {
-                dataset: dataset.clone(),
-                peer_id,
-                query,
-                response_sender: resp_tx,
-            }) {
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    return Err(QueryError::ServiceOverloaded);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    panic!("Query subscriber dropped");
-                }
-                Ok(_) => {
-                    metrics::PENDING_QUERIES.inc();
-                }
-            }
-        } else {
-            Err(QueryError::BadRequest(
+        let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) else {
+            return Err(QueryError::BadRequest(
                 "Some fields are missing in proto message".to_owned(),
             ))?;
+        };
+        if let Some(future) =
+            self.worker
+                .schedule_query(query_str.clone(), dataset.clone(), Some(peer_id))
+        {
+            future.await
+        } else {
+            Err(QueryError::ServiceOverloaded)
         }
-        resp_rx
-            .await
-            .expect("Query processor didn't produce a result")
     }
 
-    async fn send_query_result(
+    fn send_query_result(
         &self,
         query_id: String,
         result: std::result::Result<QueryResult, QueryError>,
@@ -301,50 +362,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PTransport<EventStream> {
             exec_time_ms: Some(0), // TODO: measure execution time
             ..Default::default()
         }
-    }
-}
-
-impl<EventStream: Stream<Item = WorkerEvent> + Send> super::Transport
-    for P2PTransport<EventStream>
-{
-    async fn send_ping(&self, state: super::State) -> Result<()> {
-        let ping = Ping {
-            stored_ranges: state
-                .datasets
-                .into_iter()
-                .map(|(dataset, ranges)| DatasetRanges {
-                    url: dataset,
-                    ranges: ranges.ranges,
-                })
-                .collect(),
-            worker_id: Some(self.worker_id.to_string()),
-            version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            stored_bytes: Some(state.stored_bytes),
-            ..Default::default()
-        };
-        self.transport_handle.send_ping(ping)?;
-        Ok(())
-    }
-
-    fn stream_assignments(
-        &self,
-    ) -> impl futures::Stream<Item = Option<WorkerAssignment>> + 'static {
-        let rx = self.assignments_rx.take().unwrap();
-        WatchStream::from_changes(rx)
-    }
-
-    fn stream_queries(&self) -> impl futures::Stream<Item = super::QueryTask> + 'static {
-        let rx = self.queries_rx.take().unwrap();
-        ReceiverStream::new(rx).inspect(|_| {
-            metrics::PENDING_QUERIES.dec();
-        })
-    }
-
-    async fn run(&self, cancellation_token: CancellationToken) {
-        tokio::join!(
-            self.run_receive_loop(cancellation_token.clone()),
-            self.run_send_logs_loop(cancellation_token, *LOGS_SEND_INTERVAL),
-        );
     }
 }
 

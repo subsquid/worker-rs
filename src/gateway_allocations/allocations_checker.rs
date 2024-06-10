@@ -15,7 +15,7 @@ const SINGLE_EXECUTION_COST: u64 = 1;
 pub trait AllocationsChecker: Sync + Send {
     async fn run(&self, cancellation_token: CancellationToken);
 
-    async fn try_spend(&self, gateway_id: PeerId) -> Result<Status>;
+    async fn try_spend(&self, gateway_id: Option<PeerId>) -> Result<Status>;
 }
 
 pub struct NoopAllocationsChecker {}
@@ -26,7 +26,7 @@ impl AllocationsChecker for NoopAllocationsChecker {
         cancellation_token.cancelled_owned().await;
     }
 
-    async fn try_spend(&self, _gateway_id: PeerId) -> Result<Status> {
+    async fn try_spend(&self, _gateway_id: Option<PeerId>) -> Result<Status> {
         Ok(Status::Spent)
     }
 }
@@ -90,10 +90,13 @@ impl AllocationsChecker for RpcAllocationsChecker {
         }
     }
 
-    async fn try_spend(&self, gateway_id: PeerId) -> Result<Status> {
-        Ok(self
-            .storage
-            .lock()
-            .try_spend_cus(gateway_id, SINGLE_EXECUTION_COST))
+    async fn try_spend(&self, gateway_id: Option<PeerId>) -> Result<Status> {
+        match gateway_id {
+            Some(gateway_id) => Ok(self
+                .storage
+                .lock()
+                .try_spend_cus(gateway_id, SINGLE_EXECUTION_COST)),
+            None => Ok(Status::NotEnoughCU),
+        }
     }
 }
