@@ -51,6 +51,7 @@ contract-client = { git = "https://github.com/subsquid/subsquid-network.git", ve
 subsquid-messages = { git = "https://github.com/subsquid/subsquid-network.git", version = "1.0.1" }
 subsquid-network-transport = { git = "https://github.com/subsquid/subsquid-network.git", version = "1.0.3", features = ["worker", "metrics"] }
 sqn-query = { git = "ssh://git@github.com/subsquid/sqn-query.git", version = "0.1.0" }
+polars-core = "0.40.0"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"

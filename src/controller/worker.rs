@@ -10,7 +10,7 @@ use subsquid_network_transport::PeerId;
 use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
-    query::result::{QueryError, QueryResult},
+    query::result::{QueryError, QueryOk, QueryResult},
     storage::{
         datasets_index::DatasetsIndex,
         manager::{self, StateManager},
@@ -144,6 +144,35 @@ impl<A: AllocationsChecker> Worker<A> {
 
     // TODO: process all chunks, not only the first one
     async fn execute_query(&self, query_str: String, dataset: String) -> QueryResult {
-        todo!();
+        let query = sqn_query::Query::from_json_bytes(query_str.as_bytes())
+            .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
+        let Some(first_block) = query.first_block() else {
+            return Err(QueryError::BadRequest(
+                "Query without first_block".to_owned(),
+            ));
+        };
+        let chunks_guard = self
+            .state_manager
+            .find_chunks(&dataset, (first_block as u32).into())?;
+        let Some(path) = chunks_guard.iter().next().cloned() else {
+            return Err(QueryError::NotFound);
+        };
+        tokio::task::spawn_blocking(move || {
+            polars_core::POOL.install(move || {
+                let plan = query.compile();
+                let mut blocks = plan.execute(path.as_str())?;
+                let data = Vec::with_capacity(1024 * 1024);
+                let mut writer = sqn_query::JsonArrayWriter::new(data);
+                writer.write_blocks(&mut blocks)?;
+                let bytes = writer.finish()?;
+                Ok(QueryOk::new(bytes, 1)?)
+            })
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(QueryError::Other(
+                anyhow::Error::new(e).context("Query processing task panicked"),
+            ))
+        })
     }
 }
