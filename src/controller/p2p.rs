@@ -64,8 +64,9 @@ pub async fn create_p2p_controller(
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
 
-    let (event_stream, transport_handle) =
-        transport_builder.build_worker(WorkerConfig::new(scheduler_id, logs_collector_id))?;
+    let (event_stream, transport_handle) = transport_builder
+        .build_worker(WorkerConfig::new(scheduler_id, logs_collector_id))
+        .await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (last_collected_log_tx, _) = watch::channel(None);
@@ -132,7 +133,8 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 if let Err(err) = result {
                     warn!("Couldn't send ping: {:?}", err);
                 }
-            }).await;
+            })
+            .await;
     }
 
     async fn run_logs_loop(
