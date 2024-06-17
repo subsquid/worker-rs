@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use futures::{Future, StreamExt};
-use subsquid_network_transport::PeerId;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+
+use subsquid_network_transport::PeerId;
 
 use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
@@ -26,7 +29,7 @@ lazy_static::lazy_static! {
 }
 
 pub struct Worker<A: AllocationsChecker> {
-    state_manager: StateManager,
+    state_manager: Arc<StateManager>,
     // TODO: move allocation checking to the controller
     allocations_checker: A,
     queries_tx: mpsc::Sender<QueryTask>,
@@ -44,7 +47,7 @@ impl<A: AllocationsChecker> Worker<A> {
     pub fn new(state_manager: StateManager, allocations_checker: A) -> Self {
         let (queries_tx, queries_rx) = mpsc::channel(*QUEUED_QUERIES);
         Self {
-            state_manager,
+            state_manager: Arc::new(state_manager),
             allocations_checker,
             queries_tx,
             queries_rx: UseOnce::new(queries_rx),
@@ -99,7 +102,9 @@ impl<A: AllocationsChecker> Worker<A> {
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
         let queries_rx = self.queries_rx.take().unwrap();
-        ReceiverStream::new(queries_rx)
+        let state_manager = self.state_manager.clone();
+        let state_manager_fut = state_manager.run(cancellation_token.child_token());
+        let worker_fut = ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled_owned())
             .for_each_concurrent(*PARALLEL_QUERIES, |query_task| async move {
                 metrics::PENDING_QUERIES.dec();
@@ -125,8 +130,9 @@ impl<A: AllocationsChecker> Worker<A> {
                 if query_task.response_sender.send(result).is_err() {
                     tracing::error!("Query result couldn't be sent");
                 }
-            })
-            .await;
+            });
+        // TODO: cancel all the tasks if one of them finishes
+        tokio::join!(state_manager_fut, worker_fut,);
     }
 
     // TODO: process all chunks, not only the first one
