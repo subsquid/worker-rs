@@ -17,6 +17,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Setup gcloud CLI
+      - uses: google-github-actions/setup-gcloud@v0.2.0
+        with:
+          project_id: subsquid-public
+          service_account_key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      # Configure Docker to use the gcloud command-line tool as a credential
+      # helper for authentication
+      - run: |-
+          gcloud --quiet auth configure-docker
+
       - name: Docker login
         uses: docker/login-action@v3
         with:
@@ -42,5 +53,6 @@ jobs:
           tags: |
             subsquid/p2p-worker:${{ env.WORKER_VERSION }}
             subsquid/p2p-worker:${{ inputs.tag }}
+            eu.gcr.io/subsquid-public/p2p-worker:${{ inputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
