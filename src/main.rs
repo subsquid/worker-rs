@@ -149,20 +149,29 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             let worker =
                 Arc::new(Worker::new(state_manager, allocations_checker).with_peer_id(peer_id));
-            let controller = create_p2p_controller(
-                worker.clone(),
-                transport_builder,
-                scheduler_id,
-                logs_collector_id,
-                args.data_dir,
-                args.ping_interval,
-            )
-            .await?;
+
+            let controller_fut = async {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                    },
+                    controller = create_p2p_controller(
+                        worker.clone(),
+                        transport_builder,
+                        scheduler_id,
+                        logs_collector_id,
+                        args.data_dir,
+                        args.ping_interval,
+                    ) => {
+                        controller?.run(cancellation_token.clone()).await;
+                    }
+                }
+                anyhow::Ok(())
+            };
 
             let (_, server_result) = tokio::join!(
-                controller.run(cancellation_token.clone()),
+                controller_fut,
                 tokio::spawn(
-                    HttpServer::new(worker, None, metrics_registry)
+                    HttpServer::new(worker.clone(), None, metrics_registry)
                         .run(args.port, cancellation_token.clone()),
                 )
             );
