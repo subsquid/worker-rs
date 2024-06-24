@@ -13,6 +13,7 @@ use axum::{
     Json,
 };
 use prometheus_client::{encoding::text::encode, registry::Registry};
+use reqwest::StatusCode;
 use tokio_util::sync::CancellationToken;
 
 async fn get_status(
@@ -36,6 +37,13 @@ async fn get_status(
                 "downloading": status.downloading,
             }
         })),
+    }
+}
+
+async fn get_peer_id(worker: Arc<Worker<impl AllocationsChecker>>) -> (StatusCode, String) {
+    match worker.peer_id {
+        Some(peer_id) => (StatusCode::OK, peer_id.to_string()),
+        None => (StatusCode::NOT_FOUND, "".to_owned()),
     }
 }
 
@@ -91,6 +99,13 @@ impl Server {
                 get({
                     let worker = worker.clone();
                     move || get_status(worker, args)
+                }),
+            )
+            .route(
+                "/worker/peer-id",
+                get({
+                    let worker = worker.clone();
+                    move || get_peer_id(worker)
                 }),
             )
             .route(

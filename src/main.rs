@@ -133,23 +133,22 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             subsquid_network_transport::metrics::register_metrics(&mut metrics_registry);
             let transport_builder = P2PTransportBuilder::from_cli(transport_args).await?;
+            let peer_id = transport_builder.local_peer_id();
             let info = Info::new(vec![
                 ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
-                (
-                    "peer_id".to_owned(),
-                    transport_builder.local_peer_id().to_string(),
-                ),
+                ("peer_id".to_owned(), peer_id.to_string()),
             ]);
             metrics::register_metrics(&mut metrics_registry, info);
             metrics::register_p2p_metrics(&mut metrics_registry);
 
             let allocations_checker = allocations_checker::RpcAllocationsChecker::new(
                 transport_builder.contract_client(),
-                transport_builder.local_peer_id(),
+                peer_id,
                 network_polling_interval,
             )
             .await?;
-            let worker = Arc::new(Worker::new(state_manager, allocations_checker));
+            let worker =
+                Arc::new(Worker::new(state_manager, allocations_checker).with_peer_id(peer_id));
             let controller = create_p2p_controller(
                 worker.clone(),
                 transport_builder,

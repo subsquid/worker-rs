@@ -34,6 +34,7 @@ pub struct Worker<A: AllocationsChecker> {
     allocations_checker: A,
     queries_tx: mpsc::Sender<QueryTask>,
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
+    pub peer_id: Option<PeerId>,
 }
 
 pub struct QueryTask {
@@ -51,7 +52,13 @@ impl<A: AllocationsChecker> Worker<A> {
             allocations_checker,
             queries_tx,
             queries_rx: UseOnce::new(queries_rx),
+            peer_id: None,
         }
+    }
+
+    pub fn with_peer_id(mut self, peer_id: PeerId) -> Self {
+        self.peer_id = Some(peer_id);
+        self
     }
 
     pub fn set_desired_chunks(&self, chunks: ChunkSet) {
