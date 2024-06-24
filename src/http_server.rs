@@ -95,7 +95,7 @@ impl Server {
         let metrics_registry = Arc::new(metrics_registry);
         let router = axum::Router::new()
             .route(
-                "/status",
+                "/worker/status",
                 get({
                     let worker = worker.clone();
                     move || get_status(worker, args)
