@@ -3,7 +3,6 @@ use std::sync::{
     Arc,
 };
 
-use futures::Future;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -68,31 +67,29 @@ impl Worker {
         self.state_manager.current_status()
     }
 
-    pub fn schedule_query(
+    pub async fn run_query(
         &self,
         query_str: String,
         dataset: Dataset,
         client_id: Option<PeerId>,
-    ) -> Option<impl Future<Output = QueryResult> + '_> {
+    ) -> QueryResult {
         let before = self.queries_running.fetch_add(1, Ordering::SeqCst);
         let counter_guard = scopeguard::guard((), |_| {
             let before = self.queries_running.fetch_sub(1, Ordering::SeqCst);
             metrics::RUNNING_QUERIES.set(before as i64 - 1);
         });
         if before >= *PARALLEL_QUERIES {
-            return None;
+            return Err(QueryError::ServiceOverloaded);
         }
         metrics::RUNNING_QUERIES.set(before as i64 + 1);
-        Some(async move {
-            let _ = counter_guard;
-            tracing::debug!(
-                "Running query from {}",
-                client_id
-                    .map(|id| id.to_string())
-                    .unwrap_or("{unknown}".to_string())
-            );
-            self.execute_query(query_str, dataset).await
-        })
+        let _ = counter_guard;
+        tracing::debug!(
+            "Running query from {}",
+            client_id
+                .map(|id| id.to_string())
+                .unwrap_or("{unknown}".to_string())
+        );
+        self.execute_query(query_str, dataset).await
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {

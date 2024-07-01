@@ -46,16 +46,9 @@ async fn run_query(
     Path(dataset): Path<Dataset>,
     query_str: String,
 ) -> Response {
-    if let Some(future) = worker.schedule_query(query_str, dataset, None) {
-        let result = future.await;
-        metrics::query_executed(&result);
-        result.map(|result| result.raw_data).into_response()
-    } else {
-        Response::builder()
-            .status(529)
-            .body("Worker is overloaded".into())
-            .unwrap()
-    }
+    let result = worker.run_query(query_str, dataset, None).await;
+    metrics::query_executed(&result);
+    result.map(|result| result.raw_data).into_response()
 }
 
 async fn get_metrics(registry: Arc<Registry>) -> impl IntoResponse {

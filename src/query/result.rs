@@ -66,15 +66,16 @@ impl From<std::io::Error> for QueryError {
 
 impl IntoResponse for QueryError {
     fn into_response(self) -> axum::response::Response {
+        lazy_static::lazy_static! {
+            static ref SERVICE_OVERLOADED: StatusCode = StatusCode::from_u16(529).unwrap();
+        }
         match self {
             s @ Self::NotFound => (StatusCode::NOT_FOUND, s.to_string()).into_response(),
             s @ Self::NoAllocation => {
                 (StatusCode::TOO_MANY_REQUESTS, s.to_string()).into_response()
             }
             s @ Self::BadRequest(_) => (StatusCode::BAD_REQUEST, s.to_string()).into_response(),
-            s @ Self::ServiceOverloaded => {
-                (StatusCode::SERVICE_UNAVAILABLE, s.to_string()).into_response()
-            }
+            s @ Self::ServiceOverloaded => (*SERVICE_OVERLOADED, s.to_string()).into_response(),
             Self::Other(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Couldn't execute query: {:?}", err),

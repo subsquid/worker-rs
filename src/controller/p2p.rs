@@ -269,11 +269,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         }
     }
 
-    async fn process_query(
-        &self,
-        peer_id: PeerId,
-        query: &Query,
-    ) -> QueryResult {
+    async fn process_query(&self, peer_id: PeerId, query: &Query) -> QueryResult {
         let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) else {
             return Err(QueryError::BadRequest(
                 "Some fields are missing in proto message".to_owned(),
@@ -283,15 +279,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             gateway_allocations::Status::Spent => {}
             gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),
         };
-        if let Some(future) =
-            self.worker
-                .schedule_query(query_str.clone(), dataset.clone(), Some(peer_id))
-        {
-            future.await
-        } else {
+        let result = self
+            .worker
+            .run_query(query_str.clone(), dataset.clone(), Some(peer_id))
+            .await;
+        if let Err(QueryError::ServiceOverloaded) = result {
             self.allocations_checker.refund(peer_id);
-            Err(QueryError::ServiceOverloaded)
         }
+        result
     }
 
     fn send_query_result(&self, query_id: String, result: QueryResult) {
