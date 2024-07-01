@@ -101,7 +101,6 @@ impl Worker {
             .await
     }
 
-    // TODO: process all chunks, not only the first one
     async fn execute_query(&self, query_str: String, dataset: String) -> QueryResult {
         let query = sqn_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
@@ -112,20 +111,30 @@ impl Worker {
         };
         let chunks_guard = self
             .state_manager
+            .clone()
             .find_chunks(&dataset, (first_block as u32).into())?;
-        let Some(path) = chunks_guard.iter().next().cloned() else {
+        if chunks_guard.is_empty() {
             return Err(QueryError::NotFound);
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         polars_core::POOL.spawn(move || {
             let result = (move || {
+                let start_time = std::time::Instant::now();
+
                 let plan = query.compile();
-                let mut blocks = plan.execute(path.as_str())?;
                 let data = Vec::with_capacity(1024 * 1024);
                 let mut writer = sqn_query::JsonArrayWriter::new(data);
-                writer.write_blocks(&mut blocks)?;
+                for path in chunks_guard.iter() {
+                    let mut blocks = plan.execute(path.as_str())?;
+                    writer.write_blocks(&mut blocks)?;
+                }
                 let bytes = writer.finish()?;
-                Ok(QueryOk::new(bytes, 1)?)
+
+                Ok(QueryOk::new(
+                    bytes,
+                    chunks_guard.len(),
+                    start_time.elapsed(),
+                )?)
             })();
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");

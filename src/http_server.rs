@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{cli::HttpArgs, controller::worker::Worker, types::dataset::Dataset};
+use crate::{cli::HttpArgs, controller::worker::Worker, metrics, types::dataset::Dataset};
 
 use axum::{
     extract::Path,
@@ -47,7 +47,9 @@ async fn run_query(
     query_str: String,
 ) -> Response {
     if let Some(future) = worker.schedule_query(query_str, dataset, None) {
-        future.await.map(|result| result.raw_data).into_response()
+        let result = future.await;
+        metrics::query_executed(&result);
+        result.map(|result| result.raw_data).into_response()
     } else {
         Response::builder()
             .status(529)

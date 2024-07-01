@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use axum::{http::StatusCode, response::IntoResponse};
 
@@ -13,10 +15,11 @@ pub struct QueryOk {
     pub compressed_size: usize,
     pub data_sha3_256: Vec<u8>,
     pub num_read_chunks: usize,
+    pub exec_time: Duration,
 }
 
 impl QueryOk {
-    pub fn new(data: Vec<u8>, num_read_chunks: usize) -> Result<Self> {
+    pub fn new(data: Vec<u8>, num_read_chunks: usize, exec_time: Duration) -> Result<Self> {
         use flate2::write::GzEncoder;
         use std::io::Write;
 
@@ -36,6 +39,7 @@ impl QueryOk {
             compressed_size,
             data_sha3_256: hash,
             num_read_chunks,
+            exec_time,
         })
     }
 }
