@@ -331,20 +331,25 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         query: Query,
         client_id: PeerId,
     ) -> QueryExecuted {
-        let result = match query_result {
-            Ok(result) => query_executed::Result::Ok(InputAndOutput {
-                num_read_chunks: Some(result.num_read_chunks as u32),
-                output: Some(SizeAndHash {
-                    size: Some(result.data_size as u32),
-                    sha3_256: result.data_sha3_256.clone(),
+        let (result, exec_time) = match query_result {
+            Ok(result) => (
+                query_executed::Result::Ok(InputAndOutput {
+                    num_read_chunks: Some(result.num_read_chunks as u32),
+                    output: Some(SizeAndHash {
+                        size: Some(result.data_size as u32),
+                        sha3_256: result.data_sha3_256.clone(),
+                    }),
                 }),
-            }),
-            Err(e @ QueryError::NotFound) => query_executed::Result::BadRequest(e.to_string()),
-            Err(QueryError::BadRequest(e)) => query_executed::Result::BadRequest(e.clone()),
-            Err(e @ QueryError::ServiceOverloaded) => {
-                query_executed::Result::ServerError(e.to_string())
+                Some(result.exec_time),
+            ),
+            Err(e @ QueryError::NotFound) => {
+                (query_executed::Result::BadRequest(e.to_string()), None)
             }
-            Err(QueryError::Other(e)) => query_executed::Result::ServerError(e.to_string()),
+            Err(QueryError::BadRequest(e)) => (query_executed::Result::BadRequest(e.clone()), None),
+            Err(e @ QueryError::ServiceOverloaded) => {
+                (query_executed::Result::ServerError(e.to_string()), None)
+            }
+            Err(QueryError::Other(e)) => (query_executed::Result::ServerError(e.to_string()), None),
             Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
         };
         let query_hash = sha3_256(
@@ -355,12 +360,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 .as_bytes(),
         );
         QueryExecuted {
-            client_id: client_id.to_base58(),
-            worker_id: self.worker_id.to_base58(),
+            client_id: client_id.to_string(),
+            worker_id: self.worker_id.to_string(),
             query_hash,
             query: Some(query),
             result: Some(result),
-            exec_time_ms: Some(0), // TODO: measure execution time
+            exec_time_ms: exec_time
+                .map(|duration| duration.as_millis() as u32)
+                .or(Some(0)),
             ..Default::default()
         }
     }
