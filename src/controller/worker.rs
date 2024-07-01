@@ -1,39 +1,32 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
-use futures::{Future, StreamExt};
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use subsquid_network_transport::PeerId;
 
 use crate::{
-    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
-    query::{self, error::QueryError, eth::BatchRequest, result::QueryResult},
+    query::result::{QueryError, QueryOk, QueryResult},
     storage::{
         datasets_index::DatasetsIndex,
         manager::{self, StateManager},
     },
     types::{dataset::Dataset, state::ChunkSet},
-    util::UseOnce,
 };
 
 lazy_static::lazy_static! {
-    static ref PARALLEL_QUERIES: usize = std::env::var("PARALLEL_QUERIES")
+    static ref PARALLEL_QUERIES: u8 = std::env::var("PARALLEL_QUERIES")
         .map(|s| s.parse().expect("Invalid PARALLEL_QUERIES"))
-        .unwrap_or(3);
-    static ref QUEUED_QUERIES: usize = std::env::var("QUEUED_QUERIES")
-        .map(|s| s.parse().expect("Invalid QUEUED_QUERIES"))
-        .unwrap_or(15);
+        .unwrap_or(5);
 }
 
-pub struct Worker<A: AllocationsChecker> {
+pub struct Worker {
     state_manager: Arc<StateManager>,
-    // TODO: move allocation checking to the controller
-    allocations_checker: A,
-    queries_tx: mpsc::Sender<QueryTask>,
-    queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
+    queries_running: AtomicU8,
     pub peer_id: Option<PeerId>,
 }
 
@@ -41,17 +34,14 @@ pub struct QueryTask {
     pub dataset: Dataset,
     pub query_str: String,
     pub client_id: Option<PeerId>,
-    pub response_sender: oneshot::Sender<Result<QueryResult, QueryError>>,
+    pub response_sender: oneshot::Sender<QueryResult>,
 }
 
-impl<A: AllocationsChecker> Worker<A> {
-    pub fn new(state_manager: StateManager, allocations_checker: A) -> Self {
-        let (queries_tx, queries_rx) = mpsc::channel(*QUEUED_QUERIES);
+impl Worker {
+    pub fn new(state_manager: StateManager) -> Self {
         Self {
             state_manager: Arc::new(state_manager),
-            allocations_checker,
-            queries_tx,
-            queries_rx: UseOnce::new(queries_rx),
+            queries_running: 0.into(),
             peer_id: None,
         }
     }
@@ -77,97 +67,80 @@ impl<A: AllocationsChecker> Worker<A> {
         self.state_manager.current_status()
     }
 
-    pub fn schedule_query(
+    pub async fn run_query(
         &self,
         query_str: String,
         dataset: Dataset,
         client_id: Option<PeerId>,
-    ) -> Option<impl Future<Output = Result<QueryResult, QueryError>> + '_> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        match self.queries_tx.try_send(QueryTask {
-            dataset,
-            query_str,
-            client_id,
-            response_sender: resp_tx,
-        }) {
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                return None;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                panic!("Query subscriber dropped");
-            }
-            Ok(_) => {
-                metrics::PENDING_QUERIES.inc();
-            }
-        };
-        Some(async move {
-            resp_rx
-                .await
-                .expect("Query processor didn't produce a result")
-        })
+    ) -> QueryResult {
+        let before = self.queries_running.fetch_add(1, Ordering::SeqCst);
+        let counter_guard = scopeguard::guard((), |_| {
+            let before = self.queries_running.fetch_sub(1, Ordering::SeqCst);
+            metrics::RUNNING_QUERIES.set(before as i64 - 1);
+        });
+        if before >= *PARALLEL_QUERIES {
+            return Err(QueryError::ServiceOverloaded);
+        }
+        metrics::RUNNING_QUERIES.set(before as i64 + 1);
+        let _ = counter_guard;
+        tracing::debug!(
+            "Running query from {}",
+            client_id
+                .map(|id| id.to_string())
+                .unwrap_or("{unknown}".to_string())
+        );
+        self.execute_query(query_str, dataset).await
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        let queries_rx = self.queries_rx.take().unwrap();
-        let state_manager = self.state_manager.clone();
-        let state_manager_fut = state_manager.run(cancellation_token.child_token());
-        let worker_fut = ReceiverStream::new(queries_rx)
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(*PARALLEL_QUERIES, |query_task| async move {
-                metrics::PENDING_QUERIES.dec();
-                tracing::debug!(
-                    "Running query from {}",
-                    query_task
-                        .client_id
-                        .map(|id| id.to_string())
-                        .unwrap_or("{unknown}".to_string())
-                );
-                let result = match self
-                    .allocations_checker
-                    .try_spend(query_task.client_id)
-                    .await
-                {
-                    Ok(gateway_allocations::Status::Spent) => {
-                        self.execute_query(query_task.query_str, query_task.dataset)
-                            .await
-                    }
-                    Ok(gateway_allocations::Status::NotEnoughCU) => Err(QueryError::NoAllocation),
-                    Err(e) => panic!("Couldn't check CU allocations: {e:?}"),
-                };
-                if query_task.response_sender.send(result).is_err() {
-                    tracing::error!("Query result couldn't be sent");
-                }
-            });
-        // TODO: cancel all the tasks if one of them finishes
-        tokio::join!(state_manager_fut, worker_fut,);
+        self.state_manager
+            .run(cancellation_token.child_token())
+            .await
     }
 
-    // TODO: process all chunks, not only the first one
-    async fn execute_query(
-        &self,
-        query_str: String,
-        dataset: String,
-    ) -> Result<QueryResult, QueryError> {
-        let query: BatchRequest = serde_json::from_str(query_str.as_str())
+    async fn execute_query(&self, query_str: String, dataset: String) -> QueryResult {
+        let query = sqn_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
+        let Some(first_block) = query.first_block() else {
+            return Err(QueryError::BadRequest(
+                "Query without first_block".to_owned(),
+            ));
+        };
         let chunks_guard = self
             .state_manager
-            .find_chunks(&dataset, (query.from_block as u32).into())?;
-        let path = chunks_guard.iter().next().cloned();
-        if let Some(path) = path {
-            tokio::spawn(async move {
-                let ctx = query::context::prepare_query_context(&path).await.unwrap();
-                let result = query::processor::process_query(&ctx, query).await?;
-                Ok(QueryResult::new(result, 1)?)
+            .clone()
+            .find_chunks(&dataset, (first_block as u32).into())?;
+        if chunks_guard.is_empty() {
+            return Err(QueryError::NotFound);
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        polars_core::POOL.spawn(move || {
+            let result = (move || {
+                let start_time = std::time::Instant::now();
+
+                let plan = query.compile();
+                let data = Vec::with_capacity(1024 * 1024);
+                let mut writer = sqn_query::JsonArrayWriter::new(data);
+                for path in chunks_guard.iter() {
+                    let mut blocks = plan.execute(path.as_str())?;
+                    writer.write_blocks(&mut blocks)?;
+                }
+                let bytes = writer.finish()?;
+
+                Ok(QueryOk::new(
+                    bytes,
+                    chunks_guard.len(),
+                    start_time.elapsed(),
+                )?)
+            })();
+            tx.send(result).unwrap_or_else(|_| {
+                tracing::warn!("Query runner didn't wait for the result");
             })
-            .await
-            .unwrap_or_else(|e| {
-                Err(QueryError::Other(
-                    anyhow::Error::new(e).context("Query processing task panicked"),
-                ))
-            })
-        } else {
-            Err(QueryError::NotFound)
-        }
+        });
+        rx.await.unwrap_or_else(|_| {
+            Err(QueryError::Other(anyhow::anyhow!(
+                "Query processor didn't produce a result"
+            )))
+        })
     }
 }

@@ -19,10 +19,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, log, warn};
 
 use crate::{
-    gateway_allocations::allocations_checker::RpcAllocationsChecker,
+    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     logs_storage::LogsStorage,
     metrics,
-    query::{error::QueryError, result::QueryResult},
+    query::result::{QueryError, QueryResult},
     storage::datasets_index::parse_assignment,
     util::{hash::sha3_256, UseOnce},
 };
@@ -41,11 +41,12 @@ lazy_static! {
 }
 
 pub struct P2PController<EventStream> {
-    worker: Arc<Worker<RpcAllocationsChecker>>,
+    worker: Arc<Worker>,
     ping_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
+    allocations_checker: AllocationsChecker,
     worker_id: PeerId,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
@@ -53,8 +54,9 @@ pub struct P2PController<EventStream> {
 }
 
 pub async fn create_p2p_controller(
-    worker: Arc<Worker<RpcAllocationsChecker>>,
+    worker: Arc<Worker>,
     transport_builder: P2PTransportBuilder,
+    allocations_checker: AllocationsChecker,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     data_dir: PathBuf,
@@ -77,6 +79,7 @@ pub async fn create_p2p_controller(
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
+        allocations_checker,
         worker_id,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
@@ -266,31 +269,27 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         }
     }
 
-    async fn process_query(
-        &self,
-        peer_id: PeerId,
-        query: &Query,
-    ) -> std::result::Result<QueryResult, QueryError> {
+    async fn process_query(&self, peer_id: PeerId, query: &Query) -> QueryResult {
         let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) else {
             return Err(QueryError::BadRequest(
                 "Some fields are missing in proto message".to_owned(),
             ))?;
         };
-        if let Some(future) =
-            self.worker
-                .schedule_query(query_str.clone(), dataset.clone(), Some(peer_id))
-        {
-            future.await
-        } else {
-            Err(QueryError::ServiceOverloaded)
+        match self.allocations_checker.try_spend(peer_id) {
+            gateway_allocations::Status::Spent => {}
+            gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),
+        };
+        let result = self
+            .worker
+            .run_query(query_str.clone(), dataset.clone(), Some(peer_id))
+            .await;
+        if let Err(QueryError::ServiceOverloaded) = result {
+            self.allocations_checker.refund(peer_id);
         }
+        result
     }
 
-    fn send_query_result(
-        &self,
-        query_id: String,
-        result: std::result::Result<QueryResult, QueryError>,
-    ) {
+    fn send_query_result(&self, query_id: String, result: QueryResult) {
         use subsquid_messages::query_result;
         let query_result = match result {
             Ok(result) => query_result::Result::Ok(subsquid_messages::OkResult {
@@ -328,24 +327,29 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
     fn generate_log(
         &self,
-        query_result: &std::result::Result<QueryResult, QueryError>,
+        query_result: &QueryResult,
         query: Query,
         client_id: PeerId,
     ) -> QueryExecuted {
-        let result = match query_result {
-            Ok(result) => query_executed::Result::Ok(InputAndOutput {
-                num_read_chunks: Some(result.num_read_chunks as u32),
-                output: Some(SizeAndHash {
-                    size: Some(result.data_size as u32),
-                    sha3_256: result.data_sha3_256.clone(),
+        let (result, exec_time) = match query_result {
+            Ok(result) => (
+                query_executed::Result::Ok(InputAndOutput {
+                    num_read_chunks: Some(result.num_read_chunks as u32),
+                    output: Some(SizeAndHash {
+                        size: Some(result.data_size as u32),
+                        sha3_256: result.data_sha3_256.clone(),
+                    }),
                 }),
-            }),
-            Err(e @ QueryError::NotFound) => query_executed::Result::BadRequest(e.to_string()),
-            Err(QueryError::BadRequest(e)) => query_executed::Result::BadRequest(e.clone()),
-            Err(e @ QueryError::ServiceOverloaded) => {
-                query_executed::Result::ServerError(e.to_string())
+                Some(result.exec_time),
+            ),
+            Err(e @ QueryError::NotFound) => {
+                (query_executed::Result::BadRequest(e.to_string()), None)
             }
-            Err(QueryError::Other(e)) => query_executed::Result::ServerError(e.to_string()),
+            Err(QueryError::BadRequest(e)) => (query_executed::Result::BadRequest(e.clone()), None),
+            Err(e @ QueryError::ServiceOverloaded) => {
+                (query_executed::Result::ServerError(e.to_string()), None)
+            }
+            Err(QueryError::Other(e)) => (query_executed::Result::ServerError(e.to_string()), None),
             Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
         };
         let query_hash = sha3_256(
@@ -356,12 +360,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 .as_bytes(),
         );
         QueryExecuted {
-            client_id: client_id.to_base58(),
-            worker_id: self.worker_id.to_base58(),
+            client_id: client_id.to_string(),
+            worker_id: self.worker_id.to_string(),
             query_hash,
             query: Some(query),
             result: Some(result),
-            exec_time_ms: Some(0), // TODO: measure execution time
+            exec_time_ms: exec_time
+                .map(|duration| duration.as_millis() as u32)
+                .or(Some(0)),
             ..Default::default()
         }
     }
