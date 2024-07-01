@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 use subsquid_network_transport::PeerId;
 
 use crate::{
-    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::{
@@ -28,10 +27,8 @@ lazy_static::lazy_static! {
         .unwrap_or(15);
 }
 
-pub struct Worker<A: AllocationsChecker> {
+pub struct Worker {
     state_manager: Arc<StateManager>,
-    // TODO: move allocation checking to the controller
-    allocations_checker: A,
     queries_tx: mpsc::Sender<QueryTask>,
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
     pub peer_id: Option<PeerId>,
@@ -44,12 +41,11 @@ pub struct QueryTask {
     pub response_sender: oneshot::Sender<QueryResult>,
 }
 
-impl<A: AllocationsChecker> Worker<A> {
-    pub fn new(state_manager: StateManager, allocations_checker: A) -> Self {
+impl Worker {
+    pub fn new(state_manager: StateManager) -> Self {
         let (queries_tx, queries_rx) = mpsc::channel(*QUEUED_QUERIES);
         Self {
             state_manager: Arc::new(state_manager),
-            allocations_checker,
             queries_tx,
             queries_rx: UseOnce::new(queries_rx),
             peer_id: None,
@@ -122,18 +118,9 @@ impl<A: AllocationsChecker> Worker<A> {
                         .map(|id| id.to_string())
                         .unwrap_or("{unknown}".to_string())
                 );
-                let result = match self
-                    .allocations_checker
-                    .try_spend(query_task.client_id)
-                    .await
-                {
-                    Ok(gateway_allocations::Status::Spent) => {
-                        self.execute_query(query_task.query_str, query_task.dataset)
-                            .await
-                    }
-                    Ok(gateway_allocations::Status::NotEnoughCU) => Err(QueryError::NoAllocation),
-                    Err(e) => panic!("Couldn't check CU allocations: {e:?}"),
-                };
+                let result = self
+                    .execute_query(query_task.query_str, query_task.dataset)
+                    .await;
                 if query_task.response_sender.send(result).is_err() {
                     tracing::error!("Query result couldn't be sent");
                 }

@@ -19,10 +19,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, log, warn};
 
 use crate::{
-    gateway_allocations::allocations_checker::RpcAllocationsChecker,
+    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     logs_storage::LogsStorage,
     metrics,
-    query::{error::QueryError, result::QueryResult},
+    query::result::{QueryError, QueryResult},
     storage::datasets_index::parse_assignment,
     util::{hash::sha3_256, UseOnce},
 };
@@ -41,11 +41,12 @@ lazy_static! {
 }
 
 pub struct P2PController<EventStream> {
-    worker: Arc<Worker<RpcAllocationsChecker>>,
+    worker: Arc<Worker>,
     ping_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
+    allocations_checker: AllocationsChecker,
     worker_id: PeerId,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
@@ -53,8 +54,9 @@ pub struct P2PController<EventStream> {
 }
 
 pub async fn create_p2p_controller(
-    worker: Arc<Worker<RpcAllocationsChecker>>,
+    worker: Arc<Worker>,
     transport_builder: P2PTransportBuilder,
+    allocations_checker: AllocationsChecker,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     data_dir: PathBuf,
@@ -77,6 +79,7 @@ pub async fn create_p2p_controller(
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
+        allocations_checker,
         worker_id,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
@@ -270,11 +273,15 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         &self,
         peer_id: PeerId,
         query: &Query,
-    ) -> std::result::Result<QueryResult, QueryError> {
+    ) -> QueryResult {
         let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) else {
             return Err(QueryError::BadRequest(
                 "Some fields are missing in proto message".to_owned(),
             ))?;
+        };
+        match self.allocations_checker.try_spend(peer_id) {
+            gateway_allocations::Status::Spent => {}
+            gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),
         };
         if let Some(future) =
             self.worker
@@ -282,15 +289,12 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         {
             future.await
         } else {
+            self.allocations_checker.refund(peer_id);
             Err(QueryError::ServiceOverloaded)
         }
     }
 
-    fn send_query_result(
-        &self,
-        query_id: String,
-        result: std::result::Result<QueryResult, QueryError>,
-    ) {
+    fn send_query_result(&self, query_id: String, result: QueryResult) {
         use subsquid_messages::query_result;
         let query_result = match result {
             Ok(result) => query_result::Result::Ok(subsquid_messages::OkResult {
@@ -328,7 +332,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
     fn generate_log(
         &self,
-        query_result: &std::result::Result<QueryResult, QueryError>,
+        query_result: &QueryResult,
         query: Query,
         client_id: PeerId,
     ) -> QueryExecuted {

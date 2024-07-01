@@ -104,10 +104,7 @@ async fn main() -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION").to_owned(),
             )]);
             metrics::register_metrics(&mut metrics_registry, info);
-            let worker = Arc::new(Worker::new(
-                state_manager,
-                allocations_checker::NoopAllocationsChecker {},
-            ));
+            let worker = Arc::new(Worker::new(state_manager));
             let controller = HttpController::new(
                 worker.clone(),
                 args.ping_interval,
@@ -141,14 +138,13 @@ async fn main() -> anyhow::Result<()> {
             metrics::register_metrics(&mut metrics_registry, info);
             metrics::register_p2p_metrics(&mut metrics_registry);
 
-            let allocations_checker = allocations_checker::RpcAllocationsChecker::new(
+            let allocations_checker = allocations_checker::AllocationsChecker::new(
                 transport_builder.contract_client(),
                 peer_id,
                 network_polling_interval,
             )
             .await?;
-            let worker =
-                Arc::new(Worker::new(state_manager, allocations_checker).with_peer_id(peer_id));
+            let worker = Arc::new(Worker::new(state_manager).with_peer_id(peer_id));
 
             let controller_fut = async {
                 tokio::select! {
@@ -157,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
                     controller = create_p2p_controller(
                         worker.clone(),
                         transport_builder,
+                        allocations_checker,
                         scheduler_id,
                         logs_collector_id,
                         args.data_dir,
