@@ -47,7 +47,7 @@ lazy_static::lazy_static! {
     static ref QUERY_EXECUTED: Family<QueryExecutedLabels, Counter> = Default::default();
     static ref QUERY_RESULT_SIZE: Histogram = Histogram::new(std::iter::empty());
     static ref READ_CHUNKS: Histogram = Histogram::new(std::iter::empty());
-    pub static ref PENDING_QUERIES: Gauge = Default::default();
+    pub static ref RUNNING_QUERIES: Gauge = Default::default();
 }
 
 pub fn set_status(status: WorkerStatus) {
@@ -134,16 +134,16 @@ pub fn register_metrics(registry: &mut Registry, info: Info<Vec<(String, String)
         "Number of chunks read during query execution",
         READ_CHUNKS.clone(),
     );
+    registry.register(
+        "running_queries",
+        "Current number of queries being executed",
+        RUNNING_QUERIES.clone(),
+    );
 }
 
 pub fn register_p2p_metrics(registry: &mut Registry) {
     registry.register("worker_status", "Status of the worker", STATUS.clone());
     set_status(WorkerStatus::Starting);
-    registry.register(
-        "pending_queries",
-        "Current size of the queries queue",
-        PENDING_QUERIES.clone(),
-    );
 }
 
 impl prometheus_client::encoding::EncodeLabelValue for WorkerStatus {
