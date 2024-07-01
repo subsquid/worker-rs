@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::{Future, StreamExt};
+use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -8,9 +8,12 @@ use tokio_util::sync::CancellationToken;
 use sqd_network_transport::PeerId;
 
 use crate::{
-    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
-    query::{self, error::QueryError, eth::BatchRequest, result::QueryResult},
+    query::{
+        self,
+        eth::BatchRequest,
+        result::{QueryError, QueryOk, QueryResult},
+    },
     run_all,
     storage::{
         datasets_index::DatasetsIndex,
@@ -32,10 +35,8 @@ lazy_static::lazy_static! {
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
 const RESPONSE_LIMIT: usize = sqd_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
 
-pub struct Worker<A: AllocationsChecker> {
+pub struct Worker {
     state_manager: Arc<StateManager>,
-    // TODO: move allocation checking to the controller
-    allocations_checker: A,
     queries_tx: mpsc::Sender<QueryTask>,
     queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
     pub peer_id: Option<PeerId>,
@@ -46,15 +47,14 @@ pub struct QueryTask {
     pub query_str: String,
     pub block_range: Option<(u64, u64)>,
     pub client_id: Option<PeerId>,
-    pub response_sender: oneshot::Sender<Result<QueryResult, QueryError>>,
+    pub response_sender: oneshot::Sender<QueryResult>,
 }
 
-impl<A: AllocationsChecker> Worker<A> {
-    pub fn new(state_manager: StateManager, allocations_checker: A) -> Self {
+impl Worker {
+    pub fn new(state_manager: StateManager) -> Self {
         let (queries_tx, queries_rx) = mpsc::channel(*QUEUED_QUERIES);
         Self {
             state_manager: Arc::new(state_manager),
-            allocations_checker,
             queries_tx,
             queries_rx: UseOnce::new(queries_rx),
             peer_id: None,
@@ -82,13 +82,13 @@ impl<A: AllocationsChecker> Worker<A> {
         self.state_manager.current_status()
     }
 
-    pub fn schedule_query(
+    pub async fn run_query(
         &self,
         query_str: String,
         dataset: Dataset,
         block_range: Option<(u64, u64)>,
         client_id: Option<PeerId>,
-    ) -> Option<impl Future<Output = Result<QueryResult, QueryError>> + '_> {
+    ) -> QueryResult {
         let (resp_tx, resp_rx) = oneshot::channel();
         match self.queries_tx.try_send(QueryTask {
             dataset,
@@ -98,7 +98,7 @@ impl<A: AllocationsChecker> Worker<A> {
             response_sender: resp_tx,
         }) {
             Err(mpsc::error::TrySendError::Full(_)) => {
-                return None;
+                return Err(QueryError::ServiceOverloaded);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 panic!("Query subscriber dropped");
@@ -107,20 +107,15 @@ impl<A: AllocationsChecker> Worker<A> {
                 metrics::PENDING_QUERIES.inc();
             }
         };
-        Some(async move {
-            resp_rx
-                .await
-                .expect("Query processor didn't produce a result")
-        })
+        resp_rx
+            .await
+            .expect("Query processor didn't produce a result")
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
         let queries_rx = self.queries_rx.take().unwrap();
         let state_manager = self.state_manager.clone();
         let state_manager_fut = state_manager.run(cancellation_token.child_token());
-        let allocations_checker_fut = self
-            .allocations_checker
-            .run(cancellation_token.child_token());
         let worker_fut = ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled())
             .for_each_concurrent(*PARALLEL_QUERIES, |query_task| async move {
@@ -132,33 +127,19 @@ impl<A: AllocationsChecker> Worker<A> {
                         .map(|id| id.to_string())
                         .unwrap_or("{unknown}".to_string())
                 );
-                let result = match self
-                    .allocations_checker
-                    .try_spend(query_task.client_id)
-                    .await
-                {
-                    Ok(gateway_allocations::Status::Spent) => {
-                        self.execute_query(
-                            query_task.query_str,
-                            query_task.dataset,
-                            query_task.block_range,
-                            RESPONSE_LIMIT,
-                        )
-                        .await
-                    }
-                    Ok(gateway_allocations::Status::NotEnoughCU) => Err(QueryError::NoAllocation),
-                    Err(e) => panic!("Couldn't check CU allocations: {e:?}"),
-                };
+                let result = self
+                    .execute_query(
+                        query_task.query_str,
+                        query_task.dataset,
+                        query_task.block_range,
+                        RESPONSE_LIMIT,
+                    )
+                    .await;
                 if query_task.response_sender.send(result).is_err() {
                     tracing::error!("Query result couldn't be sent");
                 }
             });
-        run_all!(
-            cancellation_token,
-            state_manager_fut,
-            worker_fut,
-            allocations_checker_fut
-        );
+        run_all!(cancellation_token, state_manager_fut, worker_fut);
         tracing::info!("Worker task finished");
     }
 
@@ -169,7 +150,7 @@ impl<A: AllocationsChecker> Worker<A> {
         dataset: String,
         block_range: Option<(u64, u64)>,
         limit: usize,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> QueryResult {
         let mut query: BatchRequest = serde_json::from_str(query_str.as_str())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
         if let Some((from, to)) = block_range {
@@ -182,9 +163,10 @@ impl<A: AllocationsChecker> Worker<A> {
         let path = chunks_guard.iter().next().cloned();
         if let Some(path) = path {
             tokio::spawn(async move {
+                let start_time = tokio::time::Instant::now();
                 let ctx = query::context::prepare_query_context(&path).await.unwrap();
                 let result = query::processor::process_query(&ctx, query, limit).await?;
-                Ok(QueryResult::new(result, 1)?)
+                Ok(QueryOk::new(result, 1, start_time.elapsed()))
             })
             .await
             .unwrap_or_else(|e| {

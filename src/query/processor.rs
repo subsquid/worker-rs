@@ -1,8 +1,8 @@
 use std::{collections::HashSet, hash::Hash, pin::Pin};
 
 use super::{
-    error::QueryError,
     eth::{BatchRequest, NetworkType},
+    result::QueryError,
 };
 use anyhow::Context;
 use async_stream::try_stream;

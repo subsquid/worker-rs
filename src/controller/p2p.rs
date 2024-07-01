@@ -19,10 +19,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, log, warn};
 
 use crate::{
-    gateway_allocations::allocations_checker::RpcAllocationsChecker,
+    gateway_allocations::{self, allocations_checker::AllocationsChecker},
     logs_storage::{self, LogsStorage},
     metrics,
-    query::{error::QueryError, result::QueryResult},
+    query::result::{QueryError, QueryResult},
     run_all,
     storage::datasets_index::parse_assignment,
     util::{hash::sha3_256, UseOnce},
@@ -42,11 +42,12 @@ lazy_static! {
 }
 
 pub struct P2PController<EventStream> {
-    worker: Arc<Worker<RpcAllocationsChecker>>,
+    worker: Arc<Worker>,
     ping_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
+    allocations_checker: AllocationsChecker,
     worker_id: PeerId,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
@@ -54,8 +55,9 @@ pub struct P2PController<EventStream> {
 }
 
 pub async fn create_p2p_controller(
-    worker: Arc<Worker<RpcAllocationsChecker>>,
+    worker: Arc<Worker>,
     transport_builder: P2PTransportBuilder,
+    allocations_checker: AllocationsChecker,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     data_dir: PathBuf,
@@ -78,6 +80,7 @@ pub async fn create_p2p_controller(
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
+        allocations_checker,
         worker_id,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
@@ -94,6 +97,8 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             self.run_ping_loop(cancellation_token.child_token(), self.ping_interval),
             self.run_logs_loop(cancellation_token.child_token(), *LOGS_SEND_INTERVAL),
             self.worker.run(cancellation_token.child_token()),
+            self.allocations_checker
+                .run(cancellation_token.child_token()),
         );
     }
 
@@ -281,34 +286,31 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         }
     }
 
-    async fn process_query(
-        &self,
-        peer_id: PeerId,
-        query: &Query,
-    ) -> std::result::Result<QueryResult, QueryError> {
+    async fn process_query(&self, peer_id: PeerId, query: &Query) -> QueryResult {
         let (dataset, query_str) = validate_query(query)
             .map_err(|e| QueryError::BadRequest(format!("Query field missing: {e}")))?;
         let block_range = query
             .block_range
             .map(|sqd_messages::Range { begin, end }| (begin as u64, end as u64));
-        match self
+        match self.allocations_checker.try_spend(peer_id) {
+            gateway_allocations::Status::Spent => {}
+            gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),
+        };
+        let result = self
             .worker
-            .schedule_query(query_str, dataset, block_range, Some(peer_id))
-        {
-            Some(fut) => fut.await,
-            None => Err(QueryError::ServiceOverloaded),
+            .run_query(query_str, dataset, block_range, Some(peer_id))
+            .await;
+        if let Err(QueryError::ServiceOverloaded) = result {
+            self.allocations_checker.refund(peer_id);
         }
+        result
     }
 
-    fn send_query_result(
-        &self,
-        query_id: String,
-        result: std::result::Result<QueryResult, QueryError>,
-    ) {
+    fn send_query_result(&self, query_id: String, result: QueryResult) {
         use sqd_messages::query_result;
         let query_result = match result {
             Ok(result) => query_result::Result::Ok(sqd_messages::OkResult {
-                data: result.compressed_data,
+                data: result.compressed_data(),
                 exec_plan: None,
                 last_block: result.last_block,
             }),
@@ -343,25 +345,29 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
     fn generate_log(
         &self,
-        query_result: &std::result::Result<QueryResult, QueryError>,
+        query_result: &QueryResult,
         query: Query,
         client_id: PeerId,
     ) -> QueryExecuted {
+        use query_executed::Result;
+
         let result = match query_result {
-            Ok(result) => query_executed::Result::Ok(InputAndOutput {
+            Ok(result) => Result::Ok(InputAndOutput {
                 num_read_chunks: Some(result.num_read_chunks as u32),
                 output: Some(SizeAndHash {
-                    size: Some(result.data_size as u32),
-                    sha3_256: result.data_sha3_256.clone(),
+                    size: Some(result.data.len() as u32),
+                    sha3_256: result.sha3_256(),
                 }),
             }),
-            Err(e @ QueryError::NotFound) => query_executed::Result::BadRequest(e.to_string()),
-            Err(QueryError::BadRequest(e)) => query_executed::Result::BadRequest(e.clone()),
-            Err(e @ QueryError::ServiceOverloaded) => {
-                query_executed::Result::ServerError(e.to_string())
-            }
-            Err(QueryError::Other(e)) => query_executed::Result::ServerError(e.to_string()),
+            Err(e @ QueryError::NotFound) => Result::BadRequest(e.to_string()),
+            Err(QueryError::BadRequest(e)) => Result::BadRequest(e.clone()),
+            Err(e @ QueryError::ServiceOverloaded) => Result::ServerError(e.to_string()),
+            Err(QueryError::Other(e)) => Result::ServerError(e.to_string()),
             Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
+        };
+        let exec_time = match query_result {
+            Ok(result) => result.exec_time.as_millis() as u32,
+            Err(_) => 0,
         };
         let query_hash = sha3_256(
             query
@@ -370,13 +376,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 .expect("Hashing empty query")
                 .as_bytes(),
         );
+
         QueryExecuted {
-            client_id: client_id.to_base58(),
-            worker_id: self.worker_id.to_base58(),
+            client_id: client_id.to_string(),
+            worker_id: self.worker_id.to_string(),
             query_hash,
             query: Some(query),
             result: Some(result),
-            exec_time_ms: Some(0), // TODO: measure execution time
+            exec_time_ms: Some(exec_time),
             ..Default::default()
         }
     }

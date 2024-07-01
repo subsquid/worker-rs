@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use crate::{
-    cli::HttpArgs, controller::worker::Worker,
-    gateway_allocations::allocations_checker::AllocationsChecker, types::dataset::Dataset,
-};
+use crate::{cli::HttpArgs, controller::worker::Worker, metrics, types::dataset::Dataset};
 
 use axum::{
     extract::Path,
@@ -16,10 +13,7 @@ use prometheus_client::{encoding::text::encode, registry::Registry};
 use reqwest::StatusCode;
 use tokio_util::sync::CancellationToken;
 
-async fn get_status(
-    worker: Arc<Worker<impl AllocationsChecker>>,
-    args: Option<HttpArgs>,
-) -> Json<serde_json::Value> {
+async fn get_status(worker: Arc<Worker>, args: Option<HttpArgs>) -> Json<serde_json::Value> {
     let status = worker.status();
     match args {
         Some(args) => Json(serde_json::json!({
@@ -40,7 +34,7 @@ async fn get_status(
     }
 }
 
-async fn get_peer_id(worker: Arc<Worker<impl AllocationsChecker>>) -> (StatusCode, String) {
+async fn get_peer_id(worker: Arc<Worker>) -> (StatusCode, String) {
     match worker.peer_id {
         Some(peer_id) => (StatusCode::OK, peer_id.to_string()),
         None => (StatusCode::NOT_FOUND, "".to_owned()),
@@ -48,18 +42,13 @@ async fn get_peer_id(worker: Arc<Worker<impl AllocationsChecker>>) -> (StatusCod
 }
 
 async fn run_query(
-    worker: Arc<Worker<impl AllocationsChecker>>,
+    worker: Arc<Worker>,
     Path(dataset): Path<Dataset>,
     query_str: String,
 ) -> Response {
-    if let Some(future) = worker.schedule_query(query_str, dataset, None, None) {
-        future.await.map(|result| result.raw_data).into_response()
-    } else {
-        Response::builder()
-            .status(529)
-            .body("Worker is overloaded".into())
-            .unwrap()
-    }
+    let result = worker.run_query(query_str, dataset, None, None).await;
+    metrics::query_executed(&result);
+    result.map(|result| result.data).into_response()
 }
 
 async fn get_metrics(registry: Arc<Registry>) -> impl IntoResponse {
@@ -87,11 +76,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(
-        worker: Arc<Worker<impl AllocationsChecker + 'static>>,
-        args: Option<HttpArgs>,
-        metrics_registry: Registry,
-    ) -> Self {
+    pub fn new(worker: Arc<Worker>, args: Option<HttpArgs>, metrics_registry: Registry) -> Self {
         let metrics_registry = Arc::new(metrics_registry);
         let router = axum::Router::new()
             .route(

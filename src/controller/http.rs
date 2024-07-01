@@ -3,16 +3,14 @@ use std::{sync::Arc, time::Duration};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    gateway_allocations::allocations_checker::NoopAllocationsChecker, storage::manager::Status,
-};
+use crate::storage::manager::Status;
 
 use super::worker::Worker;
 
 const PING_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct HttpController {
-    worker: Arc<Worker<NoopAllocationsChecker>>,
+    worker: Arc<Worker>,
     ping_interval: Duration,
     worker_id: String,
     worker_url: String,
@@ -21,7 +19,7 @@ pub struct HttpController {
 
 impl HttpController {
     pub fn new(
-        worker: Arc<Worker<NoopAllocationsChecker>>,
+        worker: Arc<Worker>,
         ping_interval: Duration,
         worker_id: String,
         worker_url: String,
