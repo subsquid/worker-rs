@@ -36,6 +36,9 @@ pub struct Args {
 
     #[clap(env, hide(true), default_value_t = 0.001)]
     pub sentry_traces_sample_rate: f32,
+
+    #[clap(env, hide(true))]
+    pub polars_max_threads: Option<usize>,
 }
 
 #[derive(clap::Args, Debug, Clone)]

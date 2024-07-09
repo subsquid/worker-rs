@@ -16,7 +16,7 @@ pub enum Status {
 
 struct Operator {
     pub allocated_cus: U256,
-    pub spent_cus: U256,
+    pub spent_cus: i64,
 }
 
 impl ComputeUnitsStorage {
@@ -39,16 +39,16 @@ impl ComputeUnitsStorage {
         }
     }
 
-    pub fn try_spend_cus(&mut self, gateway_id: PeerId, used_units: u64) -> Status {
+    pub fn try_spend_cus(&mut self, gateway_id: PeerId, used_units: i64) -> Status {
         let operator_id = match self.operator_by_gateway_id.get(&gateway_id) {
             Some(id) => id,
             None => {
                 return Status::NotEnoughCU;
             }
         };
-        let operator = self.operators.get_mut(operator_id).unwrap();
-        if operator.spent_cus + used_units < operator.allocated_cus {
-            operator.spent_cus += used_units.into();
+        let operator: &mut Operator = self.operators.get_mut(operator_id).unwrap();
+        if U256::from(operator.spent_cus + used_units) < operator.allocated_cus {
+            operator.spent_cus += used_units;
             Status::Spent
         } else {
             Status::NotEnoughCU

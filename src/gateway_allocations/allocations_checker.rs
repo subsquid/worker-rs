@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use async_trait::async_trait;
 use parking_lot::Mutex;
 use subsquid_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
@@ -9,36 +8,16 @@ use tracing::{debug, info, warn};
 
 use super::{compute_units_storage::ComputeUnitsStorage, Status};
 
-const SINGLE_EXECUTION_COST: u64 = 1;
+const SINGLE_EXECUTION_COST: i64 = 1;
 
-#[async_trait]
-pub trait AllocationsChecker: Sync + Send {
-    async fn run(&self, cancellation_token: CancellationToken);
-
-    async fn try_spend(&self, gateway_id: Option<PeerId>) -> Result<Status>;
-}
-
-pub struct NoopAllocationsChecker {}
-
-#[async_trait]
-impl AllocationsChecker for NoopAllocationsChecker {
-    async fn run(&self, cancellation_token: CancellationToken) {
-        cancellation_token.cancelled_owned().await;
-    }
-
-    async fn try_spend(&self, _gateway_id: Option<PeerId>) -> Result<Status> {
-        Ok(Status::Spent)
-    }
-}
-
-pub struct RpcAllocationsChecker {
+pub struct AllocationsChecker {
     client: Box<dyn contract_client::Client>,
     own_id: contract_client::U256,
     storage: Mutex<ComputeUnitsStorage>,
     polling_interval: Duration,
 }
 
-impl RpcAllocationsChecker {
+impl AllocationsChecker {
     pub async fn new(
         client: Box<dyn contract_client::Client>,
         peer_id: PeerId,
@@ -52,11 +31,20 @@ impl RpcAllocationsChecker {
             polling_interval,
         })
     }
-}
 
-#[async_trait]
-impl AllocationsChecker for RpcAllocationsChecker {
-    async fn run(&self, cancellation_token: CancellationToken) {
+    pub fn try_spend(&self, gateway_id: PeerId) -> Status {
+        self.storage
+            .lock()
+            .try_spend_cus(gateway_id, SINGLE_EXECUTION_COST)
+    }
+
+    pub fn refund(&self, gateway_id: PeerId) {
+        self.storage
+            .lock()
+            .try_spend_cus(gateway_id, -SINGLE_EXECUTION_COST);
+    }
+
+    pub async fn run(&self, cancellation_token: CancellationToken) {
         let mut current_epoch = 0;
 
         let mut timer = tokio::time::interval(self.polling_interval);
@@ -87,16 +75,6 @@ impl AllocationsChecker for RpcAllocationsChecker {
                 self.storage.lock().update_allocations(clusters);
                 current_epoch = epoch;
             }
-        }
-    }
-
-    async fn try_spend(&self, gateway_id: Option<PeerId>) -> Result<Status> {
-        match gateway_id {
-            Some(gateway_id) => Ok(self
-                .storage
-                .lock()
-                .try_spend_cus(gateway_id, SINGLE_EXECUTION_COST)),
-            None => Ok(Status::NotEnoughCU),
         }
     }
 }
