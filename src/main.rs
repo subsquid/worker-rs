@@ -29,8 +29,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use subsquid_worker::cli::{self, Args, P2PArgs};
 use subsquid_worker::gateway_allocations::allocations_checker;
 use subsquid_worker::http_server::Server as HttpServer;
-use subsquid_worker::metrics;
 use subsquid_worker::storage::manager::StateManager;
+use subsquid_worker::{metrics, run_all};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -115,7 +115,8 @@ async fn main() -> anyhow::Result<()> {
                 http_args.worker_url.clone(),
                 http_args.router.clone(),
             );
-            let (_, server_result) = tokio::join!(
+            let (_, server_result) = run_all!(
+                cancellation_token,
                 controller.run(cancellation_token.clone()),
                 tokio::spawn(
                     HttpServer::new(worker, Some(http_args), metrics_registry)
@@ -168,15 +169,17 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::Ok(())
             };
 
-            let (_, server_result) = tokio::join!(
+            let (_, server_result) = run_all!(
+                cancellation_token,
                 controller_fut,
                 tokio::spawn(
                     HttpServer::new(worker.clone(), None, metrics_registry)
-                        .run(args.port, cancellation_token.clone()),
+                        .run(args.port, cancellation_token.clone())
                 )
             );
             server_result??;
         }
     };
+    tracing::info!("Shutting down");
     Ok(())
 }

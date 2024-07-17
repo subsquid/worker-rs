@@ -23,6 +23,7 @@ use crate::{
     logs_storage::LogsStorage,
     metrics,
     query::{error::QueryError, result::QueryResult},
+    run_all,
     storage::datasets_index::parse_assignment,
     util::{hash::sha3_256, UseOnce},
 };
@@ -86,8 +87,8 @@ pub async fn create_p2p_controller(
 
 impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        // TODO: cancel all the tasks if one of them finishes
-        tokio::join!(
+        run_all!(
+            cancellation_token,
             self.run_event_loop(cancellation_token.child_token()),
             self.run_queries_loop(cancellation_token.child_token()),
             self.run_ping_loop(cancellation_token.child_token(), self.ping_interval),
@@ -104,6 +105,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 self.handle_query(peer_id, query).await;
             })
             .await;
+        info!("Query processing task finished");
     }
 
     async fn run_ping_loop(&self, cancellation_token: CancellationToken, ping_interval: Duration) {
@@ -135,6 +137,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 }
             })
             .await;
+        info!("Pings processing task finished");
     }
 
     async fn run_logs_loop(
@@ -171,6 +174,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 },
             };
         }
+        info!("Sending logs task finished");
     }
 
     async fn run_event_loop(&self, cancellation_token: CancellationToken) {
@@ -203,6 +207,8 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 }
             }
         }
+
+        info!("Transport event loop finished");
     }
 
     fn handle_pong(&self, pong: Pong) {

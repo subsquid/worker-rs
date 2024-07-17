@@ -11,6 +11,7 @@ use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
     metrics,
     query::{self, error::QueryError, eth::BatchRequest, result::QueryResult},
+    run_all,
     storage::{
         datasets_index::DatasetsIndex,
         manager::{self, StateManager},
@@ -111,8 +112,11 @@ impl<A: AllocationsChecker> Worker<A> {
         let queries_rx = self.queries_rx.take().unwrap();
         let state_manager = self.state_manager.clone();
         let state_manager_fut = state_manager.run(cancellation_token.child_token());
+        let allocations_checker_fut = self
+            .allocations_checker
+            .run(cancellation_token.child_token());
         let worker_fut = ReceiverStream::new(queries_rx)
-            .take_until(cancellation_token.cancelled_owned())
+            .take_until(cancellation_token.cancelled())
             .for_each_concurrent(*PARALLEL_QUERIES, |query_task| async move {
                 metrics::PENDING_QUERIES.dec();
                 tracing::debug!(
@@ -138,8 +142,13 @@ impl<A: AllocationsChecker> Worker<A> {
                     tracing::error!("Query result couldn't be sent");
                 }
             });
-        // TODO: cancel all the tasks if one of them finishes
-        tokio::join!(state_manager_fut, worker_fut,);
+        run_all!(
+            cancellation_token,
+            state_manager_fut,
+            worker_fut,
+            allocations_checker_fut
+        );
+        tracing::info!("Worker task finished");
     }
 
     // TODO: process all chunks, not only the first one

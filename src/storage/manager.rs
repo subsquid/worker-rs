@@ -101,6 +101,7 @@ impl StateManager {
                 }
             }
         }
+        info!("State manager loop finished");
     }
 
     #[instrument(skip_all)]

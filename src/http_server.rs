@@ -125,6 +125,7 @@ impl Server {
         axum::serve(listener, self.router)
             .with_graceful_shutdown(cancellation_token.cancelled_owned())
             .await?;
+        tracing::info!("HTTP server finished");
         Ok(())
     }
 
