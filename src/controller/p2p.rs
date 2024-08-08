@@ -60,7 +60,7 @@ pub async fn create_p2p_controller(
     logs_collector_id: PeerId,
     data_dir: PathBuf,
     ping_interval: Duration,
-) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
+) -> Result<P2PController<impl Stream<Item=WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
@@ -85,7 +85,7 @@ pub async fn create_p2p_controller(
     })
 }
 
-impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
+impl<EventStream: Stream<Item=WorkerEvent>> P2PController<EventStream> {
     pub async fn run(&self, cancellation_token: CancellationToken) {
         run_all!(
             cancellation_token,
@@ -214,10 +214,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     fn handle_pong(&self, pong: Pong) {
         use subsquid_messages::pong::Status;
         match pong.status {
-            Some(Status::NotRegistered(())) => {
-                error!("Worker not registered on chain");
-                metrics::set_status(metrics::WorkerStatus::NotRegistered);
-            }
             Some(Status::UnsupportedVersion(())) => {
                 error!("Worker version not supported by the scheduler");
                 metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
