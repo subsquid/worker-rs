@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use datafusion::prelude::*;
+use itertools::Itertools;
 use tracing::{info, warn};
 
 use crate::query::eth::*;
@@ -52,9 +53,13 @@ async fn test_query() -> Result<()> {
         let expected: Vec<serde_json::Value> =
             serde_json::from_reader(std::fs::File::open(result_path)?)?;
         info!("Running query {}", query_name);
-        let result = process_query(&ctx, query).await;
+        let result = process_query(&ctx, query, 1_000_000).await;
         match result {
             Ok(result) => {
+                let result: Vec<serde_json::Value> = result
+                    .into_iter()
+                    .flat_map(|(json, _block_number)| serde_json::from_str(&json).ok())
+                    .collect_vec();
                 if result != expected {
                     warn!("Test failed. Saving actual result");
                     let file = std::fs::File::create(query_path.with_extension("actual.json"))?;

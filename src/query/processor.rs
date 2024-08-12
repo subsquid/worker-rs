@@ -20,7 +20,7 @@ use serde_json::{map::Map as JsonMap, Value};
 use serde_rename_rule::RenameRule;
 use tracing::instrument;
 
-pub(super) type QueryResult = Vec<Value>;
+pub(super) type QueryResult = Vec<(String, u64)>; // a JSON line per block
 
 // TODO:
 // - optimize queries
@@ -34,6 +34,7 @@ pub(super) type QueryResult = Vec<Value>;
 pub async fn process_query(
     ctx: &SessionContext,
     query: BatchRequest,
+    limit: usize,
 ) -> Result<QueryResult, QueryError> {
     if query.r#type != NetworkType::Eth {
         return Err(QueryError::BadRequest(
@@ -44,7 +45,7 @@ pub async fn process_query(
     let blocks = convert_to_json(blocks);
     let transactions = transactions.map(convert_to_json);
     let logs = logs.map(convert_to_json);
-    collect_result(build_response(&query, blocks, transactions, logs))
+    collect_result(build_response(&query, blocks, transactions, logs), limit)
         .await
         .map_err(From::from)
 }
@@ -244,7 +245,7 @@ fn build_response<'l>(
     headers: impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> + Unpin + 'l,
     transactions: Option<impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> + 'l>,
     logs: Option<impl Stream<Item = Result<JsonMap<String, Value>, DataFusionError>> + 'l>,
-) -> impl Stream<Item = anyhow::Result<Value>> + 'l {
+) -> impl Stream<Item = anyhow::Result<(Value, u64)>> + 'l {
     let include_tx = transactions.is_some();
     let include_logs = logs.is_some();
     let mut transactions = transactions.map(|stream| Box::pin(stream.peekable()));
@@ -310,14 +311,14 @@ fn build_response<'l>(
             }
 
             if include_block || query.include_all_blocks || header_index == 0 {
-                yield Value::Object(block);
+                yield (Value::Object(block), number);
                 last_block = None;
             } else {
-                last_block = Some(block);
+                last_block = Some((block, number));
             }
         }
-        if let Some(block) = last_block {
-            yield Value::Object(block);
+        if let Some((block, number)) = last_block {
+            yield (Value::Object(block), number);
         }
     }
 }
@@ -347,15 +348,24 @@ async fn consume_while<T, E>(
 
 #[instrument(skip_all)]
 async fn collect_result(
-    stream: impl Stream<Item = anyhow::Result<Value>>,
+    stream: impl Stream<Item = anyhow::Result<(Value, u64)>>,
+    limit: usize,
 ) -> anyhow::Result<QueryResult> {
     let mut result = Vec::new();
+    let mut total_len = 0;
     tokio::pin!(stream);
     while let Some(row) = stream.next().await {
+        let (block, number) = row?;
         if result.is_empty() {
             tracing::trace!("Got first result row");
         }
-        result.push(row?);
+        let json = serde_json::to_string(&block).context("Couldn't serialize result row")?;
+        if total_len + json.len() < limit || result.is_empty() {
+            total_len += json.len();
+            result.push((json, number));
+        } else {
+            break;
+        }
     }
     tracing::trace!("Got all result rows");
     Ok(result)

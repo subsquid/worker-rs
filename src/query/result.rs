@@ -12,6 +12,7 @@ pub struct QueryResult {
     pub compressed_size: usize,
     pub data_sha3_256: Vec<u8>,
     pub num_read_chunks: usize,
+    pub last_block: Option<u64>,
 }
 
 impl QueryResult {
@@ -19,7 +20,8 @@ impl QueryResult {
         use flate2::write::GzEncoder;
         use std::io::Write;
 
-        let data = serde_json::to_vec(&values)?;
+        let last_block = values.last().map(|(_json, block_number)| *block_number);
+        let data = join(values.into_iter().map(|(json, _block_number)| json), "\n").into_bytes();
         let data_size = data.len();
 
         let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -36,6 +38,16 @@ impl QueryResult {
             compressed_size,
             data_sha3_256: hash,
             num_read_chunks,
+            last_block,
         })
     }
+}
+
+fn join(strings: impl Iterator<Item = String>, separator: &str) -> String {
+    let mut result = String::new();
+    for s in strings {
+        result.push_str(&s);
+        result.push_str(separator);
+    }
+    result
 }

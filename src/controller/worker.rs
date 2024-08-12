@@ -29,6 +29,9 @@ lazy_static::lazy_static! {
         .unwrap_or(15);
 }
 
+// Use the maximum value for the uncompressed result. After compression, the result will be smaller.
+const RESPONSE_LIMIT: usize = subsquid_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
+
 pub struct Worker<A: AllocationsChecker> {
     state_manager: Arc<StateManager>,
     // TODO: move allocation checking to the controller
@@ -132,7 +135,7 @@ impl<A: AllocationsChecker> Worker<A> {
                     .await
                 {
                     Ok(gateway_allocations::Status::Spent) => {
-                        self.execute_query(query_task.query_str, query_task.dataset)
+                        self.execute_query(query_task.query_str, query_task.dataset, RESPONSE_LIMIT)
                             .await
                     }
                     Ok(gateway_allocations::Status::NotEnoughCU) => Err(QueryError::NoAllocation),
@@ -156,6 +159,7 @@ impl<A: AllocationsChecker> Worker<A> {
         &self,
         query_str: String,
         dataset: String,
+        limit: usize,
     ) -> Result<QueryResult, QueryError> {
         let query: BatchRequest = serde_json::from_str(query_str.as_str())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
@@ -166,7 +170,7 @@ impl<A: AllocationsChecker> Worker<A> {
         if let Some(path) = path {
             tokio::spawn(async move {
                 let ctx = query::context::prepare_query_context(&path).await.unwrap();
-                let result = query::processor::process_query(&ctx, query).await?;
+                let result = query::processor::process_query(&ctx, query, limit).await?;
                 Ok(QueryResult::new(result, 1)?)
             })
             .await

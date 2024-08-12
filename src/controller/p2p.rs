@@ -60,7 +60,7 @@ pub async fn create_p2p_controller(
     logs_collector_id: PeerId,
     data_dir: PathBuf,
     ping_interval: Duration,
-) -> Result<P2PController<impl Stream<Item=WorkerEvent>>> {
+) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
@@ -85,7 +85,7 @@ pub async fn create_p2p_controller(
     })
 }
 
-impl<EventStream: Stream<Item=WorkerEvent>> P2PController<EventStream> {
+impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     pub async fn run(&self, cancellation_token: CancellationToken) {
         run_all!(
             cancellation_token,
@@ -298,6 +298,7 @@ impl<EventStream: Stream<Item=WorkerEvent>> P2PController<EventStream> {
             Ok(result) => query_result::Result::Ok(subsquid_messages::OkResult {
                 data: result.compressed_data,
                 exec_plan: None,
+                last_block: result.last_block,
             }),
             Err(e @ QueryError::NotFound) => query_result::Result::BadRequest(e.to_string()),
             Err(QueryError::NoAllocation) => query_result::Result::NoAllocation(()),

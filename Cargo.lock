@@ -1191,7 +1191,7 @@ checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 [[package]]
 name = "contract-client"
 version = "1.0.4"
-source = "git+https://github.com/subsquid/subsquid-network.git#d4a381cf7c0d3c93c96da5523d2f746726158095"
+source = "git+https://github.com/subsquid/subsquid-network.git#a5be5019d9e1525c782810417e056f25a0ba6c62"
 dependencies = [
  "async-trait",
  "clap",
@@ -5069,7 +5069,7 @@ checksum = "80b776a1b2dc779f5ee0641f8ade0125bc1298dd41a9a0c16d8bd57b42d222b1"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -5089,7 +5089,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9554e3ab233f0a932403704f1a1d08c30d5ccd931adfdfa1e8b5a19b52c1d55a"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.66",
@@ -6279,8 +6279,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-messages"
-version = "1.0.2"
-source = "git+https://github.com/subsquid/subsquid-network.git#d4a381cf7c0d3c93c96da5523d2f746726158095"
+version = "1.1.0"
+source = "git+https://github.com/subsquid/subsquid-network.git#a5be5019d9e1525c782810417e056f25a0ba6c62"
 dependencies = [
  "anyhow",
  "hex",
@@ -6295,7 +6295,7 @@ dependencies = [
 [[package]]
 name = "subsquid-network-transport"
 version = "1.0.11"
-source = "git+https://github.com/subsquid/subsquid-network.git#d4a381cf7c0d3c93c96da5523d2f746726158095"
+source = "git+https://github.com/subsquid/subsquid-network.git#a5be5019d9e1525c782810417e056f25a0ba6c62"
 dependencies = [
  "anyhow",
  "async-trait",
