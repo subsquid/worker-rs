@@ -278,10 +278,15 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 "Some fields are missing in proto message".to_owned(),
             ))?;
         };
-        if let Some(future) =
-            self.worker
-                .schedule_query(query_str.clone(), dataset.clone(), Some(peer_id))
-        {
+        let block_range = query
+            .block_range
+            .map(|subsquid_messages::Range { begin, end }| (begin as u64, end as u64));
+        if let Some(future) = self.worker.schedule_query(
+            query_str.clone(),
+            dataset.clone(),
+            block_range,
+            Some(peer_id),
+        ) {
             future.await
         } else {
             Err(QueryError::ServiceOverloaded)

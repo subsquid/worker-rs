@@ -52,7 +52,7 @@ async fn run_query(
     Path(dataset): Path<Dataset>,
     query_str: String,
 ) -> Response {
-    if let Some(future) = worker.schedule_query(query_str, dataset, None) {
+    if let Some(future) = worker.schedule_query(query_str, dataset, None, None) {
         future.await.map(|result| result.raw_data).into_response()
     } else {
         Response::builder()

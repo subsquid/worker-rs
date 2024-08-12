@@ -44,6 +44,7 @@ pub struct Worker<A: AllocationsChecker> {
 pub struct QueryTask {
     pub dataset: Dataset,
     pub query_str: String,
+    pub block_range: Option<(u64, u64)>,
     pub client_id: Option<PeerId>,
     pub response_sender: oneshot::Sender<Result<QueryResult, QueryError>>,
 }
@@ -85,12 +86,14 @@ impl<A: AllocationsChecker> Worker<A> {
         &self,
         query_str: String,
         dataset: Dataset,
+        block_range: Option<(u64, u64)>,
         client_id: Option<PeerId>,
     ) -> Option<impl Future<Output = Result<QueryResult, QueryError>> + '_> {
         let (resp_tx, resp_rx) = oneshot::channel();
         match self.queries_tx.try_send(QueryTask {
             dataset,
             query_str,
+            block_range,
             client_id,
             response_sender: resp_tx,
         }) {
@@ -135,8 +138,13 @@ impl<A: AllocationsChecker> Worker<A> {
                     .await
                 {
                     Ok(gateway_allocations::Status::Spent) => {
-                        self.execute_query(query_task.query_str, query_task.dataset, RESPONSE_LIMIT)
-                            .await
+                        self.execute_query(
+                            query_task.query_str,
+                            query_task.dataset,
+                            query_task.block_range,
+                            RESPONSE_LIMIT,
+                        )
+                        .await
                     }
                     Ok(gateway_allocations::Status::NotEnoughCU) => Err(QueryError::NoAllocation),
                     Err(e) => panic!("Couldn't check CU allocations: {e:?}"),
@@ -159,10 +167,15 @@ impl<A: AllocationsChecker> Worker<A> {
         &self,
         query_str: String,
         dataset: String,
+        block_range: Option<(u64, u64)>,
         limit: usize,
     ) -> Result<QueryResult, QueryError> {
-        let query: BatchRequest = serde_json::from_str(query_str.as_str())
+        let mut query: BatchRequest = serde_json::from_str(query_str.as_str())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
+        if let Some((from, to)) = block_range {
+            query.from_block = from;
+            query.to_block = Some(to);
+        }
         let chunks_guard = self
             .state_manager
             .find_chunks(&dataset, (query.from_block as u32).into())?;
