@@ -1191,7 +1191,7 @@ checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 [[package]]
 name = "contract-client"
 version = "1.0.4"
-source = "git+https://github.com/subsquid/subsquid-network.git#594ca8705a6819a1b317043ff0b6cbe5ed580916"
+source = "git+https://github.com/subsquid/subsquid-network.git#7906af9805553b868a8d617a9bcdac83af5c98df"
 dependencies = [
  "async-trait",
  "clap",
@@ -5069,7 +5069,7 @@ checksum = "80b776a1b2dc779f5ee0641f8ade0125bc1298dd41a9a0c16d8bd57b42d222b1"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -5089,7 +5089,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9554e3ab233f0a932403704f1a1d08c30d5ccd931adfdfa1e8b5a19b52c1d55a"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.66",
@@ -6280,7 +6280,7 @@ dependencies = [
 [[package]]
 name = "subsquid-messages"
 version = "1.1.0"
-source = "git+https://github.com/subsquid/subsquid-network.git#594ca8705a6819a1b317043ff0b6cbe5ed580916"
+source = "git+https://github.com/subsquid/subsquid-network.git#7906af9805553b868a8d617a9bcdac83af5c98df"
 dependencies = [
  "anyhow",
  "hex",
@@ -6294,8 +6294,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-network-transport"
-version = "1.0.11"
-source = "git+https://github.com/subsquid/subsquid-network.git#594ca8705a6819a1b317043ff0b6cbe5ed580916"
+version = "1.0.12"
+source = "git+https://github.com/subsquid/subsquid-network.git#7906af9805553b868a8d617a9bcdac83af5c98df"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6535,9 +6535,9 @@ dependencies = [
 
 [[package]]
 name = "tikv-jemalloc-sys"
-version = "0.5.4+5.3.0-patched"
+version = "0.6.0+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9402443cb8fd499b6f327e40565234ff34dbda27460c5b47db0db77443dd85d1"
+checksum = "cd3c60906412afa9c2b5b5a48ca6a5abe5736aec9eb48ad05037a677e52e4e2d"
 dependencies = [
  "cc",
  "libc",
@@ -6545,9 +6545,9 @@ dependencies = [
 
 [[package]]
 name = "tikv-jemallocator"
-version = "0.5.4"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "965fe0c26be5c56c94e38ba547249074803efd52adfb66de62107d95aab3eaca"
+checksum = "4cec5ff18518d81584f477e9bfdf957f5bb0979b0bac3af4ca30b5b3ae2d2865"
 dependencies = [
  "libc",
  "tikv-jemalloc-sys",
