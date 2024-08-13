@@ -273,23 +273,17 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         peer_id: PeerId,
         query: &Query,
     ) -> std::result::Result<QueryResult, QueryError> {
-        let (Some(dataset), Some(query_str)) = (&query.dataset, &query.query) else {
-            return Err(QueryError::BadRequest(
-                "Some fields are missing in proto message".to_owned(),
-            ))?;
-        };
+        let (dataset, query_str) = validate_query(query)
+            .map_err(|e| QueryError::BadRequest(format!("Query field missing: {e}")))?;
         let block_range = query
             .block_range
             .map(|subsquid_messages::Range { begin, end }| (begin as u64, end as u64));
-        if let Some(future) = self.worker.schedule_query(
-            query_str.clone(),
-            dataset.clone(),
-            block_range,
-            Some(peer_id),
-        ) {
-            future.await
-        } else {
-            Err(QueryError::ServiceOverloaded)
+        match self
+            .worker
+            .schedule_query(query_str, dataset, block_range, Some(peer_id))
+        {
+            Some(fut) => fut.await,
+            None => Err(QueryError::ServiceOverloaded),
         }
     }
 
@@ -396,4 +390,14 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
         file.write_all(peer_id.to_string().as_bytes())
             .expect("Couldn't write peer_id file");
     }
+}
+
+/// Validate if all required query fields are present, return (dataset, query_str)
+fn validate_query(query: &Query) -> Result<(String, String), &'static str> {
+    let dataset = query.dataset.as_ref().ok_or("dataset")?.clone();
+    let query_str = query.query.as_ref().ok_or("query")?.clone();
+    _ = query.query_id.as_ref().ok_or("query_id")?;
+    _ = query.profiling.as_ref().ok_or("profiling")?;
+    _ = query.client_state_json.as_ref().ok_or("client_state")?;
+    Ok((dataset, query_str))
 }

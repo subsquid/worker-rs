@@ -64,9 +64,7 @@ pub fn query_executed(result: &Result<QueryResult, QueryError>) {
     let (status, result) = match result {
         Ok(result) => (QueryStatus::Ok, Some(result)),
         Err(QueryError::NoAllocation) => (QueryStatus::NoAllocation, None),
-        Err(QueryError::NotFound | QueryError::BadRequest(_)) => {
-            (QueryStatus::BadRequest, None)
-        }
+        Err(QueryError::NotFound | QueryError::BadRequest(_)) => (QueryStatus::BadRequest, None),
         Err(QueryError::Other(_) | QueryError::ServiceOverloaded) => {
             (QueryStatus::ServerError, None)
         }
