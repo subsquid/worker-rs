@@ -1191,8 +1191,8 @@ checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 
 [[package]]
 name = "contract-client"
-version = "1.0.5"
-source = "git+https://github.com/subsquid/subsquid-network.git#69c00a42ddcfe0f35b4352c773cbef1228dfcb89"
+version = "1.0.4"
+source = "git+https://github.com/subsquid/sqd-network.git?branch=fix-log-bundles#0e3030706e528898d747eff78a6be826cdf3c5c6"
 dependencies = [
  "async-trait",
  "clap",
@@ -6403,7 +6403,7 @@ dependencies = [
 [[package]]
 name = "subsquid-messages"
 version = "1.1.2"
-source = "git+https://github.com/subsquid/subsquid-network.git#69c00a42ddcfe0f35b4352c773cbef1228dfcb89"
+source = "git+https://github.com/subsquid/sqd-network.git?branch=fix-log-bundles#0e3030706e528898d747eff78a6be826cdf3c5c6"
 dependencies = [
  "anyhow",
  "hex",
@@ -6417,8 +6417,8 @@ dependencies = [
 
 [[package]]
 name = "subsquid-network-transport"
-version = "1.0.18"
-source = "git+https://github.com/subsquid/subsquid-network.git#69c00a42ddcfe0f35b4352c773cbef1228dfcb89"
+version = "1.0.17"
+source = "git+https://github.com/subsquid/sqd-network.git?branch=fix-log-bundles#0e3030706e528898d747eff78a6be826cdf3c5c6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6449,7 +6449,7 @@ dependencies = [
 
 [[package]]
 name = "subsquid-worker"
-version = "1.1.1"
+version = "1.1.2-rc1"
 dependencies = [
  "anyhow",
  "async-stream",
