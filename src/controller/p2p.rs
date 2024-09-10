@@ -20,7 +20,7 @@ use tracing::{error, info, log, warn};
 
 use crate::{
     gateway_allocations::allocations_checker::RpcAllocationsChecker,
-    logs_storage::LogsStorage,
+    logs_storage::{self, LogsStorage},
     metrics,
     query::{error::QueryError, result::QueryResult},
     run_all,
@@ -155,15 +155,28 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     if !self.logs_storage.is_initialized() {
                         continue;
                     }
-                    let logs = match self.logs_storage.get_logs().await {
-                        Ok(logs) => logs,
-                        Err(e) => {
-                            warn!("Couldn't get logs from storage: {e:?}");
-                            continue;
+                    let mut last_seq_no = None;
+                    loop {
+                        let logs = match self.logs_storage.get_logs(last_seq_no).await {
+                            Ok(logs) => logs,
+                            Err(e) => {
+                                warn!("Couldn't get logs from storage: {e:?}");
+                                break;
+                            }
+                        };
+                        let total_logs = logs.len();
+                        if let Some(last_log) = logs.last() {
+                            last_seq_no = Some(last_log.seq_no.unwrap());
+                        } else {
+                            break;
                         }
-                    };
 
-                    self.try_send_logs(logs);
+                        self.try_send_logs(logs);
+
+                        if total_logs < logs_storage::LOGS_PER_PAGE {
+                            break;
+                        }
+                    }
                 },
                 _ = last_collected_log_rx.changed() => {
                     let last_seq_no = *last_collected_log_rx.borrow_and_update();

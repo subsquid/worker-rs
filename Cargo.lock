@@ -6449,7 +6449,7 @@ dependencies = [
 
 [[package]]
 name = "subsquid-worker"
-version = "1.1.2-rc1"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "async-stream",

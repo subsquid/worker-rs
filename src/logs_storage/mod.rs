@@ -6,6 +6,8 @@ use prost::Message;
 use subsquid_messages::QueryExecuted;
 use tokio_rusqlite::Connection;
 
+pub const LOGS_PER_PAGE: usize = 256;
+
 pub struct LogsStorage {
     db: Connection,
     init_state: AtomicInitState,
@@ -123,16 +125,16 @@ impl LogsStorage {
         };
     }
 
-    pub async fn get_logs(&self) -> Result<Vec<QueryExecuted>> {
-        const MAX_LOGS: usize = 256;
+    pub async fn get_logs(&self, from_seq_no: Option<u64>) -> Result<Vec<QueryExecuted>> {
+        let from_seq_no = from_seq_no.unwrap_or(0);
         self.db
-            .call_unwrap(|db| {
+            .call_unwrap(move |db| {
                 let mut stmt = db
                     .prepare_cached(
-                        "SELECT seq_no, log_msg FROM query_logs ORDER BY seq_no LIMIT ?",
+                        "SELECT seq_no, log_msg FROM query_logs WHERE seq_no >= ? ORDER BY seq_no LIMIT ?",
                     )
                     .expect("Couldn't prepare logs query");
-                let logs = stmt.query([MAX_LOGS])?.and_then(|row| {
+                let logs = stmt.query([from_seq_no, LOGS_PER_PAGE as u64])?.and_then(|row| {
                     let seq_no: u64 = row.get(0)?;
                     let log_msg: Vec<u8> = row.get(1)?;
                     let mut log: QueryExecuted =
@@ -193,7 +195,7 @@ mod tests {
             .await
             .unwrap();
 
-        let logs = logs_storage.get_logs().await.unwrap();
+        let logs = logs_storage.get_logs(None).await.unwrap();
         assert_eq!(logs.len(), 2);
         assert_eq!(logs[0].seq_no, Some(3));
         assert_eq!(
@@ -212,7 +214,7 @@ mod tests {
         );
 
         logs_storage.logs_collected(Some(3)).await;
-        let logs = logs_storage.get_logs().await.unwrap();
+        let logs = logs_storage.get_logs(None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].seq_no, Some(4));
         assert_eq!(
@@ -225,7 +227,7 @@ mod tests {
         );
 
         logs_storage.logs_collected(Some(100)).await;
-        let logs = logs_storage.get_logs().await.unwrap();
+        let logs = logs_storage.get_logs(None).await.unwrap();
         assert!(logs.is_empty());
     }
 }
