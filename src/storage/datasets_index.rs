@@ -1,7 +1,7 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use reqwest::Url;
-use subsquid_messages::{DatasetChunks, WorkerAssignment};
+use sqd_messages::{DatasetChunks, WorkerAssignment};
 
 use crate::types::{
     dataset::Dataset,
@@ -117,7 +117,7 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
 #[cfg(test)]
 mod tests {
     use reqwest::Url;
-    use subsquid_messages::{AssignedChunk, HttpHeader};
+    use sqd_messages::{AssignedChunk, HttpHeader};
 
     use super::{parse_assignment, Arc, ChunkRef, ChunkSet, DatasetChunks, WorkerAssignment};
     use crate::storage::layout::DataChunk;

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
-use subsquid_network_transport::P2PTransportBuilder;
+use sqd_network_transport::P2PTransportBuilder;
 use subsquid_worker::controller::http::HttpController;
 use subsquid_worker::controller::p2p::create_p2p_controller;
 use subsquid_worker::controller::worker::Worker;
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
             transport: transport_args,
             ..
         }) => {
-            subsquid_network_transport::metrics::register_metrics(&mut metrics_registry);
+            sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
             let transport_builder = P2PTransportBuilder::from_cli(transport_args).await?;
             let peer_id = transport_builder.local_peer_id();
             let info = Info::new(vec![

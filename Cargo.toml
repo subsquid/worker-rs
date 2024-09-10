@@ -48,9 +48,9 @@ tracing-opentelemetry = "0.22.0"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 walkdir = "2.5.0"
 
-contract-client = { git = "https://github.com/subsquid/sqd-network.git", branch = "fix-log-bundles", version = "1.0.4" }
-subsquid-messages = { git = "https://github.com/subsquid/sqd-network.git", branch = "fix-log-bundles", version = "1.1.2" }
-subsquid-network-transport = { git = "https://github.com/subsquid/sqd-network.git", branch = "fix-log-bundles", version = "1.0.17", features = ["worker", "metrics"] }
+sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", version = "1.0.7" }
+sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", version = "1.1.4" }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", version = "1.0.22", features = ["worker", "metrics"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"

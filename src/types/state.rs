@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
 };
-use subsquid_messages::{Range, RangeSet};
+use sqd_messages::{Range, RangeSet};
 
 pub type ChunkSet = BTreeSet<ChunkRef>;
 pub type Ranges = HashMap<Dataset, RangeSet>;

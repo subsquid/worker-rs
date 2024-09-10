@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
-use subsquid_network_transport::{PeerId, TransportArgs};
+use sqd_network_transport::{PeerId, TransportArgs};
 
 #[derive(Parser)]
 #[command(version)]

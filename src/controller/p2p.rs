@@ -4,10 +4,10 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
-use subsquid_messages::{
+use sqd_messages::{
     query_executed, DatasetRanges, InputAndOutput, Ping, Pong, Query, QueryExecuted, SizeAndHash,
 };
-use subsquid_network_transport::{
+use sqd_network_transport::{
     P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{
@@ -225,7 +225,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     }
 
     fn handle_pong(&self, pong: Pong) {
-        use subsquid_messages::pong::Status;
+        use sqd_messages::pong::Status;
         match pong.status {
             Some(Status::UnsupportedVersion(())) => {
                 error!("Worker version not supported by the scheduler");
@@ -290,7 +290,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .map_err(|e| QueryError::BadRequest(format!("Query field missing: {e}")))?;
         let block_range = query
             .block_range
-            .map(|subsquid_messages::Range { begin, end }| (begin as u64, end as u64));
+            .map(|sqd_messages::Range { begin, end }| (begin as u64, end as u64));
         match self
             .worker
             .schedule_query(query_str, dataset, block_range, Some(peer_id))
@@ -305,9 +305,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         query_id: String,
         result: std::result::Result<QueryResult, QueryError>,
     ) {
-        use subsquid_messages::query_result;
+        use sqd_messages::query_result;
         let query_result = match result {
-            Ok(result) => query_result::Result::Ok(subsquid_messages::OkResult {
+            Ok(result) => query_result::Result::Ok(sqd_messages::OkResult {
                 data: result.compressed_data,
                 exec_plan: None,
                 last_block: result.last_block,
@@ -320,7 +320,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             }
             Err(QueryError::Other(e)) => query_result::Result::ServerError(e.to_string()),
         };
-        let query_result = subsquid_messages::QueryResult {
+        let query_result = sqd_messages::QueryResult {
             query_id,
             result: Some(query_result),
         };

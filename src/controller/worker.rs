@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use subsquid_network_transport::PeerId;
+use sqd_network_transport::PeerId;
 
 use crate::{
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
@@ -30,7 +30,7 @@ lazy_static::lazy_static! {
 }
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
-const RESPONSE_LIMIT: usize = subsquid_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
+const RESPONSE_LIMIT: usize = sqd_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
 
 pub struct Worker<A: AllocationsChecker> {
     state_manager: Arc<StateManager>,

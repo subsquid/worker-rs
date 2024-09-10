@@ -1190,23 +1190,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 
 [[package]]
-name = "contract-client"
-version = "1.0.4"
-source = "git+https://github.com/subsquid/sqd-network.git?branch=fix-log-bundles#0e3030706e528898d747eff78a6be826cdf3c5c6"
-dependencies = [
- "async-trait",
- "clap",
- "ethers",
- "libp2p",
- "log",
- "serde",
- "thiserror",
- "tokio",
- "tokio-stream",
- "url",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1948,29 +1931,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.66",
-]
-
-[[package]]
-name = "env_filter"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a009aa4810eb158359dda09d0c87378e4bbb89b5a801f016885a4707ba24f7ea"
-dependencies = [
- "log",
- "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b35839ba51819680ba087cd351788c9a3c476841207e0b8cee0b04722343b9"
-dependencies = [
- "anstream",
- "anstyle",
- "env_filter",
- "humantime",
- "log",
 ]
 
 [[package]]
@@ -5149,7 +5109,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0f5d036824e4761737860779c906171497f6d55681139d8312388f8fe398922"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.12.5",
+]
+
+[[package]]
+name = "prost"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b2ecbe40f08db5c006b5764a2645f7f3f141ce756412ac9e1dd6087e6d32995"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.2",
 ]
 
 [[package]]
@@ -5166,7 +5136,7 @@ dependencies = [
  "once_cell",
  "petgraph",
  "prettyplease",
- "prost",
+ "prost 0.12.4",
  "prost-types",
  "regex",
  "syn 2.0.66",
@@ -5187,12 +5157,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost-derive"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acf0c195eebb4af52c752bec4f52f645da98b6e92077a04110c7f349477ae5ac"
+dependencies = [
+ "anyhow",
+ "itertools 0.10.5",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.66",
+]
+
+[[package]]
 name = "prost-types"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3235c33eb02c1f1e212abdbe34c78b264b038fb58ca612664343271e36e55ffe"
 dependencies = [
- "prost",
+ "prost 0.12.4",
 ]
 
 [[package]]
@@ -6311,6 +6294,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqd-contract-client"
+version = "1.0.7"
+source = "git+https://github.com/subsquid/sqd-network.git#328a5ce0eb57c776dc38a64226f4baf70a615c0f"
+dependencies = [
+ "async-trait",
+ "clap",
+ "ethers",
+ "libp2p",
+ "log",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "url",
+]
+
+[[package]]
+name = "sqd-messages"
+version = "1.1.4"
+source = "git+https://github.com/subsquid/sqd-network.git#328a5ce0eb57c776dc38a64226f4baf70a615c0f"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libp2p",
+ "prost 0.13.2",
+ "prost-build",
+ "semver",
+ "serde",
+ "sha3",
+]
+
+[[package]]
+name = "sqd-network-transport"
+version = "1.0.22"
+source = "git+https://github.com/subsquid/sqd-network.git#328a5ce0eb57c776dc38a64226f4baf70a615c0f"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bimap",
+ "clap",
+ "derivative",
+ "futures",
+ "futures-bounded",
+ "futures-core",
+ "lazy_static",
+ "libp2p",
+ "libp2p-connection-limits",
+ "libp2p-swarm-derive",
+ "log",
+ "lru",
+ "parking_lot",
+ "prometheus-client",
+ "prost 0.13.2",
+ "serde",
+ "serde_with",
+ "sqd-contract-client",
+ "sqd-messages",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "sqlparser"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6401,53 +6447,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "subsquid-messages"
-version = "1.1.2"
-source = "git+https://github.com/subsquid/sqd-network.git?branch=fix-log-bundles#0e3030706e528898d747eff78a6be826cdf3c5c6"
-dependencies = [
- "anyhow",
- "hex",
- "libp2p",
- "prost",
- "prost-build",
- "semver",
- "serde",
- "sha3",
-]
-
-[[package]]
-name = "subsquid-network-transport"
-version = "1.0.17"
-source = "git+https://github.com/subsquid/sqd-network.git?branch=fix-log-bundles#0e3030706e528898d747eff78a6be826cdf3c5c6"
-dependencies = [
- "anyhow",
- "async-trait",
- "bimap",
- "clap",
- "contract-client",
- "derivative",
- "env_logger",
- "futures",
- "futures-bounded",
- "futures-core",
- "lazy_static",
- "libp2p",
- "libp2p-connection-limits",
- "libp2p-swarm-derive",
- "log",
- "lru",
- "parking_lot",
- "prometheus-client",
- "prost",
- "serde",
- "serde_with",
- "subsquid-messages",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "subsquid-worker"
 version = "1.1.2"
 dependencies = [
@@ -6459,7 +6458,6 @@ dependencies = [
  "base64 0.21.7",
  "camino",
  "clap",
- "contract-client",
  "criterion",
  "datafusion",
  "dotenv",
@@ -6470,7 +6468,7 @@ dependencies = [
  "lazy_static",
  "parking_lot",
  "prometheus-client",
- "prost",
+ "prost 0.12.4",
  "regex",
  "reqwest 0.12.4",
  "scopeguard",
@@ -6480,8 +6478,9 @@ dependencies = [
  "serde-rename-rule",
  "serde_json",
  "sha3",
- "subsquid-messages",
- "subsquid-network-transport",
+ "sqd-contract-client",
+ "sqd-messages",
+ "sqd-network-transport",
  "thiserror",
  "tikv-jemallocator",
  "tokio",

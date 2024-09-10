@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use contract_client::{Address, GatewayCluster, U256};
-use subsquid_network_transport::PeerId;
+use sqd_contract_client::{Address, GatewayCluster, U256};
+use sqd_network_transport::PeerId;
 
 #[derive(Default)]
 pub struct ComputeUnitsStorage {

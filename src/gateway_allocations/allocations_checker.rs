@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use subsquid_network_transport::PeerId;
+use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -32,15 +32,15 @@ impl AllocationsChecker for NoopAllocationsChecker {
 }
 
 pub struct RpcAllocationsChecker {
-    client: Box<dyn contract_client::Client>,
-    own_id: contract_client::U256,
+    client: Box<dyn sqd_contract_client::Client>,
+    own_id: sqd_contract_client::U256,
     storage: Mutex<ComputeUnitsStorage>,
     polling_interval: Duration,
 }
 
 impl RpcAllocationsChecker {
     pub async fn new(
-        client: Box<dyn contract_client::Client>,
+        client: Box<dyn sqd_contract_client::Client>,
         peer_id: PeerId,
         polling_interval: Duration,
     ) -> Result<Self> {

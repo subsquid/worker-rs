@@ -2,8 +2,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use atomic_enum::atomic_enum;
-use prost::Message;
-use subsquid_messages::QueryExecuted;
+use sqd_messages::{ProstMsg, QueryExecuted};
 use tokio_rusqlite::Connection;
 
 pub const LOGS_PER_PAGE: usize = 256;
@@ -158,7 +157,7 @@ fn timestamp_now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use subsquid_messages::query_executed::Result;
+    use sqd_messages::query_executed::Result;
 
     use super::*;
 
@@ -170,7 +169,7 @@ mod tests {
         assert!(logs_storage.is_initialized());
         logs_storage
             .save_log(QueryExecuted {
-                query: Some(subsquid_messages::Query {
+                query: Some(sqd_messages::Query {
                     query_id: Some("0".to_owned()),
                     dataset: Some("eth-main".to_owned()),
                     query: Some("{}".to_owned()),
@@ -183,7 +182,7 @@ mod tests {
             .unwrap();
         logs_storage
             .save_log(QueryExecuted {
-                query: Some(subsquid_messages::Query {
+                query: Some(sqd_messages::Query {
                     query_id: Some("1".to_owned()),
                     dataset: Some("eth-main".to_owned()),
                     query: Some("{}".to_owned()),
