@@ -5,9 +5,9 @@ use datafusion::prelude::SessionContext;
 use tokio::runtime::Runtime;
 
 use crate::query::eth::BatchRequest;
-use subsquid_worker::query;
+use sqd_worker::query;
 #[cfg(test)]
-use subsquid_worker::util::tests::tests_data;
+use sqd_worker::util::tests::tests_data;
 
 async fn prepare_context() -> Result<SessionContext> {
     let root = tests_data().join("0017881390/0017881390-0017882786-32ee9457");
@@ -38,7 +38,9 @@ pub fn query_processing(c: &mut Criterion) {
                 let ctx = ctx.clone();
                 let query = query.clone();
                 async move {
-                    query::processor::process_query(&ctx, query).await.unwrap();
+                    query::processor::process_query(&ctx, query, 1000)
+                        .await
+                        .unwrap();
                 }
             })
         });

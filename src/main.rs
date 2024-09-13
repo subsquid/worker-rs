@@ -1,4 +1,4 @@
-// Subsquid worker, a core part of the Subsquid network.
+// SQD worker, a core part of the SQD network.
 // Copyright (C) 2024 Subsquid Labs GmbH
 
 // This program is free software: you can redistribute it and/or modify
@@ -19,18 +19,19 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
-use sqd_network_transport::P2PTransportBuilder;
-use subsquid_worker::controller::http::HttpController;
-use subsquid_worker::controller::p2p::create_p2p_controller;
-use subsquid_worker::controller::worker::Worker;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use subsquid_worker::cli::{self, Args, P2PArgs};
-use subsquid_worker::gateway_allocations::allocations_checker;
-use subsquid_worker::http_server::Server as HttpServer;
-use subsquid_worker::storage::manager::StateManager;
-use subsquid_worker::{metrics, run_all};
+use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
+
+use sqd_worker::cli::{self, Args, P2PArgs};
+use sqd_worker::controller::http::HttpController;
+use sqd_worker::controller::p2p::create_p2p_controller;
+use sqd_worker::controller::worker::Worker;
+use sqd_worker::gateway_allocations::allocations_checker;
+use sqd_worker::http_server::Server as HttpServer;
+use sqd_worker::storage::manager::StateManager;
+use sqd_worker::{metrics, run_all};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -133,7 +134,9 @@ async fn main() -> anyhow::Result<()> {
             ..
         }) => {
             sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
-            let transport_builder = P2PTransportBuilder::from_cli(transport_args).await?;
+            let agent_info = get_agent_info!();
+            let transport_builder =
+                P2PTransportBuilder::from_cli(transport_args, agent_info).await?;
             let peer_id = transport_builder.local_peer_id();
             let info = Info::new(vec![
                 ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
