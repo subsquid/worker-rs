@@ -127,7 +127,7 @@ impl State {
     ) -> Vec<ChunkRef> {
         let from_chunk = DataChunk {
             last_block: block_number,
-            first_block: block_number,
+            first_block: BlockNumber::from(0),
             ..Default::default()
         };
         let from = ChunkRef {
@@ -217,7 +217,10 @@ mod tests {
 
     use itertools::Itertools;
 
-    use crate::{storage::layout::DataChunk, types::state::ChunkRef};
+    use crate::{
+        storage::layout::{BlockNumber, DataChunk},
+        types::state::ChunkRef,
+    };
 
     use super::State;
 
@@ -275,5 +278,47 @@ mod tests {
                 ..Default::default()
             }
         )
+    }
+
+    #[test]
+    fn test_search() {
+        let ds = Arc::new("ds".to_owned());
+        let chunk_ref = |path| ChunkRef {
+            dataset: ds.clone(),
+            chunk: DataChunk::from_path(path).unwrap(),
+        };
+        let a = chunk_ref("0000000000/0000000000-0000000009-00000000");
+        let b = chunk_ref("0000000000/0000000010-0000000019-00000000");
+        let c = chunk_ref("0000000000/0000000100-0000000109-00000000");
+
+        let mut state = State::new([a.clone(), b.clone(), c.clone()].into_iter().collect());
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(0)),
+            vec![a.clone(), b.clone()]
+        );
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(8)),
+            vec![a.clone(), b.clone()]
+        );
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(9)),
+            vec![a.clone(), b.clone()]
+        );
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(10)),
+            vec![b.clone()]
+        );
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(19)),
+            vec![b.clone()]
+        );
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(99)),
+            vec![]
+        );
+        assert_eq!(
+            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(100)),
+            vec![c]
+        );
     }
 }

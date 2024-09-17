@@ -52,7 +52,7 @@ impl Deref for BlockNumber {
     }
 }
 
-#[derive(Default, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
+#[derive(Default, PartialEq, Eq, Clone, Hash)]
 pub struct DataChunk {
     pub last_block: BlockNumber,
     pub first_block: BlockNumber,
@@ -110,6 +110,18 @@ impl std::fmt::Display for DataChunk {
 impl std::fmt::Debug for DataChunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self, f)
+    }
+}
+
+impl Ord for DataChunk {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.last_block.cmp(&other.last_block)
+    }
+}
+
+impl PartialOrd for DataChunk {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
