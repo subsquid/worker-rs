@@ -1,2 +1,0 @@
-data/**/*.parquet filter=lfs diff=lfs merge=lfs -text
-fixtures/*.json filter=lfs diff=lfs merge=lfs -text
