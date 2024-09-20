@@ -120,46 +120,29 @@ impl State {
         }
     }
 
-    pub fn find_and_lock_chunks(
+    pub fn find_and_lock_chunk(
         &mut self,
         dataset: Arc<Dataset>,
         block_number: BlockNumber,
-    ) -> Vec<ChunkRef> {
-        let from_chunk = DataChunk {
-            last_block: block_number,
-            first_block: BlockNumber::from(0),
-            ..Default::default()
-        };
+    ) -> Option<ChunkRef> {
         let from = ChunkRef {
             dataset: dataset.clone(),
-            chunk: from_chunk,
+            chunk: DataChunk {
+                last_block: block_number,
+                first_block: BlockNumber::from(0),
+                ..Default::default()
+            },
         };
-        let mut range = self.available.range(from..);
-        let first = match range.next() {
-            None => return Vec::new(),
-            Some(chunk) => chunk.clone(),
-        };
-        if first.chunk.first_block > block_number {
-            return Vec::new();
-        }
+        let chunk_ref = self.available.range(from..).next()?.clone();
 
-        let mut last_block = first.chunk.last_block;
-        let mut result = vec![first];
-        for chunk in range {
-            if chunk.dataset == dataset
-                && *chunk.chunk.first_block.as_ref() == *last_block.as_ref() + 1
-            {
-                result.push(chunk.clone());
-                last_block = chunk.chunk.last_block;
-            } else {
-                break;
-            }
+        if chunk_ref.dataset != dataset || chunk_ref.chunk.first_block > block_number {
+            return None;
         }
+        assert!(chunk_ref.chunk.last_block >= block_number);
 
-        for chunk in result.iter() {
-            self.lock_chunk(chunk);
-        }
-        result
+        self.lock_chunk(&chunk_ref);
+
+        Some(chunk_ref)
     }
 
     pub fn release_chunks(&mut self, chunks: impl IntoIterator<Item = ChunkRef>) {
@@ -282,43 +265,53 @@ mod tests {
 
     #[test]
     fn test_search() {
-        let ds = Arc::new("ds".to_owned());
-        let chunk_ref = |path| ChunkRef {
+        let ds0 = Arc::new("ds0".to_owned());
+        let ds1 = Arc::new("ds1".to_owned());
+        let chunk_ref = |ds: &Arc<String>, path| ChunkRef {
             dataset: ds.clone(),
             chunk: DataChunk::from_path(path).unwrap(),
         };
-        let a = chunk_ref("0000000000/0000000000-0000000009-00000000");
-        let b = chunk_ref("0000000000/0000000010-0000000019-00000000");
-        let c = chunk_ref("0000000000/0000000100-0000000109-00000000");
+        let a = chunk_ref(&ds0, "0000000000/0000000000-0000000009-00000000");
+        let b = chunk_ref(&ds0, "0000000000/0000000010-0000000019-00000000");
+        let c = chunk_ref(&ds0, "0000000000/0000000100-0000000109-00000000");
+        let d = chunk_ref(&ds1, "0000000000/0000000000-0000000009-00000000");
 
-        let mut state = State::new([a.clone(), b.clone(), c.clone()].into_iter().collect());
-        assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(0)),
-            vec![a.clone(), b.clone()]
+        let mut state = State::new(
+            [a.clone(), b.clone(), c.clone(), d.clone()]
+                .into_iter()
+                .collect(),
         );
         assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(8)),
-            vec![a.clone(), b.clone()]
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(0)),
+            Some(a.clone())
         );
         assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(9)),
-            vec![a.clone(), b.clone()]
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(8)),
+            Some(a.clone())
         );
         assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(10)),
-            vec![b.clone()]
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(9)),
+            Some(a.clone())
         );
         assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(19)),
-            vec![b.clone()]
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(10)),
+            Some(b.clone())
         );
         assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(99)),
-            vec![]
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(19)),
+            Some(b.clone())
         );
         assert_eq!(
-            state.find_and_lock_chunks(ds.clone(), BlockNumber::from(100)),
-            vec![c]
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(99)),
+            None
+        );
+        assert_eq!(
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(100)),
+            Some(c.clone())
+        );
+        assert_eq!(
+            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(110)),
+            None
         );
     }
 }

@@ -140,22 +140,21 @@ impl StateManager {
         }
     }
 
-    pub fn find_chunks<'s>(
+    pub fn find_chunk<'s>(
         &'s self,
         encoded_dataset: &str,
         block_number: BlockNumber,
-    ) -> Result<scopeguard::ScopeGuard<Vec<PathBuf>, impl FnOnce(Vec<PathBuf>) + 's>> {
+    ) -> Result<scopeguard::ScopeGuard<Option<PathBuf>, impl FnOnce(Option<PathBuf>) + 's>> {
         let dataset = dataset::decode_dataset(encoded_dataset)
             .with_context(|| format!("Couldn't decode dataset: {encoded_dataset}"))?;
-        let chunks = self
+        let chunk = self
             .state
             .lock()
-            .find_and_lock_chunks(Arc::new(dataset), block_number);
-        let paths = chunks
-            .iter()
-            .map(|chunk| self.fs.root.join(encoded_dataset).join(chunk.chunk.path()))
-            .collect();
-        let guard = scopeguard::guard(paths, move |_| self.state.lock().release_chunks(chunks));
+            .find_and_lock_chunk(Arc::new(dataset), block_number);
+        let path = chunk
+            .as_ref()
+            .map(|chunk| self.fs.root.join(encoded_dataset).join(chunk.chunk.path()));
+        let guard = scopeguard::guard(path, move |_| self.state.lock().release_chunks(chunk));
         Ok(guard)
     }
 

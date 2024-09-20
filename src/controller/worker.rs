@@ -143,7 +143,6 @@ impl Worker {
         tracing::info!("Worker task finished");
     }
 
-    // TODO: process all chunks, not only the first one
     async fn execute_query(
         &self,
         query_str: String,
@@ -157,11 +156,10 @@ impl Worker {
             query.from_block = from;
             query.to_block = Some(to);
         }
-        let chunks_guard = self
+        let mut chunks_guard = self
             .state_manager
-            .find_chunks(&dataset, (query.from_block as u32).into())?;
-        let path = chunks_guard.iter().next().cloned();
-        if let Some(path) = path {
+            .find_chunk(&dataset, (query.from_block as u32).into())?;
+        if let Some(path) = chunks_guard.take() {
             tokio::spawn(async move {
                 let start_time = tokio::time::Instant::now();
                 let ctx = query::context::prepare_query_context(&path).await.unwrap();
