@@ -225,7 +225,7 @@ mod tests {
             Some(Result::BadRequest("Invalid query".to_owned()))
         );
 
-        logs_storage.logs_collected(Some(100)).await;
+        logs_storage.logs_collected(Some(4)).await;
         let logs = logs_storage.get_logs(None).await.unwrap();
         assert!(logs.is_empty());
     }
