@@ -72,7 +72,7 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
         let mut dataset_files = HashMap::new();
         for chunk in chunks {
             let data_chunk = DataChunk::from_str(&chunk.path)
-                .map_err(|_| anyhow::anyhow!("Invalid chunk path"))?;
+                .map_err(|e| anyhow::anyhow!("Invalid chunk path: {e}"))?;
             let files = chunk
                 .filenames
                 .iter()

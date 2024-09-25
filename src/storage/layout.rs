@@ -71,7 +71,7 @@ impl DataChunk {
     // TODO: synchronize with other language implementations
     pub fn from_path(dirname: &str) -> Result<Self> {
         lazy_static! {
-            static ref RE: Regex = Regex::new(r"(\d{10})/(\d{10})-(\d{10})-(\w{8})$").unwrap();
+            static ref RE: Regex = Regex::new(r"(\d{10})/(\d{10})-(\d{10})-(\w{5,8})$").unwrap();
         }
         let (top, beg, end, hash) = RE
             .captures(dirname)
@@ -237,16 +237,25 @@ mod tests {
 
     #[test]
     fn test_data_chunk() {
-        let chunk = DataChunk {
+        let chunk0 = DataChunk {
             first_block: 1024.into(),
             last_block: 2047.into(),
             last_hash: "0xabcdef".into(),
             top: 1000.into(),
         };
         let path = "0000001000/0000001024-0000002047-0xabcdef";
-        assert_eq!(chunk.path(), path);
+        assert_eq!(chunk0.path(), path);
+        assert_eq!(DataChunk::from_path(&path).unwrap(), chunk0);
 
-        assert_eq!(DataChunk::from_path(&path).unwrap(), chunk);
+        let chunk1 = DataChunk {
+            first_block: 221000000.into(),
+            last_block: 221000649.into(),
+            last_hash: "9QgFD".into(),
+            top: 221000000.into(),
+        };
+        let path = "0221000000/0221000000-0221000649-9QgFD";
+        assert_eq!(chunk1.path(), path);
+        assert_eq!(DataChunk::from_path(&path).unwrap(), chunk1);
     }
 
     #[tokio::test]
