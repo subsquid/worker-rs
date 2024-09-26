@@ -1,44 +1,31 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
-use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use sqd_query::ParquetChunk;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use sqd_network_transport::PeerId;
 
 use crate::{
     metrics,
-    query::{
-        self,
-        eth::BatchRequest,
-        result::{QueryError, QueryOk, QueryResult},
-    },
-    run_all,
+    query::result::{QueryError, QueryOk, QueryResult},
     storage::{
         datasets_index::DatasetsIndex,
         manager::{self, StateManager},
     },
     types::{dataset::Dataset, state::ChunkSet},
-    util::UseOnce,
 };
-
-lazy_static::lazy_static! {
-    static ref PARALLEL_QUERIES: usize = std::env::var("PARALLEL_QUERIES")
-        .map(|s| s.parse().expect("Invalid PARALLEL_QUERIES"))
-        .unwrap_or(3);
-    static ref QUEUED_QUERIES: usize = std::env::var("QUEUED_QUERIES")
-        .map(|s| s.parse().expect("Invalid QUEUED_QUERIES"))
-        .unwrap_or(15);
-}
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
 const RESPONSE_LIMIT: usize = sqd_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
 
 pub struct Worker {
     state_manager: Arc<StateManager>,
-    queries_tx: mpsc::Sender<QueryTask>,
-    queries_rx: UseOnce<mpsc::Receiver<QueryTask>>,
+    queries_running: AtomicUsize,
+    max_parallel_queries: usize,
     pub peer_id: Option<PeerId>,
 }
 
@@ -51,12 +38,11 @@ pub struct QueryTask {
 }
 
 impl Worker {
-    pub fn new(state_manager: StateManager) -> Self {
-        let (queries_tx, queries_rx) = mpsc::channel(*QUEUED_QUERIES);
+    pub fn new(state_manager: StateManager, parallel_queries: usize) -> Self {
         Self {
             state_manager: Arc::new(state_manager),
-            queries_tx,
-            queries_rx: UseOnce::new(queries_rx),
+            queries_running: 0.into(),
+            max_parallel_queries: parallel_queries,
             peer_id: None,
         }
     }
@@ -89,58 +75,28 @@ impl Worker {
         block_range: Option<(u64, u64)>,
         client_id: Option<PeerId>,
     ) -> QueryResult {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        match self.queries_tx.try_send(QueryTask {
-            dataset,
-            query_str,
-            block_range,
-            client_id,
-            response_sender: resp_tx,
-        }) {
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                return Err(QueryError::ServiceOverloaded);
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                panic!("Query subscriber dropped");
-            }
-            Ok(_) => {
-                metrics::PENDING_QUERIES.inc();
-            }
-        };
-        resp_rx
-            .await
-            .expect("Query processor didn't produce a result")
+        let before = self.queries_running.fetch_add(1, Ordering::SeqCst);
+        metrics::RUNNING_QUERIES.inc();
+        let _ = scopeguard::guard((), |_| {
+            self.queries_running.fetch_sub(1, Ordering::SeqCst);
+            metrics::RUNNING_QUERIES.dec();
+        });
+        if before >= self.max_parallel_queries {
+            return Err(QueryError::ServiceOverloaded);
+        }
+        tracing::debug!(
+            "Running query from {}",
+            client_id
+                .map(|id| id.to_string())
+                .unwrap_or("{unknown}".to_string())
+        );
+        self.execute_query(query_str, dataset, block_range).await
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        let queries_rx = self.queries_rx.take().unwrap();
-        let state_manager = self.state_manager.clone();
-        let state_manager_fut = state_manager.run(cancellation_token.child_token());
-        let worker_fut = ReceiverStream::new(queries_rx)
-            .take_until(cancellation_token.cancelled())
-            .for_each_concurrent(*PARALLEL_QUERIES, |query_task| async move {
-                metrics::PENDING_QUERIES.dec();
-                tracing::debug!(
-                    "Running query from {}",
-                    query_task
-                        .client_id
-                        .map(|id| id.to_string())
-                        .unwrap_or("{unknown}".to_string())
-                );
-                let result = self
-                    .execute_query(
-                        query_task.query_str,
-                        query_task.dataset,
-                        query_task.block_range,
-                        RESPONSE_LIMIT,
-                    )
-                    .await;
-                if query_task.response_sender.send(result).is_err() {
-                    tracing::error!("Query result couldn't be sent");
-                }
-            });
-        run_all!(cancellation_token, state_manager_fut, worker_fut);
-        tracing::info!("Worker task finished");
+        self.state_manager
+            .run(cancellation_token.child_token())
+            .await
     }
 
     async fn execute_query(
@@ -148,32 +104,56 @@ impl Worker {
         query_str: String,
         dataset: String,
         block_range: Option<(u64, u64)>,
-        limit: usize,
     ) -> QueryResult {
-        let mut query: BatchRequest = serde_json::from_str(query_str.as_str())
+        let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
-        if let Some((from, to)) = block_range {
-            query.from_block = from;
-            query.to_block = Some(to);
+        if let Some((from_block, to_block)) = block_range {
+            query.set_first_block(Some(from_block));
+            query.set_last_block(Some(to_block));
         }
-        let mut chunks_guard = self
+
+        // First block may be either set by the `block_range` arg or defined in the query.
+        let Some(first_block) = query.first_block() else {
+            return Err(QueryError::BadRequest(
+                "Query without first_block".to_owned(),
+            ));
+        };
+        let chunk_guard = self
             .state_manager
-            .find_chunk(&dataset, (query.from_block as u32).into())?;
-        if let Some(path) = chunks_guard.take() {
-            tokio::spawn(async move {
-                let start_time = tokio::time::Instant::now();
-                let ctx = query::context::prepare_query_context(&path).await.unwrap();
-                let result = query::processor::process_query(&ctx, query, limit).await?;
-                Ok(QueryOk::new(result, 1, start_time.elapsed()))
+            .clone()
+            .find_chunk(&dataset, (first_block as u32).into())?;
+        if chunk_guard.is_none() {
+            return Err(QueryError::NotFound);
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sqd_polars::POOL.spawn(move || {
+            let result = (move || {
+                let start_time = std::time::Instant::now();
+
+                let chunk = ParquetChunk::new(chunk_guard.as_ref().unwrap().as_str());
+                let plan = query.compile();
+                let data = Vec::with_capacity(1024 * 1024);
+                let mut writer = sqd_query::JsonLinesWriter::new(data);
+                let mut blocks = plan.execute(&chunk)?;
+                let last_block = blocks.last_block();
+                writer.write_blocks(&mut blocks)?;
+                let bytes = writer.finish()?;
+
+                if bytes.len() > RESPONSE_LIMIT {
+                    return Err(QueryError::Other(anyhow::anyhow!("Response too large")));
+                }
+
+                Ok(QueryOk::new(bytes, 1, last_block, start_time.elapsed()))
+            })();
+            tx.send(result).unwrap_or_else(|_| {
+                tracing::warn!("Query runner didn't wait for the result");
             })
-            .await
-            .unwrap_or_else(|e| {
-                Err(QueryError::Other(
-                    anyhow::Error::new(e).context("Query processing task panicked"),
-                ))
-            })
-        } else {
-            Err(QueryError::NotFound)
-        }
+        });
+        rx.await.unwrap_or_else(|_| {
+            Err(QueryError::Other(anyhow::anyhow!(
+                "Query processor didn't produce a result"
+            )))
+        })
     }
 }

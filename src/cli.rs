@@ -25,8 +25,14 @@ pub struct Args {
     #[command(subcommand)]
     pub mode: Mode,
 
-    #[clap(env, hide(true), default_value_t = 3)]
+    #[clap(env, default_value_t = 20)]
+    pub parallel_queries: usize,
+
+    #[clap(env, default_value_t = 3)]
     pub concurrent_downloads: usize,
+
+    #[clap(env)]
+    pub query_threads: Option<usize>,
 
     #[clap(env = "PING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "55")]
     pub ping_interval: Duration,

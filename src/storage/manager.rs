@@ -140,11 +140,11 @@ impl StateManager {
         }
     }
 
-    pub fn find_chunk<'s>(
-        &'s self,
+    pub fn find_chunk(
+        self: Arc<Self>,
         encoded_dataset: &str,
         block_number: BlockNumber,
-    ) -> Result<scopeguard::ScopeGuard<Option<PathBuf>, impl FnOnce(Option<PathBuf>) + 's>> {
+    ) -> Result<scopeguard::ScopeGuard<Option<PathBuf>, impl FnOnce(Option<PathBuf>)>> {
         let dataset = dataset::decode_dataset(encoded_dataset)
             .with_context(|| format!("Couldn't decode dataset: {encoded_dataset}"))?;
         let chunk = self

@@ -40,6 +40,22 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+// This function is guaranteed to run before any other threads are spawned.
+fn init_single_threaded(args: &Args) -> anyhow::Result<()> {
+    // Some internal libraries use the global pool for their operations. This pool's parallelism
+    // is initialized with the value of the environment variable. Hence, the only way to guarantee
+    // the desired parallelism is to set the environment variable from the code.
+    let threads = args.query_threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+    });
+    unsafe {
+        std::env::set_var("POLARS_MAX_THREADS", threads.to_string());
+    }
+    Ok(())
+}
+
 fn setup_tracing() -> Result<()> {
     let fmt = tracing_subscriber::fmt::layer()
         .compact()
@@ -84,10 +100,7 @@ fn create_cancellation_token() -> Result<CancellationToken> {
     Ok(token)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    dotenv::dotenv().ok();
-    let args = Args::parse();
+async fn run(args: Args) -> anyhow::Result<()> {
     setup_tracing()?;
     let _sentry_guard = setup_sentry(&args);
 
@@ -105,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION").to_owned(),
             )]);
             metrics::register_metrics(&mut metrics_registry, info);
-            let worker = Arc::new(Worker::new(state_manager));
+            let worker = Arc::new(Worker::new(state_manager, args.parallel_queries));
             let controller = HttpController::new(
                 worker.clone(),
                 args.ping_interval,
@@ -148,7 +161,8 @@ async fn main() -> anyhow::Result<()> {
                 network_polling_interval,
             )
             .await?;
-            let worker = Arc::new(Worker::new(state_manager).with_peer_id(peer_id));
+            let worker =
+                Arc::new(Worker::new(state_manager, args.parallel_queries).with_peer_id(peer_id));
 
             let controller_fut = async {
                 tokio::select! {
@@ -182,4 +196,16 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!("Shutting down");
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    dotenv::dotenv().ok();
+    let args = Args::parse();
+
+    init_single_threaded(&args)?;
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(args))
 }

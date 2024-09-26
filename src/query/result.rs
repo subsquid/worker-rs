@@ -4,8 +4,6 @@ use axum::{http::StatusCode, response::IntoResponse};
 
 use crate::util::hash::sha3_256;
 
-use super::processor;
-
 pub type QueryResult = std::result::Result<QueryOk, QueryError>;
 
 #[derive(Debug, Clone)]
@@ -18,18 +16,16 @@ pub struct QueryOk {
 
 impl QueryOk {
     pub fn new(
-        values: processor::QueryResult,
+        data: Vec<u8>,
         num_read_chunks: usize,
+        last_block: u64,
         exec_time: Duration,
     ) -> Self {
-        let last_block = values.last().map(|(_json, block_number)| *block_number);
-        let data = join(values.into_iter().map(|(json, _block_number)| json), "\n").into_bytes();
-
         Self {
             data,
             num_read_chunks,
             exec_time,
-            last_block,
+            last_block: Some(last_block),
         }
     }
 
@@ -44,15 +40,6 @@ impl QueryOk {
     pub fn sha3_256(&self) -> Vec<u8> {
         sha3_256(&self.data)
     }
-}
-
-fn join(strings: impl Iterator<Item = String>, separator: &str) -> String {
-    let mut result = String::new();
-    for s in strings {
-        result.push_str(&s);
-        result.push_str(separator);
-    }
-    result
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -72,12 +59,6 @@ pub enum QueryError {
 impl From<std::io::Error> for QueryError {
     fn from(value: std::io::Error) -> Self {
         Self::Other(anyhow::Error::from(value))
-    }
-}
-
-impl From<datafusion::error::DataFusionError> for QueryError {
-    fn from(value: datafusion::error::DataFusionError) -> Self {
-        Self::Other(value.context("DataFusion error").into())
     }
 }
 
