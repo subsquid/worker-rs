@@ -7,7 +7,6 @@ FROM chef AS planner
 COPY Cargo.toml .
 COPY Cargo.lock .
 COPY src ./src
-COPY benches ./benches
 RUN cargo chef prepare --recipe-path recipe.json
 
 
@@ -20,7 +19,6 @@ RUN --mount=type=ssh cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml .
 COPY Cargo.lock .
 COPY src ./src
-COPY benches ./benches
 RUN --mount=type=ssh cargo build --release
 
 
