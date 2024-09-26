@@ -50,7 +50,7 @@ walkdir = "2.5.0"
 
 sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", version = "1.0.7" }
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", version = "1.1.4" }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", version = "1.0.24", features = ["worker", "metrics"] }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", version = "1.0.25", features = ["worker", "metrics"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
