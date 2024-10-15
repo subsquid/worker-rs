@@ -73,7 +73,7 @@ impl HttpController {
             .send()
             .await?
             .error_for_status()?
-            .json()
+            .json::<()>()
             .await?;
         Ok(())
     }
