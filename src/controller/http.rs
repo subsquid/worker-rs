@@ -58,7 +58,7 @@ impl HttpController {
     }
 
     async fn send_ping(&self, status: Status) -> anyhow::Result<()> {
-        let _: () = reqwest::Client::new()
+        reqwest::Client::new()
             .post([&self.router_url, "/ping"].join(""))
             .json(&serde_json::json!({
                 "worker_id": self.worker_id,
