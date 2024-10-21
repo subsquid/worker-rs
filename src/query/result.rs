@@ -10,7 +10,7 @@ pub type QueryResult = std::result::Result<QueryOk, QueryError>;
 pub struct QueryOk {
     pub data: Vec<u8>,
     pub num_read_chunks: usize,
-    pub last_block: Option<u64>,
+    pub last_block: u64,
     pub exec_time: Duration,
 }
 
@@ -25,7 +25,7 @@ impl QueryOk {
             data,
             num_read_chunks,
             exec_time,
-            last_block: Some(last_block),
+            last_block,
         }
     }
 

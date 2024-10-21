@@ -14,7 +14,7 @@ use super::Filesystem;
 // TODO: use u64
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
 #[repr(transparent)]
-pub struct BlockNumber(u32);
+pub struct BlockNumber(u64);
 
 impl std::fmt::Display for BlockNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -33,20 +33,20 @@ impl TryFrom<&str> for BlockNumber {
     }
 }
 
-impl From<u32> for BlockNumber {
-    fn from(value: u32) -> Self {
+impl From<u64> for BlockNumber {
+    fn from(value: u64) -> Self {
         BlockNumber(value)
     }
 }
 
-impl AsRef<u32> for BlockNumber {
-    fn as_ref(&self) -> &u32 {
+impl AsRef<u64> for BlockNumber {
+    fn as_ref(&self) -> &u64 {
         &self.0
     }
 }
 
 impl Deref for BlockNumber {
-    type Target = u32;
+    type Target = u64;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
