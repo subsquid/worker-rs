@@ -138,7 +138,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
         cli::Mode::P2P(P2PArgs {
             scheduler_id,
-            logs_collector_id,
             network_polling_interval,
             transport: transport_args,
             ..
@@ -173,7 +172,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         transport_builder,
                         allocations_checker,
                         scheduler_id,
-                        logs_collector_id,
                         args.data_dir,
                         args.ping_interval,
                     ) => {
