@@ -1,9 +1,10 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{env, io::Write, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
+use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
-use sqd_messages::{query_error, query_executed, DatasetRanges, Ping, Query, QueryExecuted};
+use sqd_messages::{query_error, query_executed, BitString, DatasetRanges, PingV2, Query, QueryExecuted};
 use sqd_network_transport::{
     Keypair, P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
@@ -106,17 +107,17 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .for_each(|_| async move {
                 tracing::debug!("Sending ping");
                 let status = self.worker.status();
-                let ping = Ping {
-                    stored_ranges: status
-                        .available
-                        .into_iter()
-                        .map(|(dataset, ranges)| DatasetRanges {
-                            url: dataset,
-                            ranges: ranges.ranges,
-                        })
-                        .collect(),
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+                let _ = encoder.write_all(status.unavailability_map.as_slice());
+                let compressed_bytes = encoder.finish().unwrap();
+                let data_len = compressed_bytes.len();
+                let ping = PingV2 {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     stored_bytes: Some(status.stored_bytes),
+                    missing_chunks: Some(BitString {
+                        data: compressed_bytes,
+                        size: data_len as u64
+                    }),
                     ..Default::default()
                 };
                 let result = self.transport_handle.send_ping(ping);

@@ -5,6 +5,8 @@ mod once;
 pub mod run_all;
 pub mod tests;
 pub mod timestamp;
+pub mod assignment;
+pub mod signature;
 
 pub type UseOnce<T> = once::UseOnce<T>;
 pub use timestamp::timestamp_now_ms;

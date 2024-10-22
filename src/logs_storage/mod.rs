@@ -135,9 +135,8 @@ impl LogsStorage {
                     )
                     .expect("Couldn't prepare logs query");
                 let logs = stmt.query([from_seq_no, LOGS_PER_PAGE as u64])?.and_then(|row| {
-                    let seq_no: u64 = row.get(0)?;
                     let log_msg: Vec<u8> = row.get(1)?;
-                    let mut log: QueryExecuted =
+                    let log: QueryExecuted =
                         QueryExecuted::decode(&log_msg[..]).expect("Invalid log proto in DB");
                     // log.seq_no = Some(seq_no);
                     Ok(log)

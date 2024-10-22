@@ -6865,7 +6865,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.0.7"
-source = "git+https://github.com/subsquid/sqd-network.git?branch=v2#7567703121db0bf7065558d9d80da5c3afcdbcf6"
+source = "git+https://github.com/subsquid/sqd-network.git?branch=separate-pings#3a457f38f9c9d219fa6040a1f968cdfb12968dbd"
 dependencies = [
  "async-trait",
  "clap",
@@ -6882,7 +6882,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?branch=v2#7567703121db0bf7065558d9d80da5c3afcdbcf6"
+source = "git+https://github.com/subsquid/sqd-network.git?branch=separate-pings#3a457f38f9c9d219fa6040a1f968cdfb12968dbd"
 dependencies = [
  "anyhow",
  "hex",
@@ -6897,7 +6897,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "2.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?branch=v2#7567703121db0bf7065558d9d80da5c3afcdbcf6"
+source = "git+https://github.com/subsquid/sqd-network.git?branch=separate-pings#3a457f38f9c9d219fa6040a1f968cdfb12968dbd"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6982,6 +6982,7 @@ dependencies = [
  "flate2",
  "futures",
  "glob",
+ "hmac",
  "itertools 0.12.1",
  "lazy_static",
  "parking_lot",
@@ -6995,6 +6996,7 @@ dependencies = [
  "serde",
  "serde-rename-rule",
  "serde_json",
+ "sha2",
  "sha3",
  "sqd-contract-client",
  "sqd-messages",
@@ -7011,6 +7013,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
  "walkdir",
 ]
 

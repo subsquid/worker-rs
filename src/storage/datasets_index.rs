@@ -1,4 +1,5 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
+use base64::{engine::general_purpose::STANDARD as base64, Engine};
 
 use reqwest::Url;
 use sqd_messages::{DatasetChunks, WorkerAssignment};
@@ -10,9 +11,10 @@ use crate::types::{
 
 use super::layout::DataChunk;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct DatasetsIndex {
-    datasets: HashMap<Arc<Dataset>, DatasetIndex>,
+    pub datasets: HashMap<Arc<Dataset>, DatasetIndex>,
+    pub chunks_ordinals_map: HashMap<DataChunk, u64>,
     http_headers: reqwest::header::HeaderMap,
 }
 
@@ -22,7 +24,8 @@ pub struct RemoteFile {
     pub name: Arc<str>,
 }
 
-struct DatasetIndex {
+#[derive(Debug, PartialEq, Eq)]
+pub struct DatasetIndex {
     url: Url,
     files: HashMap<DataChunk, Vec<Arc<str>>>,
 }
@@ -44,6 +47,61 @@ impl DatasetsIndex {
         })
     }
 
+    pub fn from(assigned_data: Vec<crate::util::assignment::Dataset>, headers: HashMap<String, String>) -> Self {
+        let mut datasets = HashMap::new();
+        let mut chunks_ordinals_map = HashMap::new();
+        let mut ordinal = 0;
+        for dataset in assigned_data {
+            let dataset_id = String::from_utf8(base64.decode(dataset.id).unwrap()).unwrap(); // UNWRAP
+            let dataset_url = dataset.base_url;
+            let mut dataset_files: HashMap<DataChunk, Vec<Arc<str>>> = Default::default();
+            for chunk in dataset.chunks {
+                let data_chunk = DataChunk::from_path(&chunk.id).unwrap(); // UNWRAP
+                let mut files: Vec<Arc<str>> = Default::default();
+                for (file, _) in chunk.files {
+                    files.push(Arc::from(file.as_str()));
+                }
+                dataset_files.insert(data_chunk, files);
+                chunks_ordinals_map.insert(DataChunk::from_path(&chunk.id).unwrap(), ordinal);
+                ordinal += 1;
+            }
+            datasets.insert(
+                Arc::from(dataset_id),
+                DatasetIndex {
+                    url: Url::parse(&dataset_url).unwrap(), // UNWRAP
+                    files: dataset_files,
+                },
+            );
+        }
+        DatasetsIndex { 
+            datasets,
+            chunks_ordinals_map,
+            http_headers: headers.into_iter().map(|(k, v)| {
+                (
+                    reqwest::header::HeaderName::from_str(&k).unwrap_or_else(|e| {
+                        panic!("Couldn't parse header name: {}: {e:?}", k)
+                    }),
+                    reqwest::header::HeaderValue::from_str(&v).unwrap_or_else(|e| {
+                        panic!("Couldn't parse header value: {}: {e:?}", v)
+                    }),
+                )
+            }).collect() 
+        }
+    }
+
+    pub fn create_chunks_set(&self) -> ChunkSet {
+        let mut chunk_set = ChunkSet::new();
+        for (dataset_id, dataset_index) in &self.datasets {
+            for data_chunk in dataset_index.files.keys() {
+                chunk_set.insert(ChunkRef {
+                    dataset: dataset_id.clone(),
+                    chunk: data_chunk.clone(),
+                });
+            };
+        };
+        chunk_set
+    }
+
     pub fn get_headers(&self) -> &reqwest::header::HeaderMap {
         &self.http_headers
     }
@@ -53,6 +111,8 @@ impl DatasetsIndex {
 pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSet, DatasetsIndex)> {
     let mut datasets = HashMap::new();
     let mut chunk_set = ChunkSet::new();
+    let mut chunks_ordinals_map = HashMap::new();
+    let mut ordinal = 0;
 
     let filename_refs: HashMap<u32, Arc<str>> = assignment
         .known_filenames
@@ -82,7 +142,9 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
                 dataset: dataset_id.clone(),
                 chunk: data_chunk.clone(),
             });
-            dataset_files.insert(data_chunk, files);
+            dataset_files.insert(data_chunk.clone(), files);
+            chunks_ordinals_map.insert(data_chunk, ordinal);
+            ordinal += 1;
         }
         datasets.insert(
             dataset_id,
@@ -96,6 +158,7 @@ pub fn parse_assignment(assignment: WorkerAssignment) -> anyhow::Result<(ChunkSe
         chunk_set,
         DatasetsIndex {
             datasets,
+            chunks_ordinals_map,
             http_headers: assignment
                 .http_headers
                 .into_iter()
