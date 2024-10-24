@@ -28,7 +28,7 @@ const CONCURRENT_QUERY_MESSAGES: usize = 32;
 
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
-    ping_interval: Duration,
+    heartbeat_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
@@ -45,7 +45,7 @@ pub async fn create_p2p_controller(
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
     data_dir: PathBuf,
-    ping_interval: Duration,
+    heartbeat_interval: Duration,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
@@ -60,7 +60,7 @@ pub async fn create_p2p_controller(
 
     Ok(P2PController {
         worker,
-        ping_interval,
+        heartbeat_interval,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
@@ -77,7 +77,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             cancellation_token,
             self.run_event_loop(cancellation_token.child_token()),
             self.run_queries_loop(cancellation_token.child_token()),
-            self.run_ping_loop(cancellation_token.child_token(), self.ping_interval),
+            self.run_heartbeat_loop(cancellation_token.child_token(), self.heartbeat_interval),
             // self._run_logs_loop(cancellation_token.child_token(), *LOGS_SEND_INTERVAL),
             self.worker.run(cancellation_token.child_token()),
             self.allocations_checker
@@ -96,29 +96,29 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         info!("Query processing task finished");
     }
 
-    async fn run_ping_loop(&self, cancellation_token: CancellationToken, ping_interval: Duration) {
+    async fn run_heartbeat_loop(&self, cancellation_token: CancellationToken, heartbeat_interval: Duration) {
         let mut timer =
-            tokio::time::interval_at(tokio::time::Instant::now() + ping_interval, ping_interval);
+            tokio::time::interval_at(tokio::time::Instant::now() + heartbeat_interval, heartbeat_interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         IntervalStream::new(timer)
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
-                tracing::debug!("Sending ping");
+                tracing::debug!("Sending heartbeat");
                 let status = self.worker.status();
-                let ping = Heartbeat {
+                let heartbeat = Heartbeat {
                     assignment_id: "".to_owned(), // TODO
                     missing_chunks: None,
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     stored_bytes: Some(status.stored_bytes),
                     ..Default::default()
                 };
-                let result = self.transport_handle.send_ping(ping);
+                let result = self.transport_handle.send_heartbeat(heartbeat);
                 if let Err(err) = result {
-                    warn!("Couldn't send ping: {:?}", err);
+                    warn!("Couldn't send heartbeat: {:?}", err);
                 }
             })
             .await;
-        info!("Pings processing task finished");
+        info!("Heartbeat processing task finished");
     }
 
     async fn run_event_loop(&self, cancellation_token: CancellationToken) {
