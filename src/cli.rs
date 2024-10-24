@@ -65,6 +65,10 @@ pub struct P2PArgs {
     #[clap(long, env)]
     pub scheduler_id: PeerId,
 
+    /// Peer ID of the logs collector
+    #[clap(long, env)]
+    pub logs_collector_id: PeerId,
+
     #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,

@@ -3,9 +3,9 @@ use std::{env, sync::Arc, time::Duration};
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
-use sqd_messages::{query_error, query_executed, DatasetRanges, Ping, Query, QueryExecuted};
+use sqd_messages::{query_error, query_executed, Heartbeat, Query, QueryExecuted};
 use sqd_network_transport::{
-    Keypair, P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
+    P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -34,7 +34,6 @@ pub struct P2PController<EventStream> {
     logs_storage: LogsStorage,
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
-    keypair: Keypair,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
 }
@@ -44,17 +43,18 @@ pub async fn create_p2p_controller(
     transport_builder: P2PTransportBuilder,
     allocations_checker: AllocationsChecker,
     scheduler_id: PeerId,
+    logs_collector_id: PeerId,
     data_dir: PathBuf,
     ping_interval: Duration,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
-    let keypair = transport_builder.keypair();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
 
-    let (event_stream, transport_handle) = transport_builder
-        .build_worker(WorkerConfig::new(scheduler_id))
-        .await?;
+    let mut config = WorkerConfig::new();
+    config.service_nodes = vec![scheduler_id, logs_collector_id];
+    let (event_stream, transport_handle) =
+        transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
 
@@ -66,7 +66,6 @@ pub async fn create_p2p_controller(
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
         allocations_checker,
         worker_id,
-        keypair,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
     })
@@ -106,15 +105,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .for_each(|_| async move {
                 tracing::debug!("Sending ping");
                 let status = self.worker.status();
-                let ping = Ping {
-                    stored_ranges: status
-                        .available
-                        .into_iter()
-                        .map(|(dataset, ranges)| DatasetRanges {
-                            url: dataset,
-                            ranges: ranges.ranges,
-                        })
-                        .collect(),
+                let ping = Heartbeat {
+                    assignment_id: "".to_owned(), // TODO
+                    missing_chunks: None,
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     stored_bytes: Some(status.stored_bytes),
                     ..Default::default()
@@ -149,6 +142,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         }
                     }
                 }
+                WorkerEvent::LogsRequest { .. } => todo!(),
             }
         }
 
@@ -211,16 +205,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         let query_result = match result {
             Ok(result) => {
                 let data = result.compressed_data();
-                let mut summary = sqd_messages::QueryResultSummary {
-                    hash: result.sha3_256(),
-                    size: result.data.len() as u64,
-                    signature: None,
-                };
-                summary.sign(&self.keypair, &query_id);
                 query_result::Result::Ok(sqd_messages::QueryOk {
                     data,
                     last_block: result.last_block,
-                    summary: Some(summary),
                 })
             }
             Err(e @ QueryError::NotFound) => query_error::Err::BadRequest(e.to_string()).into(),
@@ -235,6 +222,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             query_id,
             result: Some(query_result),
             retry_after_ms: None,
+            signature: Default::default(),
         };
         self.transport_handle
             .send_query_result(query_result)
@@ -254,10 +242,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         use query_executed::Result;
 
         let result = match query_result {
-            Ok(result) => Result::Ok(sqd_messages::QueryResultSummary {
-                size: result.data.len() as u64,
-                hash: result.sha3_256(),
-                signature: None,
+            Ok(result) => Result::Ok(sqd_messages::QueryOkSummary {
+                uncompressed_data_size: result.data.len() as u64,
+                data_hash: result.sha3_256(),
+                last_block: result.last_block,
             }),
             Err(e @ QueryError::NotFound) => query_error::Err::BadRequest(e.to_string()).into(),
             Err(QueryError::BadRequest(e)) => query_error::Err::BadRequest(e.clone()).into(),
@@ -268,14 +256,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
         };
         let exec_time = match query_result {
-            Ok(result) => result.exec_time.as_millis() as u32,
-            Err(_) => 0,
+            Ok(result) => result.exec_time.as_micros() as u32,
+            Err(_) => 0, // TODO: always measure execution time
         };
 
         QueryExecuted {
             client_id: client_id.to_string(),
             query: Some(query),
-            exec_time_ms: exec_time,
+            exec_time_micros: exec_time,
             timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
             result: Some(result),
         }

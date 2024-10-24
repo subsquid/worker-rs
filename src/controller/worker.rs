@@ -121,7 +121,7 @@ impl Worker {
         let chunk_guard = self
             .state_manager
             .clone()
-            .find_chunk(&dataset, (first_block as u32).into())?;
+            .find_chunk(&dataset, first_block.into())?;
         if chunk_guard.is_none() {
             return Err(QueryError::NotFound);
         };
