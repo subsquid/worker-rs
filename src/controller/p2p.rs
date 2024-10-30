@@ -18,6 +18,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
+    storage::datasets_index::DatasetsIndex,
     util::{assignment::Assignment, timestamp_now_ms, UseOnce},
 };
 
@@ -142,10 +143,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     let private_key = self.private_key.clone();
                     let calculated_chunks = assignment.dataset_chunks_for_peer_id(peer_id.to_string()).unwrap();
                     let headers = assignment.headers_for_peer_id(peer_id.to_string(), private_key).unwrap();
-                    // let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
-                    // let chunks = datasets_index.create_chunks_set();
-                    // self.worker.set_datasets_index(datasets_index);
-                    // self.worker.set_desired_chunks(chunks);
+                    let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
+                    let chunks = datasets_index.create_chunks_set();
+                    self.worker.set_datasets_index(datasets_index);
+                    self.worker.set_desired_chunks(chunks);
                 } else {
                     error!("Unable to get assignment");
                 }
