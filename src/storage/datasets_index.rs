@@ -1,5 +1,4 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
-use base64::{engine::general_purpose::STANDARD as base64, Engine};
 
 use reqwest::Url;
 use sqd_messages::{DatasetChunks, WorkerAssignment};

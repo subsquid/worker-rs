@@ -1,9 +1,10 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{env, io::Write, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
+use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
-use sqd_messages::{query_error, query_executed, Heartbeat, Query, QueryExecuted};
+use sqd_messages::{query_error, query_executed, BitString, Heartbeat, Query, QueryExecuted};
 use sqd_network_transport::{
     P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
@@ -114,9 +115,16 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .for_each(|_| async move {
                 tracing::debug!("Sending heartbeat");
                 let status = self.worker.status();
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+                let _ = encoder.write_all(status.unavailability_map.as_slice());
+                let compressed_bytes = encoder.finish().unwrap();
+                let data_len = compressed_bytes.len();
                 let heartbeat = Heartbeat {
                     assignment_id: "".to_owned(), // TODO
-                    missing_chunks: None,
+                    missing_chunks: Some(BitString {
+                        data: compressed_bytes,
+                        size: data_len as u64,
+                    }),
                     version: WORKER_VERSION.to_string(),
                     stored_bytes: Some(status.stored_bytes),
                     ..Default::default()
