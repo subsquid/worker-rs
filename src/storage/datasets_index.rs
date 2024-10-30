@@ -14,7 +14,7 @@ use super::layout::DataChunk;
 #[derive(Default)]
 pub struct DatasetsIndex {
     datasets: HashMap<Arc<Dataset>, DatasetIndex>,
-    chunks_ordinals_map: HashMap<DataChunk, u64>,
+    pub chunks_ordinals_map: HashMap<DataChunk, u64>,
     http_headers: reqwest::header::HeaderMap,
 }
 
