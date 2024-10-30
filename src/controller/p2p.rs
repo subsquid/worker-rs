@@ -30,6 +30,7 @@ const CONCURRENT_QUERY_MESSAGES: usize = 32;
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
     heartbeat_interval: Duration,
+    assignment_check_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
@@ -47,6 +48,7 @@ pub async fn create_p2p_controller(
     logs_collector_id: PeerId,
     data_dir: PathBuf,
     heartbeat_interval: Duration,
+    assignment_check_interval: Duration,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     info!("Local peer ID: {worker_id}");
@@ -62,6 +64,7 @@ pub async fn create_p2p_controller(
     Ok(P2PController {
         worker,
         heartbeat_interval,
+        assignment_check_interval,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
@@ -79,6 +82,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             self.run_event_loop(cancellation_token.child_token()),
             self.run_queries_loop(cancellation_token.child_token()),
             self.run_heartbeat_loop(cancellation_token.child_token(), self.heartbeat_interval),
+            self.run_assignments_loop(cancellation_token.child_token(), self.assignment_check_interval),
             // self._run_logs_loop(cancellation_token.child_token(), *LOGS_SEND_INTERVAL),
             self.worker.run(cancellation_token.child_token()),
             self.allocations_checker
@@ -120,6 +124,19 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             })
             .await;
         info!("Heartbeat processing task finished");
+    }
+
+    async fn run_assignments_loop(&self, cancellation_token: CancellationToken, assignment_check_interval: Duration) {
+        let mut timer =
+            tokio::time::interval_at(tokio::time::Instant::now() + assignment_check_interval, assignment_check_interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        IntervalStream::new(timer)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each(|_| async move {
+                tracing::debug!("Checking assignment");
+            })
+            .await;
+        info!("Assignment processing task finished");
     }
 
     async fn run_event_loop(&self, cancellation_token: CancellationToken) {

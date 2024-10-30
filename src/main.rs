@@ -176,6 +176,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         logs_collector_id,
                         args.data_dir,
                         args.ping_interval,
+                        args.ping_interval,
                     ) => {
                         controller?.run(cancellation_token.clone()).await;
                     }
