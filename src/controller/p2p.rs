@@ -18,7 +18,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
-    util::{timestamp_now_ms, UseOnce},
+    util::{assignment::Assignment, timestamp_now_ms, UseOnce},
 };
 
 use super::worker::Worker;
@@ -36,6 +36,7 @@ pub struct P2PController<EventStream> {
     logs_storage: LogsStorage,
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
+    private_key: Vec<u8>,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
 }
@@ -51,6 +52,7 @@ pub async fn create_p2p_controller(
     assignment_check_interval: Duration,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
+    let private_key = transport_builder.keypair().try_into_ed25519().unwrap().secret().as_ref().to_vec();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
 
@@ -70,6 +72,7 @@ pub async fn create_p2p_controller(
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
         allocations_checker,
         worker_id,
+        private_key,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
     })
@@ -134,6 +137,18 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Checking assignment");
+                if let Ok(assignment) = Assignment::from_url("https://metadata.sqd-datasets.io/network-state.json".to_string()) {
+                    let peer_id = self.worker.peer_id.unwrap();
+                    let private_key = self.private_key.clone();
+                    let calculated_chunks = assignment.dataset_chunks_for_peer_id(peer_id.to_string()).unwrap();
+                    let headers = assignment.headers_for_peer_id(peer_id.to_string(), private_key).unwrap();
+                    // let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
+                    // let chunks = datasets_index.create_chunks_set();
+                    // self.worker.set_datasets_index(datasets_index);
+                    // self.worker.set_desired_chunks(chunks);
+                } else {
+                    error!("Unable to get assignment");
+                }
             })
             .await;
         info!("Assignment processing task finished");
