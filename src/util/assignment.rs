@@ -91,12 +91,12 @@ impl Assignment {
         self.chunk_map = None
     }
 
-    pub fn from_url(url: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let response_state = reqwest::blocking::get(url)?;
-        let network_state: NetworkState = response_state.json()?;
+    pub async fn from_url(url: String) -> Result<Self, Box<dyn std::error::Error>> {
+        let response_state = reqwest::get(url).await?;
+        let network_state: NetworkState = response_state.json().await?;
         let assignment_url = network_state.assignment.url;
-        let response_assignment = reqwest::blocking::get(assignment_url)?;
-        let compressed_assignment = response_assignment.bytes()?;
+        let response_assignment = reqwest::get(assignment_url).await?;
+        let compressed_assignment = response_assignment.bytes().await?;
         let mut decoder = GzDecoder::new(&compressed_assignment[..]);
         let mut decompressed_assignment = String::new();
         decoder.read_to_string(&mut decompressed_assignment)?;
