@@ -140,7 +140,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
     async fn run_assignments_loop(&self, cancellation_token: CancellationToken, assignment_check_interval: Duration) {
         let mut timer =
-            tokio::time::interval_at(tokio::time::Instant::now() + assignment_check_interval, assignment_check_interval);
+            tokio::time::interval_at(tokio::time::Instant::now(), assignment_check_interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         IntervalStream::new(timer)
             .take_until(cancellation_token.cancelled_owned())
