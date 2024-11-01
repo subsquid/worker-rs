@@ -91,16 +91,19 @@ impl Assignment {
         self.chunk_map = None
     }
 
-    pub async fn from_url(url: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn from_url(url: String, previous_id: Option<String>) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let response_state = reqwest::get(url).await?;
         let network_state: NetworkState = response_state.json().await?;
+        if Some(network_state.assignment.id) == previous_id {
+            return Ok(None);
+        }
         let assignment_url = network_state.assignment.url;
         let response_assignment = reqwest::get(assignment_url).await?;
         let compressed_assignment = response_assignment.bytes().await?;
         let mut decoder = GzDecoder::new(&compressed_assignment[..]);
         let mut decompressed_assignment = String::new();
         decoder.read_to_string(&mut decompressed_assignment)?;
-        Ok(serde_json::from_str(&decompressed_assignment)?)     
+        Ok(Some(serde_json::from_str(&decompressed_assignment)?))
     }
     
     pub fn insert_assignment(&mut self, peer_id: String, status: String, chunks_deltas: Vec<u64>) {

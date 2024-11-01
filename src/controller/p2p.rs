@@ -20,7 +20,7 @@ use crate::{
     query::result::{QueryError, QueryResult},
     run_all,
     storage::datasets_index::DatasetsIndex,
-    util::{assignment::Assignment, timestamp_now_ms, UseOnce},
+    util::{assignment::{self, Assignment}, timestamp_now_ms, UseOnce},
 };
 
 use super::worker::Worker;
@@ -146,15 +146,18 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Checking assignment");
-                if let Ok(assignment) = Assignment::from_url("https://metadata.sqd-datasets.io/network-state.json".to_string()).await {
-                    let peer_id = self.worker.peer_id.unwrap();
-                    let private_key = self.private_key.clone();
-                    let calculated_chunks = assignment.dataset_chunks_for_peer_id(peer_id.to_string()).unwrap();
-                    let headers = assignment.headers_for_peer_id(peer_id.to_string(), private_key).unwrap();
-                    let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
-                    let chunks = datasets_index.create_chunks_set();
-                    self.worker.set_datasets_index(datasets_index);
-                    self.worker.set_desired_chunks(chunks);
+                if let Ok(assignment_option) = Assignment::from_url("https://metadata.sqd-datasets.io/network-state.json".to_string(), None).await {
+                    if let Some(assignment) = assignment_option {
+                        let peer_id = self.worker.peer_id.unwrap();
+                        let private_key = self.private_key.clone();
+                        let calculated_chunks = assignment.dataset_chunks_for_peer_id(peer_id.to_string()).unwrap();
+                        let headers = assignment.headers_for_peer_id(peer_id.to_string(), private_key).unwrap();
+                        let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
+                        let chunks = datasets_index.create_chunks_set();
+                        self.worker.set_datasets_index(datasets_index);
+                        self.worker.set_desired_chunks(chunks);
+                        info!("New assignment applied");
+                    };
                 } else {
                     error!("Unable to get assignment");
                 }
