@@ -110,8 +110,7 @@ impl StateManager {
         let status = self.state.lock().status();
         let stored_bytes = get_directory_size(&self.fs.root);
         let datasets_index = self.datasets_index.lock();
-        let mut unavailability_map: Vec<u8> = Vec::default();
-        unavailability_map.resize(datasets_index.chunks_ordinals_map.len(), 1);
+        let mut unavailability_map: Vec<u8> = vec![1; datasets_index.chunks_ordinals_map.len()];
         for chunk_ref in &status.available {
             if let Some(ordinal) = datasets_index.chunks_ordinals_map.get(&chunk_ref.chunk) {
                 unavailability_map[*ordinal as usize] = 0
