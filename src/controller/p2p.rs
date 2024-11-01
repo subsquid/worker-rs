@@ -4,6 +4,7 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
+use sqd_contract_client::Network;
 use sqd_messages::{query_error, query_executed, BitString, Heartbeat, Query, QueryExecuted};
 use sqd_network_transport::{
     P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
@@ -14,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
+    cli::{self, Args},
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
     logs_storage::LogsStorage,
     metrics,
@@ -39,6 +41,7 @@ pub struct P2PController<EventStream> {
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
     private_key: Vec<u8>,
+    network: Network,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
 }
@@ -49,10 +52,18 @@ pub async fn create_p2p_controller(
     allocations_checker: AllocationsChecker,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
-    data_dir: PathBuf,
-    heartbeat_interval: Duration,
-    assignment_check_interval: Duration,
+    args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
+    let data_dir = args.data_dir.clone();
+    let heartbeat_interval = args.ping_interval;
+    let assignment_check_interval = args.ping_interval;
+    let network: Network;
+    if let cli::Mode::P2P(p2p_args) = &args.mode {
+        network = p2p_args.transport.rpc.network;
+    } else {
+        panic!("P2PContoller needs p2p config");
+    };
+
     let worker_id = transport_builder.local_peer_id();
     let private_key = transport_builder.keypair().try_into_ed25519().unwrap().secret().as_ref().to_vec();
     info!("Local peer ID: {worker_id}");
@@ -75,6 +86,7 @@ pub async fn create_p2p_controller(
         allocations_checker,
         worker_id,
         private_key,
+        network,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
     })
@@ -146,7 +158,12 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Checking assignment");
-                if let Ok(assignment_option) = Assignment::from_url("https://metadata.sqd-datasets.io/network-state.json".to_string(), None).await {
+                let network_state_filename = match self.network {
+                    Network::Tethys => "network-state-tethys.json",
+                    Network::Mainnet => "network-state-mainnet.json",
+                };
+                let network_state_url = format!("https://metadata.sqd-datasets.io/{network_state_filename}");
+                if let Ok(assignment_option) = Assignment::from_url(network_state_url, None).await {
                     if let Some(assignment) = assignment_option {
                         let peer_id = self.worker.peer_id.unwrap();
                         let private_key = self.private_key.clone();
