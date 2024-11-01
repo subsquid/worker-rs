@@ -68,6 +68,8 @@ pub struct Assignment {
     worker_assignments: HashMap<String, WorkerAssignment>,
     #[serde(skip)]
     chunk_map: Option<HashMap<String, u64>>,
+    #[serde(skip)]
+    pub id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,7 +96,7 @@ impl Assignment {
     pub async fn from_url(url: String, previous_id: Option<String>) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let response_state = reqwest::get(url).await?;
         let network_state: NetworkState = response_state.json().await?;
-        if Some(network_state.assignment.id) == previous_id {
+        if Some(network_state.assignment.id.clone()) == previous_id {
             return Ok(None);
         }
         let assignment_url = network_state.assignment.url;
@@ -103,7 +105,9 @@ impl Assignment {
         let mut decoder = GzDecoder::new(&compressed_assignment[..]);
         let mut decompressed_assignment = String::new();
         decoder.read_to_string(&mut decompressed_assignment)?;
-        Ok(Some(serde_json::from_str(&decompressed_assignment)?))
+        let mut result: Assignment = serde_json::from_str(&decompressed_assignment)?;
+        result.id = network_state.assignment.id;
+        Ok(Some(result))
     }
     
     pub fn insert_assignment(&mut self, peer_id: String, status: String, chunks_deltas: Vec<u64>) {

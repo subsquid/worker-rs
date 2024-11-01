@@ -1,4 +1,4 @@
-use std::{env, io::Write, sync::Arc, time::Duration};
+use std::{env, io::Write, sync::{Arc, Mutex}, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
@@ -42,6 +42,7 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     private_key: Vec<u8>,
     network: Network,
+    latest_assignment: Mutex<Option<String>>,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
 }
@@ -87,6 +88,7 @@ pub async fn create_p2p_controller(
         worker_id,
         private_key,
         network,
+        latest_assignment: None.into(),
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
     })
@@ -163,7 +165,8 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     Network::Mainnet => "network-state-mainnet.json",
                 };
                 let network_state_url = format!("https://metadata.sqd-datasets.io/{network_state_filename}");
-                if let Ok(assignment_option) = Assignment::from_url(network_state_url, None).await {
+                let mut latest_assignment = self.latest_assignment.lock().unwrap();
+                if let Ok(assignment_option) = Assignment::from_url(network_state_url, latest_assignment.clone()).await {
                     if let Some(assignment) = assignment_option {
                         let peer_id = self.worker.peer_id.unwrap();
                         let private_key = self.private_key.clone();
@@ -173,6 +176,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         let chunks = datasets_index.create_chunks_set();
                         self.worker.set_datasets_index(datasets_index);
                         self.worker.set_desired_chunks(chunks);
+                        *latest_assignment = Some(assignment.id);
                         info!("New assignment applied");
                     };
                 } else {
