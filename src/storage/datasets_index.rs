@@ -20,12 +20,12 @@ pub struct DatasetsIndex {
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteFile {
     pub url: Url,
-    pub name: Arc<str>,
+    pub name: String,
 }
 
 struct DatasetIndex {
     url: Url,
-    files: HashMap<DataChunk, Vec<Arc<str>>>,
+    files: HashMap<DataChunk, Vec<String>>,
 }
 
 impl DatasetsIndex {
@@ -51,12 +51,12 @@ impl DatasetsIndex {
         for dataset in assigned_data {
             let dataset_id = dataset.id;
             let dataset_url = dataset.base_url;
-            let mut dataset_files: HashMap<DataChunk, Vec<Arc<str>>> = Default::default();
+            let mut dataset_files: HashMap<DataChunk, Vec<String>> = Default::default();
             for chunk in dataset.chunks {
                 let data_chunk = DataChunk::from_path(&chunk.id).unwrap();
-                let mut files: Vec<Arc<str>> = Default::default();
+                let mut files: Vec<String> = Default::default();
                 for (file, _) in chunk.files {
-                    files.push(Arc::from(file.as_str()));
+                    files.push(file);
                 }
                 dataset_files.insert(data_chunk, files);
                 chunks_ordinals_map.insert(DataChunk::from_path(&chunk.id).unwrap(), ordinal);
