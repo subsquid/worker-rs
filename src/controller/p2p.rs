@@ -56,7 +56,7 @@ pub async fn create_p2p_controller(
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let data_dir = args.data_dir.clone();
     let heartbeat_interval = args.ping_interval;
-    let assignment_check_interval = args.ping_interval;
+    let assignment_check_interval = args.assignment_check_interval;
     let network: Network;
     if let cli::Mode::P2P(p2p_args) = &args.mode {
         network = p2p_args.transport.rpc.network;
