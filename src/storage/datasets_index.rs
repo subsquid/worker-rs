@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::{BTreeMap, HashMap}, str::FromStr, sync::Arc};
 
 use reqwest::Url;
 use sqd_messages::{DatasetChunks, WorkerAssignment};
@@ -44,7 +44,7 @@ impl DatasetsIndex {
                 .collect()
         })
     }
-    pub fn from(assigned_data: Vec<crate::util::assignment::Dataset>, headers: HashMap<String, String>) -> Self {
+    pub fn from(assigned_data: Vec<crate::util::assignment::Dataset>, headers: BTreeMap<String, String>) -> Self {
         let mut datasets = HashMap::new();
         let mut chunks_ordinals_map = HashMap::new();
         let mut ordinal = 0;

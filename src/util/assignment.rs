@@ -1,5 +1,5 @@
 use core::str;
-use std::{collections::HashMap, io::Read};
+use std::{collections::{BTreeMap, HashMap}, io::Read};
 
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng},
@@ -158,7 +158,7 @@ impl Assignment {
         Some(result)
     }
 
-    pub fn headers_for_peer_id(&self, peer_id: String, secret_key: Vec<u8>) -> Option<HashMap<String, String>> {
+    pub fn headers_for_peer_id(&self, peer_id: String, secret_key: Vec<u8>) -> Option<BTreeMap<String, String>> {
         let local_assignment = self.worker_assignments.get(&peer_id)?;
         let EncryptedHeaders {identity, nonce, ciphertext,} = &local_assignment.encrypted_headers;
         let Ok(temporary_public_key) = PublicKey::from_slice(identity.as_slice()) else {
@@ -179,7 +179,7 @@ impl Assignment {
         let Ok(headers) = serde_json::from_str::<Value>(plaintext_headers) else {
             return None;
         };
-        let mut result: HashMap<String, String> = Default::default();
+        let mut result: BTreeMap<String, String> = Default::default();
         for (k,v) in headers.as_object().unwrap() {
             result.insert(k.to_string(), v.as_str().unwrap().to_string());
         }
