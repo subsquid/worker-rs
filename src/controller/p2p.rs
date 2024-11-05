@@ -167,7 +167,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 };
                 let network_state_url = format!("https://metadata.sqd-datasets.io/{network_state_filename}");
                 let mut latest_assignment = self.latest_assignment.lock();
-                if let Ok(assignment_option) = Assignment::from_url(network_state_url, latest_assignment.clone()).await {
+                if let Ok(assignment_option) = Assignment::try_download(network_state_url, latest_assignment.clone()).await {
                     if let Some(assignment) = assignment_option {
                         let peer_id = self.worker.peer_id.unwrap();
                         let private_key = self.private_key.clone();

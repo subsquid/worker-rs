@@ -95,7 +95,7 @@ impl Assignment {
         self.chunk_map = None
     }
 
-    pub async fn from_url(url: String, previous_id: Option<String>) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+    pub async fn try_download(url: String, previous_id: Option<String>) -> Result<Option<Self>, anyhow::Error> {
         let response_state = reqwest::get(url).await?;
         let network_state: NetworkState = response_state.json().await?;
         if Some(network_state.assignment.id.clone()) == previous_id {
