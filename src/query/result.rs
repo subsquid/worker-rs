@@ -82,3 +82,29 @@ impl IntoResponse for QueryError {
         }
     }
 }
+
+impl From<&QueryError> for sqd_messages::query_error::Err {
+    fn from(e: &QueryError) -> Self {
+        use sqd_messages::query_error::Err;
+        match e {
+            QueryError::NotFound => Err::NotFound(e.to_string()),
+            QueryError::BadRequest(e) => Err::BadRequest(e.clone()),
+            QueryError::ServiceOverloaded => Err::ServerOverloaded(()),
+            QueryError::NoAllocation => Err::TooManyRequests(()),
+            QueryError::Other(e) => Err::ServerError(e.to_string()),
+        }
+    }
+}
+
+impl From<QueryError> for sqd_messages::query_error::Err {
+    fn from(e: QueryError) -> Self {
+        use sqd_messages::query_error::Err;
+        match e {
+            QueryError::NotFound => Err::NotFound(e.to_string()),
+            QueryError::BadRequest(e) => Err::BadRequest(e),
+            QueryError::ServiceOverloaded => Err::ServerOverloaded(()),
+            QueryError::NoAllocation => Err::TooManyRequests(()),
+            QueryError::Other(e) => Err::ServerError(e.to_string()),
+        }
+    }
+}

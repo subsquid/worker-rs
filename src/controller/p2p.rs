@@ -30,6 +30,7 @@ use super::worker::Worker;
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
+const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
@@ -273,18 +274,16 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             return;
         }
 
-        let result = self.process_query(peer_id, &query).await;
+        let (result, retry_after) = self.process_query(peer_id, &query).await;
         if let Err(e) = &result {
             warn!("Query {query_id} execution failed: {e:?}");
         }
-        metrics::query_executed(&result);
 
-        let log = if let Err(QueryError::NoAllocation) = result {
-            None
-        } else {
-            Some(self.generate_log(&result, query, peer_id))
-        };
-        self.send_query_result(query_id, result);
+        metrics::query_executed(&result);
+        let log = self.generate_log(&result, query, peer_id);
+
+        self.send_query_result(query_id, result, retry_after);
+
         if let Some(log) = log {
             let result = self.logs_storage.save_log(log).await;
             if let Err(e) = result {
@@ -293,14 +292,21 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         }
     }
 
-    async fn process_query(&self, peer_id: PeerId, query: &Query) -> QueryResult {
+    /// Returns query result and the time to wait before sending the next query
+    async fn process_query(
+        &self,
+        peer_id: PeerId,
+        query: &Query,
+    ) -> (QueryResult, Option<Duration>) {
+        let mut retry_after = match self.allocations_checker.try_spend(peer_id) {
+            (gateway_allocations::Status::Spent, retry_after) => retry_after,
+            (gateway_allocations::Status::Paused, retry_after) => {
+                return (Err(QueryError::NoAllocation), retry_after)
+            }
+        };
         let block_range = query
             .block_range
             .map(|sqd_messages::Range { begin, end }| (begin, end));
-        match self.allocations_checker.try_spend(peer_id) {
-            gateway_allocations::Status::Spent => {}
-            gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),
-        };
         let result = self
             .worker
             .run_query(
@@ -312,36 +318,35 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .await;
         if let Err(QueryError::ServiceOverloaded) = result {
             self.allocations_checker.refund(peer_id);
+            retry_after = Some(DEFAULT_BACKOFF);
         }
-        result
+        (result, retry_after)
     }
 
-    fn send_query_result(&self, query_id: String, result: QueryResult) {
-        use sqd_messages::query_result;
+    fn send_query_result(
+        &self,
+        query_id: String,
+        result: QueryResult,
+        retry_after: Option<Duration>,
+    ) {
         let query_result = match result {
             Ok(result) => {
                 let data = result.compressed_data();
-                query_result::Result::Ok(sqd_messages::QueryOk {
+                sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
                     data,
                     last_block: result.last_block,
                 })
             }
-            Err(e @ QueryError::NotFound) => query_error::Err::BadRequest(e.to_string()).into(),
-            Err(QueryError::NoAllocation) => query_error::Err::TooManyRequests(()).into(),
-            Err(QueryError::BadRequest(e)) => query_error::Err::BadRequest(e).into(),
-            Err(e @ QueryError::ServiceOverloaded) => {
-                query_error::Err::ServerError(e.to_string()).into()
-            }
-            Err(QueryError::Other(e)) => query_error::Err::ServerError(e.to_string()).into(),
+            Err(e) => query_error::Err::from(e).into(),
         };
-        let query_result = sqd_messages::QueryResult {
+        let msg = sqd_messages::QueryResult {
             query_id,
             result: Some(query_result),
-            retry_after_ms: None,
+            retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
             signature: Default::default(),
         };
         self.transport_handle
-            .send_query_result(query_result)
+            .send_query_result(msg)
             .unwrap_or_else(|_| error!("Cannot send query result: queue full"));
     }
 
@@ -354,7 +359,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         query_result: &QueryResult,
         query: Query,
         client_id: PeerId,
-    ) -> QueryExecuted {
+    ) -> Option<QueryExecuted> {
         use query_executed::Result;
 
         let result = match query_result {
@@ -363,27 +368,22 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 data_hash: result.sha3_256(),
                 last_block: result.last_block,
             }),
-            Err(e @ QueryError::NotFound) => query_error::Err::BadRequest(e.to_string()).into(),
-            Err(QueryError::BadRequest(e)) => query_error::Err::BadRequest(e.clone()).into(),
-            Err(e @ QueryError::ServiceOverloaded) => {
-                query_error::Err::ServerError(e.to_string()).into()
-            }
-            Err(QueryError::Other(e)) => query_error::Err::ServerError(e.to_string()).into(),
-            Err(QueryError::NoAllocation) => panic!("Shouldn't send logs with NoAllocation error"),
+            Err(QueryError::NoAllocation) => return None,
+            Err(e) => query_error::Err::from(e).into(),
         };
         let exec_time = match query_result {
             Ok(result) => result.exec_time.as_micros() as u32,
             Err(_) => 0, // TODO: always measure execution time
         };
 
-        QueryExecuted {
+        Some(QueryExecuted {
             client_id: client_id.to_string(),
             query: Some(query),
             exec_time_micros: exec_time,
             timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
             result: Some(result),
             worker_version: WORKER_VERSION.to_string(),
-        }
+        })
     }
 }
 

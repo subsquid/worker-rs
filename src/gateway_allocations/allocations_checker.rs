@@ -6,14 +6,12 @@ use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::{compute_units_storage::ComputeUnitsStorage, Status};
-
-const SINGLE_EXECUTION_COST: i64 = 1;
+use super::{rate_limiter::RateLimiter, Status};
 
 pub struct AllocationsChecker {
     client: Box<dyn sqd_contract_client::Client>,
     own_id: sqd_contract_client::U256,
-    storage: Mutex<ComputeUnitsStorage>,
+    storage: Mutex<RateLimiter>,
     polling_interval: Duration,
 }
 
@@ -32,16 +30,16 @@ impl AllocationsChecker {
         })
     }
 
-    pub fn try_spend(&self, gateway_id: PeerId) -> Status {
+    pub fn try_spend(&self, gateway_id: PeerId) -> (Status, Option<Duration>) {
         self.storage
             .lock()
-            .try_spend_cus(gateway_id, SINGLE_EXECUTION_COST)
+            .try_run_request(gateway_id)
     }
 
     pub fn refund(&self, gateway_id: PeerId) {
         self.storage
             .lock()
-            .try_spend_cus(gateway_id, -SINGLE_EXECUTION_COST);
+            .refund(gateway_id);
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
@@ -65,15 +63,18 @@ impl AllocationsChecker {
             };
             if epoch > current_epoch {
                 info!("New epoch started. Updating allocations");
-                let clusters = match self.client.gateway_clusters(self.own_id).await {
-                    Ok(clusters) => clusters,
+                match tokio::try_join!(
+                    self.client.epoch_length(),
+                    self.client.gateway_clusters(self.own_id)
+                ) {
+                    Ok((epoch_length, clusters)) => {
+                        self.storage.lock().update_allocations(clusters, epoch_length);
+                        current_epoch = epoch;
+                    }
                     Err(e) => {
                         warn!("Couldn't fetch gateway allocations: {e:?}");
-                        continue;
                     }
-                };
-                self.storage.lock().update_allocations(clusters);
-                current_epoch = epoch;
+                }
             }
         }
     }
