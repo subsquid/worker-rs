@@ -5,6 +5,7 @@ use url::form_urlencoded;
 
 // Generate signature with timestamp as required by Cloudflare's is_timed_hmac_valid_v0 function
 // https://developers.cloudflare.com/ruleset-engine/rules-language/functions/#hmac-validation
+// TODO: Move to common crate along with assignments
 pub fn timed_hmac(message: &str, secret: &str, timestamp: usize) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(format!("{}{}", message, timestamp).as_bytes());

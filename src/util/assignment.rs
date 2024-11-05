@@ -17,6 +17,8 @@ use flate2::read::GzDecoder;
 
 use crate::util::signature::timed_hmac_now;
 
+// TODO: Move to common crate to be shared with Scheduler and Portal
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Chunk {
