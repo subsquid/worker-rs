@@ -1,4 +1,4 @@
-use std::{env, io::Write, sync::{Arc, Mutex}, time::Duration};
+use std::{env, io::Write, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
@@ -13,6 +13,7 @@ use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+use parking_lot::Mutex;
 
 use crate::{
     cli::{self, Args},
@@ -165,7 +166,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     Network::Mainnet => "network-state-mainnet.json",
                 };
                 let network_state_url = format!("https://metadata.sqd-datasets.io/{network_state_filename}");
-                let mut latest_assignment = self.latest_assignment.lock().unwrap();
+                let mut latest_assignment = self.latest_assignment.lock();
                 if let Ok(assignment_option) = Assignment::from_url(network_state_url, latest_assignment.clone()).await {
                     if let Some(assignment) = assignment_option {
                         let peer_id = self.worker.peer_id.unwrap();
