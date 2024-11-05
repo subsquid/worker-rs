@@ -104,10 +104,8 @@ impl Assignment {
         let assignment_url = network_state.assignment.url;
         let response_assignment = reqwest::get(assignment_url).await?;
         let compressed_assignment = response_assignment.bytes().await?;
-        let mut decoder = GzDecoder::new(&compressed_assignment[..]);
-        let mut decompressed_assignment = String::new();
-        decoder.read_to_string(&mut decompressed_assignment)?;
-        let mut result: Assignment = serde_json::from_str(&decompressed_assignment)?;
+        let decoder = GzDecoder::new(&compressed_assignment[..]);
+        let mut result: Assignment = serde_json::from_reader(decoder)?;
         result.id = network_state.assignment.id;
         Ok(Some(result))
     }
