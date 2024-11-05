@@ -130,9 +130,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 tracing::debug!("Sending heartbeat");
                 let status = self.worker.status();
                 let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
-                let _ = encoder.write_all(status.unavailability_map.as_slice());
+                let _ = encoder.write_all(status.unavailability_map.iter().map(|v| *v as u8).collect::<Vec<u8>>().as_slice());
                 let compressed_bytes = encoder.finish().unwrap();
-                let data_len = compressed_bytes.len();
+                let data_len = status.unavailability_map.len();
                 let heartbeat = Heartbeat {
                     assignment_id: "".to_owned(), // TODO
                     missing_chunks: Some(BitString {

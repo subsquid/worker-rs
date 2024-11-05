@@ -35,7 +35,7 @@ pub struct StateManager {
 pub struct Status {
     pub available: Ranges,
     pub downloading: Ranges,
-    pub unavailability_map: Vec<u8>,
+    pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
 }
 
@@ -110,10 +110,10 @@ impl StateManager {
         let status = self.state.lock().status();
         let stored_bytes = get_directory_size(&self.fs.root);
         let datasets_index = self.datasets_index.lock();
-        let mut unavailability_map: Vec<u8> = vec![1; datasets_index.chunks_ordinals_map.len()];
+        let mut unavailability_map: Vec<bool> = vec![true; datasets_index.chunks_ordinals_map.len()];
         for chunk_ref in &status.available {
             if let Some(ordinal) = datasets_index.chunks_ordinals_map.get(&chunk_ref.chunk) {
-                unavailability_map[*ordinal as usize] = 0
+                unavailability_map[*ordinal as usize] = false
             }
         }
         Status {
