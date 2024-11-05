@@ -167,22 +167,25 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 };
                 let network_state_url = format!("https://metadata.sqd-datasets.io/{network_state_filename}");
                 let mut latest_assignment = self.latest_assignment.lock();
-                if let Ok(assignment_option) = Assignment::try_download(network_state_url, latest_assignment.clone()).await {
-                    if let Some(assignment) = assignment_option {
-                        let peer_id = self.worker.peer_id.unwrap();
-                        let private_key = self.private_key.clone();
-                        let calculated_chunks = assignment.dataset_chunks_for_peer_id(peer_id.to_string()).unwrap();
-                        let headers = assignment.headers_for_peer_id(peer_id.to_string(), private_key).unwrap();
-                        let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
-                        let chunks = datasets_index.create_chunks_set();
-                        self.worker.set_datasets_index(datasets_index);
-                        self.worker.set_desired_chunks(chunks);
-                        *latest_assignment = Some(assignment.id);
-                        info!("New assignment applied");
-                    };
-                } else {
-                    error!("Unable to get assignment");
-                }
+                let assignment_option = match Assignment::try_download(network_state_url, latest_assignment.clone()).await {
+                    Ok(assignment) => assignment,
+                    Err(err) => {
+                        error!("Unable to get assignment: {err}");
+                        return;
+                    },
+                };
+                if let Some(assignment) = assignment_option {
+                    let peer_id = self.worker.peer_id.unwrap();
+                    let private_key = self.private_key.clone();
+                    let calculated_chunks = assignment.dataset_chunks_for_peer_id(peer_id.to_string()).unwrap();
+                    let headers = assignment.headers_for_peer_id(peer_id.to_string(), private_key).unwrap();
+                    let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
+                    let chunks = datasets_index.create_chunks_set();
+                    self.worker.set_datasets_index(datasets_index);
+                    self.worker.set_desired_chunks(chunks);
+                    *latest_assignment = Some(assignment.id);
+                    info!("New assignment applied");
+                };
             })
             .await;
         info!("Assignment processing task finished");
