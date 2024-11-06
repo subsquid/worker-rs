@@ -166,7 +166,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     Network::Mainnet => "network-state-mainnet.json",
                 };
                 let network_state_url = format!("https://metadata.sqd-datasets.io/{network_state_filename}");
-                let mut latest_assignment = self.latest_assignment.lock();
+                let Some(mut latest_assignment) = self.latest_assignment.try_lock() else {
+                    error!("Previous assignment is still processing, skipping this attempt");
+                    return;
+                };
                 let assignment_option = match Assignment::try_download(network_state_url, latest_assignment.clone()).await {
                     Ok(assignment) => assignment,
                     Err(err) => {
