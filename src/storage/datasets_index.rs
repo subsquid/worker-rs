@@ -62,11 +62,12 @@ impl DatasetsIndex {
             for chunk in dataset.chunks {
                 let data_chunk = DataChunk::from_path(&chunk.id).unwrap();
                 let mut files: Vec<String> = Default::default();
+                // TODO: Introduce structure to hold overriding urls and use them for download
                 for (file, _) in chunk.files {
                     files.push(file);
                 }
-                dataset_files.insert(data_chunk, files);
-                chunks_ordinals_map.insert(DataChunk::from_path(&chunk.id).unwrap(), ordinal);
+                dataset_files.insert(data_chunk.clone(), files);
+                chunks_ordinals_map.insert(data_chunk, ordinal);
                 ordinal += 1;
             }
             datasets.insert(
@@ -98,10 +99,10 @@ impl DatasetsIndex {
     pub fn create_chunks_set(&self) -> ChunkSet {
         let mut chunk_set = ChunkSet::new();
         for (dataset_id, dataset_index) in &self.datasets {
-            for data_chunk in dataset_index.files.keys() {
+            for files_by_chunk in dataset_index.files.keys() {
                 chunk_set.insert(ChunkRef {
                     dataset: dataset_id.clone(),
-                    chunk: data_chunk.clone(),
+                    chunk: files_by_chunk.clone(),
                 });
             }
         }
