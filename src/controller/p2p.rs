@@ -23,6 +23,7 @@ use crate::{
 
 use super::worker::Worker;
 
+const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
 
@@ -108,7 +109,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 let heartbeat = Heartbeat {
                     assignment_id: "".to_owned(), // TODO
                     missing_chunks: None,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    version: WORKER_VERSION.to_string(),
                     stored_bytes: Some(status.stored_bytes),
                     ..Default::default()
                 };
@@ -266,6 +267,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             exec_time_micros: exec_time,
             timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
             result: Some(result),
+            worker_version: WORKER_VERSION.to_string(),
         }
     }
 }
