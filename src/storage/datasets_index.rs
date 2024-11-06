@@ -1,4 +1,8 @@
-use std::{collections::{BTreeMap, HashMap}, str::FromStr, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+    sync::Arc,
+};
 
 use reqwest::Url;
 use sqd_messages::{DatasetChunks, WorkerAssignment};
@@ -44,7 +48,10 @@ impl DatasetsIndex {
                 .collect()
         })
     }
-    pub fn from(assigned_data: Vec<crate::util::assignment::Dataset>, headers: BTreeMap<String, String>) -> Self {
+    pub fn from(
+        assigned_data: Vec<crate::util::assignment::Dataset>,
+        headers: BTreeMap<String, String>,
+    ) -> Self {
         let mut datasets = HashMap::new();
         let mut chunks_ordinals_map = HashMap::new();
         let mut ordinal = 0;
@@ -70,19 +77,21 @@ impl DatasetsIndex {
                 },
             );
         }
-        DatasetsIndex { 
+        DatasetsIndex {
             datasets,
             chunks_ordinals_map,
-            http_headers: headers.into_iter().map(|(k, v)| {
-                (
-                    reqwest::header::HeaderName::from_str(&k).unwrap_or_else(|e| {
-                        panic!("Couldn't parse header name: {}: {e:?}", k)
-                    }),
-                    reqwest::header::HeaderValue::from_str(&v).unwrap_or_else(|e| {
-                        panic!("Couldn't parse header value: {}: {e:?}", v)
-                    }),
-                )
-            }).collect() 
+            http_headers: headers
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        reqwest::header::HeaderName::from_str(&k)
+                            .unwrap_or_else(|e| panic!("Couldn't parse header name: {}: {e:?}", k)),
+                        reqwest::header::HeaderValue::from_str(&v).unwrap_or_else(|e| {
+                            panic!("Couldn't parse header value: {}: {e:?}", v)
+                        }),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -94,8 +103,8 @@ impl DatasetsIndex {
                     dataset: dataset_id.clone(),
                     chunk: data_chunk.clone(),
                 });
-            };
-        };
+            }
+        }
         chunk_set
     }
 
