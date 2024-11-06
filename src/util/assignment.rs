@@ -1,6 +1,7 @@
 use core::str;
 use std::{collections::{BTreeMap, HashMap}, io::Read};
 
+use anyhow::anyhow;
 use crypto_box::{
     aead::{Aead, AeadCore, OsRng},
     SalsaBox, PublicKey, SecretKey
@@ -162,32 +163,29 @@ impl Assignment {
         Some(result)
     }
 
-    pub fn headers_for_peer_id(&self, peer_id: String, secret_key: Vec<u8>) -> Option<BTreeMap<String, String>> {
-        let local_assignment = self.worker_assignments.get(&peer_id)?;
+    pub fn headers_for_peer_id(&self, peer_id: String, secret_key: Vec<u8>) -> Result<BTreeMap<String, String>, anyhow::Error> {
+        let Some(local_assignment) = self.worker_assignments.get(&peer_id) else {
+            return Err(anyhow!("Can not find assignment for {peer_id}"));
+        };
         let EncryptedHeaders {identity, nonce, ciphertext,} = &local_assignment.encrypted_headers;
-        let Ok(temporary_public_key) = PublicKey::from_slice(identity.as_slice()) else {
-            return None
-        };
+        let temporary_public_key = PublicKey::from_slice(identity.as_slice())?;
         let big_slice = Sha512::default().chain_update(secret_key).finalize();
-        let Ok(worker_secret_key) = SecretKey::from_slice(&big_slice[00..32]) else {
-            return None
-        };
+        let worker_secret_key = SecretKey::from_slice(&big_slice[00..32])?;
         let shared_box = SalsaBox::new(&temporary_public_key, &worker_secret_key);
         let generic_nonce = GenericArray::clone_from_slice(nonce);
         let Ok(decrypted_plaintext) = shared_box.decrypt(&generic_nonce, &ciphertext[..]) else {
-            return None
+            return Err(anyhow!("Can not decrypt payload"));
         };
-        let Ok(plaintext_headers) = std::str::from_utf8(&decrypted_plaintext) else {
-            return None;
-        };
-        let Ok(headers) = serde_json::from_str::<Value>(plaintext_headers) else {
-            return None;
-        };
+        let plaintext_headers = std::str::from_utf8(&decrypted_plaintext)?;
+        let headers = serde_json::from_str::<Value>(plaintext_headers)?;
         let mut result: BTreeMap<String, String> = Default::default();
-        for (k,v) in headers.as_object().unwrap() {
+        let Some(headers_dict) = headers.as_object() else {
+            return Err(anyhow!("Can not parse encrypted map"));
+        };
+        for (k,v) in headers_dict {
             result.insert(k.to_string(), v.as_str().unwrap().to_string());
         }
-        Some(result)
+        Ok(result)
     }
 
     pub fn chunk_index(&mut self, chunk_id: String) -> Option<u64> {

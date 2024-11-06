@@ -185,9 +185,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         }
                     };
                     let headers = match assignment.headers_for_peer_id(peer_id.to_string(), private_key) {
-                        Some(headers) => headers,
-                        None => {
-                            error!("Can not get assigned headers");
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            error!("Can not get assigned headers: {errot}");
                             return;
                         }
                     };
