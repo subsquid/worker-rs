@@ -163,7 +163,7 @@ impl Assignment {
         Some(result)
     }
 
-    pub fn headers_for_peer_id(&self, peer_id: String, secret_key: Vec<u8>) -> Result<BTreeMap<String, String>, anyhow::Error> {
+    pub fn headers_for_peer_id(&self, peer_id: String, secret_key: &Vec<u8>) -> Result<BTreeMap<String, String>, anyhow::Error> {
         let Some(local_assignment) = self.worker_assignments.get(&peer_id) else {
             return Err(anyhow!("Can not find assignment for {peer_id}"));
         };
@@ -254,7 +254,7 @@ mod tests {
 
         assignment.insert_assignment(peer_id.clone(), "Ok".to_owned(), Default::default());
         assignment.regenerate_headers("SUPERSECRET".to_owned());
-        let headers = assignment.headers_for_peer_id(peer_id.clone(), private_key.as_ref().to_vec()).unwrap();
+        let headers = assignment.headers_for_peer_id(peer_id.clone(), &private_key.as_ref().to_vec()).unwrap();
         let decrypted_id = headers.get("worker-id").unwrap();
         assert_eq!(peer_id, decrypted_id.to_owned());
     }

@@ -176,7 +176,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 };
                 if let Some(assignment) = assignment_option {
                     let peer_id = self.worker_id;
-                    let private_key = self.private_key.clone();
                     let calculated_chunks = match assignment.dataset_chunks_for_peer_id(peer_id.to_string()) {
                         Some(chunks) => chunks,
                         None => {
@@ -184,10 +183,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                             return;
                         }
                     };
-                    let headers = match assignment.headers_for_peer_id(peer_id.to_string(), private_key) {
+                    let headers = match assignment.headers_for_peer_id(peer_id.to_string(), &self.private_key) {
                         Ok(headers) => headers,
                         Err(error) => {
-                            error!("Can not get assigned headers: {errot}");
+                            error!("Can not get assigned headers: {error}");
                             return;
                         }
                     };
