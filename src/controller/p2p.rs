@@ -146,7 +146,19 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Sending heartbeat");
-                let status = self.worker.status();
+                let status;
+                let local_assignment;
+                {
+                    local_assignment = match self.latest_assignment.lock().clone() {
+                        Some(assignment) => assignment,
+                        None => {
+                            tracing::info!("Skipping heartbeat as assignment is not ready");
+                            return;
+                        }
+                    };
+                    status = self.worker.status();
+                }
+                
                 let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
                 let _ = encoder.write_all(
                     status
@@ -159,7 +171,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 let compressed_bytes = encoder.finish().unwrap();
                 let data_len = status.unavailability_map.len();
                 let heartbeat = Heartbeat {
-                    assignment_id: "".to_owned(), // TODO
+                    assignment_id: local_assignment,
                     missing_chunks: Some(BitString {
                         data: compressed_bytes,
                         size: data_len as u64,
@@ -195,12 +207,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 };
                 let network_state_url =
                     format!("https://metadata.sqd-datasets.io/{network_state_filename}");
-                let Some(mut latest_assignment) = self.latest_assignment.try_lock() else {
-                    error!("Previous assignment is still processing, skipping this attempt");
-                    return;
-                };
+
+                let latest_assignment = self.latest_assignment.lock().clone();
                 let assignment_option =
-                    match Assignment::try_download(network_state_url, latest_assignment.clone())
+                    match Assignment::try_download(network_state_url, latest_assignment)
                         .await
                     {
                         Ok(assignment) => assignment,
@@ -230,9 +240,12 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     };
                     let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
                     let chunks = datasets_index.create_chunks_set();
-                    self.worker.set_datasets_index(datasets_index);
-                    self.worker.set_desired_chunks(chunks);
-                    *latest_assignment = Some(assignment.id);
+                    {
+                        let mut latest_assignment = self.latest_assignment.lock();
+                        self.worker.set_datasets_index(datasets_index);
+                        self.worker.set_desired_chunks(chunks);
+                        *latest_assignment = Some(assignment.id);
+                    }
                     info!("New assignment applied");
                 };
             })
