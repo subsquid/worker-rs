@@ -17,7 +17,6 @@ use super::layout::DataChunk;
 #[derive(Default)]
 pub struct DatasetsIndex {
     datasets: HashMap<Arc<Dataset>, DatasetIndex>,
-    pub chunks_ordinals_map: HashMap<DataChunk, u64>,
     http_headers: reqwest::header::HeaderMap,
 }
 
@@ -30,6 +29,7 @@ pub struct RemoteFile {
 struct DatasetIndex {
     url: Url,
     files: HashMap<DataChunk, Vec<String>>,
+    chunks_ordinals_map: HashMap<DataChunk, u64>,
 }
 
 impl DatasetsIndex {
@@ -53,12 +53,12 @@ impl DatasetsIndex {
         headers: BTreeMap<String, String>,
     ) -> Self {
         let mut datasets = HashMap::new();
-        let mut chunks_ordinals_map = HashMap::new();
         let mut ordinal = 0;
         for dataset in assigned_data {
             let dataset_id = dataset.id;
             let dataset_url = dataset.base_url;
             let mut dataset_files: HashMap<DataChunk, Vec<String>> = Default::default();
+            let mut chunks_ordinals_map = HashMap::new();
             for chunk in dataset.chunks {
                 let data_chunk = DataChunk::from_path(&chunk.id).unwrap();
                 let mut files: Vec<String> = Default::default();
@@ -75,12 +75,12 @@ impl DatasetsIndex {
                 DatasetIndex {
                     url: Url::parse(&dataset_url).unwrap(),
                     files: dataset_files,
+                    chunks_ordinals_map
                 },
             );
         }
         DatasetsIndex {
             datasets,
-            chunks_ordinals_map,
             http_headers: headers
                 .into_iter()
                 .map(|(k, v)| {
@@ -111,5 +111,13 @@ impl DatasetsIndex {
 
     pub fn get_headers(&self) -> &reqwest::header::HeaderMap {
         &self.http_headers
+    }
+
+    pub fn get_ordinals_len(&self) -> usize {
+        self.datasets.values().map(|v| v.chunks_ordinals_map.len()).sum()
+    }
+
+    pub fn get_ordinal(&self, dataset: &Dataset, chunk: &DataChunk) -> Option<u64> {
+        self.datasets.get(dataset).and_then(|v| v.chunks_ordinals_map.get(chunk).copied())
     }
 }
