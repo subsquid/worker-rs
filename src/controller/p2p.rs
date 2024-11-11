@@ -269,11 +269,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     async fn handle_query(&self, peer_id: PeerId, query: Query) {
         let query_id = query.query_id.clone();
 
-        if !self.logs_storage.is_initialized() {
-            warn!("Logs storage not initialized. Cannot execute queries yet.");
-            return;
-        }
-
         let (result, retry_after) = self.process_query(peer_id, &query).await;
         if let Err(e) = &result {
             warn!("Query {query_id} execution failed: {e:?}");
