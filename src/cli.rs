@@ -37,9 +37,6 @@ pub struct Args {
     #[clap(env = "PING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "55")]
     pub ping_interval: Duration,
 
-    #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
-    pub assignment_check_interval: Duration,
-
     #[clap(env, hide(true))]
     pub sentry_dsn: Option<String>,
 
@@ -75,6 +72,9 @@ pub struct P2PArgs {
     #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,
+
+    #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
+    pub assignment_check_interval: Duration,
 
     #[command(flatten)]
     pub transport: TransportArgs,

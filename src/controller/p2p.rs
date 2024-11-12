@@ -46,7 +46,6 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     private_key: Vec<u8>,
     network: Network,
-    latest_assignment: Mutex<Option<String>>,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
 }
@@ -61,10 +60,11 @@ pub async fn create_p2p_controller(
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let data_dir = args.data_dir.clone();
     let heartbeat_interval = args.ping_interval;
-    let assignment_check_interval = args.assignment_check_interval;
+    let assignment_check_interval;
     let network: Network;
     if let cli::Mode::P2P(p2p_args) = &args.mode {
         network = p2p_args.transport.rpc.network;
+        assignment_check_interval = p2p_args.assignment_check_interval;
     } else {
         panic!("P2PContoller needs p2p config");
     };
@@ -97,7 +97,6 @@ pub async fn create_p2p_controller(
         worker_id,
         private_key,
         network,
-        latest_assignment: None.into(),
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
     })
