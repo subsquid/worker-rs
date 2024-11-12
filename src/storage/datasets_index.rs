@@ -18,6 +18,7 @@ use super::layout::DataChunk;
 pub struct DatasetsIndex {
     datasets: HashMap<Arc<Dataset>, DatasetIndex>,
     http_headers: reqwest::header::HeaderMap,
+    assignment_id: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +52,7 @@ impl DatasetsIndex {
     pub fn from(
         assigned_data: Vec<crate::util::assignment::Dataset>,
         headers: BTreeMap<String, String>,
+        assignment_id: String
     ) -> Self {
         let mut datasets = HashMap::new();
         let mut ordinal = 0;
@@ -93,6 +95,7 @@ impl DatasetsIndex {
                     )
                 })
                 .collect(),
+            assignment_id: Some(assignment_id),
         }
     }
 
@@ -119,5 +122,9 @@ impl DatasetsIndex {
 
     pub fn get_ordinal(&self, dataset: &Dataset, chunk: &DataChunk) -> Option<u64> {
         self.datasets.get(dataset).and_then(|v| v.chunks_ordinals_map.get(chunk).copied())
+    }
+
+    pub fn get_assignment_id(&self) -> Option<String> {
+        self.assignment_id.clone()
     }
 }

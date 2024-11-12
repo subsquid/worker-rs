@@ -146,19 +146,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Sending heartbeat");
-                let status;
-                let local_assignment;
-                {
-                    local_assignment = match self.latest_assignment.lock().clone() {
-                        Some(assignment) => assignment,
-                        None => {
-                            tracing::info!("Skipping heartbeat as assignment is not ready");
-                            return;
-                        }
-                    };
-                    status = self.worker.status();
-                }
-                
+                let status = self.worker.status();
+                let assignment_id = match status.assignment_id {
+                    Some(assignment_id) => assignment_id,
+                    None => {
+                        tracing::info!("Skipping heartbeat as assignment is not ready");
+                        return;
+                    }
+                };
                 let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
                 let _ = encoder.write_all(
                     status
@@ -171,7 +166,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 let compressed_bytes = encoder.finish().unwrap();
                 let data_len = status.unavailability_map.len();
                 let heartbeat = Heartbeat {
-                    assignment_id: local_assignment,
+                    assignment_id,
                     missing_chunks: Some(BitString {
                         data: compressed_bytes,
                         size: data_len as u64,
@@ -208,7 +203,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 let network_state_url =
                     format!("https://metadata.sqd-datasets.io/{network_state_filename}");
 
-                let latest_assignment = self.latest_assignment.lock().clone();
+                let latest_assignment = self.worker.get_assignment_id();
                 let assignment_option =
                     match Assignment::try_download(network_state_url, latest_assignment)
                         .await
@@ -238,14 +233,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                             return;
                         }
                     };
-                    let datasets_index = DatasetsIndex::from(calculated_chunks, headers);
+                    let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
                     let chunks = datasets_index.create_chunks_set();
-                    {
-                        let mut latest_assignment = self.latest_assignment.lock();
-                        self.worker.set_datasets_index(datasets_index);
-                        self.worker.set_desired_chunks(chunks);
-                        *latest_assignment = Some(assignment.id);
-                    }
+                    self.worker.set_datasets_index(datasets_index);
+                    self.worker.set_desired_chunks(chunks);
                     info!("New assignment applied");
                 };
             })

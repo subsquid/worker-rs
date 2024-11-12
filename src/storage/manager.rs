@@ -37,6 +37,7 @@ pub struct Status {
     pub downloading: Ranges,
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
+    pub assignment_id: Option<String>,
 }
 
 impl StateManager {
@@ -115,6 +116,8 @@ impl StateManager {
         for chunk_ref in &status.available {
             if let Some(ordinal) = datasets_index.get_ordinal(&chunk_ref.dataset, &chunk_ref.chunk) {
                 unavailability_map[ordinal as usize] = false
+            } else {
+                warn!("Ordinal for {:?} {:?} not set", &chunk_ref.dataset, &chunk_ref.chunk);
             }
         }
         Status {
@@ -122,6 +125,7 @@ impl StateManager {
             downloading: to_ranges(status.downloading),
             unavailability_map,
             stored_bytes,
+            assignment_id: datasets_index.get_assignment_id(),
         }
     }
 
@@ -139,6 +143,10 @@ impl StateManager {
 
     pub fn set_datasets_index(&self, index: DatasetsIndex) {
         *self.datasets_index.lock() = index;
+    }
+
+    pub fn get_assignment_id(&self) -> Option<String> {
+        self.datasets_index.lock().get_assignment_id()
     }
 
     pub fn stop_downloads(&self) {
