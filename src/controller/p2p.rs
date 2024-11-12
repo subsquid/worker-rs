@@ -204,41 +204,43 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     format!("https://metadata.sqd-datasets.io/{network_state_filename}");
 
                 let latest_assignment = self.worker.get_assignment_id();
-                let assignment_option =
+                let assignment =
                     match Assignment::try_download(network_state_url, latest_assignment)
                         .await
                     {
-                        Ok(assignment) => assignment,
+                        Ok(Some(assignment)) => assignment,
+                        Ok(None) => {
+                            info!("Assignment has not been changed");
+                            return;
+                        }
                         Err(err) => {
                             error!("Unable to get assignment: {err:?}");
                             return;
                         }
                     };
-                if let Some(assignment) = assignment_option {
-                    let peer_id = self.worker_id;
-                    let calculated_chunks =
-                        match assignment.dataset_chunks_for_peer_id(peer_id.to_string()) {
-                            Some(chunks) => chunks,
-                            None => {
-                                error!("Can not get assigned chunks.");
-                                return;
-                            }
-                        };
-                    let headers = match assignment
-                        .headers_for_peer_id(peer_id.to_string(), &self.private_key)
-                    {
-                        Ok(headers) => headers,
-                        Err(error) => {
-                            error!("Can not get assigned headers: {error:?}");
+                let peer_id = self.worker_id;
+                let calculated_chunks =
+                    match assignment.dataset_chunks_for_peer_id(peer_id.to_string()) {
+                        Some(chunks) => chunks,
+                        None => {
+                            error!("Can not get assigned chunks.");
                             return;
                         }
                     };
-                    let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
-                    let chunks = datasets_index.create_chunks_set();
-                    self.worker.set_datasets_index(datasets_index);
-                    self.worker.set_desired_chunks(chunks);
-                    info!("New assignment applied");
+                let headers = match assignment
+                    .headers_for_peer_id(peer_id.to_string(), &self.private_key)
+                {
+                    Ok(headers) => headers,
+                    Err(error) => {
+                        error!("Can not get assigned headers: {error:?}");
+                        return;
+                    }
                 };
+                let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
+                let chunks = datasets_index.create_chunks_set();
+                self.worker.set_datasets_index(datasets_index);
+                self.worker.set_desired_chunks(chunks);
+                info!("New assignment applied");
             })
             .await;
         info!("Assignment processing task finished");
