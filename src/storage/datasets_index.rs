@@ -53,7 +53,7 @@ impl DatasetsIndex {
     pub fn from(
         assigned_data: Vec<crate::util::assignment::Dataset>,
         headers: BTreeMap<String, String>,
-        assignment_id: String
+        assignment_id: String,
     ) -> Self {
         let mut datasets = HashMap::new();
         let mut ordinal = 0;
@@ -78,28 +78,32 @@ impl DatasetsIndex {
                 DatasetIndex {
                     url: Url::parse(&dataset_url).unwrap(),
                     files: dataset_files,
-                    chunks_ordinals_map
+                    chunks_ordinals_map,
                 },
             );
         }
 
-        let http_headers = headers.into_iter().map(|(k, v)| {
-            let key = match reqwest::header::HeaderName::from_str(&k) {
-                Ok(key) => key,
-                Err(err) => {
-                    error!("Couldn't parse header name: {}: {err:?}", k);
-                    return None;
-                },
-            };
-            let val = match reqwest::header::HeaderValue::from_str(&v) {
-                Ok(val) => val,
-                Err(err) => {
-                    error!("Couldn't parse header value: {}: {err:?}", k);
-                    return None;
-                },
-            };
-            Some((key, val))
-        }).flatten().collect();
+        let http_headers = headers
+            .into_iter()
+            .map(|(k, v)| {
+                let key = match reqwest::header::HeaderName::from_str(&k) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        error!("Couldn't parse header name: {}: {err:?}", k);
+                        return None;
+                    }
+                };
+                let val = match reqwest::header::HeaderValue::from_str(&v) {
+                    Ok(val) => val,
+                    Err(err) => {
+                        error!("Couldn't parse header value: {}: {err:?}", k);
+                        return None;
+                    }
+                };
+                Some((key, val))
+            })
+            .flatten()
+            .collect();
 
         DatasetsIndex {
             datasets,
@@ -126,11 +130,16 @@ impl DatasetsIndex {
     }
 
     pub fn get_ordinals_len(&self) -> usize {
-        self.datasets.values().map(|v| v.chunks_ordinals_map.len()).sum()
+        self.datasets
+            .values()
+            .map(|v| v.chunks_ordinals_map.len())
+            .sum()
     }
 
     pub fn get_ordinal(&self, dataset: &Dataset, chunk: &DataChunk) -> Option<u64> {
-        self.datasets.get(dataset).and_then(|v| v.chunks_ordinals_map.get(chunk).copied())
+        self.datasets
+            .get(dataset)
+            .and_then(|v| v.chunks_ordinals_map.get(chunk).copied())
     }
 
     pub fn get_assignment_id(&self) -> Option<String> {

@@ -204,9 +204,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
                 let latest_assignment = self.worker.get_assignment_id();
                 let assignment =
-                    match Assignment::try_download(network_state_url, latest_assignment)
-                        .await
-                    {
+                    match Assignment::try_download(network_state_url, latest_assignment).await {
                         Ok(Some(assignment)) => assignment,
                         Ok(None) => {
                             info!("Assignment has not been changed");
@@ -226,15 +224,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                             return;
                         }
                     };
-                let headers = match assignment
-                    .headers_for_peer_id(peer_id.to_string(), &self.private_key)
-                {
-                    Ok(headers) => headers,
-                    Err(error) => {
-                        error!("Can not get assigned headers: {error:?}");
-                        return;
-                    }
-                };
+                let headers =
+                    match assignment.headers_for_peer_id(peer_id.to_string(), &self.private_key) {
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            error!("Can not get assigned headers: {error:?}");
+                            return;
+                        }
+                    };
                 let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
                 let chunks = datasets_index.create_chunks_set();
                 self.worker.set_datasets_index(datasets_index);
