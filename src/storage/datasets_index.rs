@@ -6,6 +6,7 @@ use std::{
 
 use reqwest::Url;
 use sqd_messages::{DatasetChunks, WorkerAssignment};
+use tracing::error;
 
 use crate::types::{
     dataset::Dataset,
@@ -81,20 +82,28 @@ impl DatasetsIndex {
                 },
             );
         }
+
+        let http_headers = headers.into_iter().map(|(k, v)| {
+            let key = match reqwest::header::HeaderName::from_str(&k) {
+                Ok(key) => key,
+                Err(err) => {
+                    error!("Couldn't parse header name: {}: {err:?}", k);
+                    return None;
+                },
+            };
+            let val = match reqwest::header::HeaderValue::from_str(&v) {
+                Ok(val) => val,
+                Err(err) => {
+                    error!("Couldn't parse header value: {}: {err:?}", k);
+                    return None;
+                },
+            };
+            Some((key, val))
+        }).flatten().collect();
+
         DatasetsIndex {
             datasets,
-            http_headers: headers
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        reqwest::header::HeaderName::from_str(&k)
-                            .unwrap_or_else(|e| panic!("Couldn't parse header name: {}: {e:?}", k)),
-                        reqwest::header::HeaderValue::from_str(&v).unwrap_or_else(|e| {
-                            panic!("Couldn't parse header value: {}: {e:?}", v)
-                        }),
-                    )
-                })
-                .collect(),
+            http_headers,
             assignment_id: Some(assignment_id),
         }
     }
