@@ -1,6 +1,6 @@
 use core::str;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::Read,
 };
 
@@ -142,11 +142,11 @@ impl Assignment {
             None => return None,
         };
         let mut result: Vec<Dataset> = Default::default();
-        let mut idxs: Vec<u64> = Default::default();
+        let mut idxs: VecDeque<u64> = Default::default();
         let mut cursor = 0;
         for v in &local_assignment.chunks_deltas {
             cursor += v;
-            idxs.push(cursor);
+            idxs.push_back(cursor);
         }
         cursor = 0;
         for u in &self.datasets {
@@ -160,7 +160,7 @@ impl Assignment {
                 }
                 if idxs[0] == cursor {
                     filtered_chunks.push(v.clone());
-                    idxs.remove(0);
+                    idxs.pop_front();
                 }
                 if idxs.is_empty() {
                     break;
