@@ -4,7 +4,6 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
-use parking_lot::Mutex;
 use sqd_contract_client::Network;
 use sqd_messages::{query_error, query_executed, BitString, Heartbeat, Query, QueryExecuted};
 use sqd_network_transport::{
@@ -23,10 +22,7 @@ use crate::{
     query::result::{QueryError, QueryResult},
     run_all,
     storage::datasets_index::DatasetsIndex,
-    util::{
-        assignment::{self, Assignment},
-        timestamp_now_ms, UseOnce,
-    },
+    util::{assignment::Assignment, timestamp_now_ms, UseOnce},
 };
 
 use super::worker::Worker;
@@ -172,7 +168,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     }),
                     version: WORKER_VERSION.to_string(),
                     stored_bytes: Some(status.stored_bytes),
-                    ..Default::default()
                 };
                 let result = self.transport_handle.send_heartbeat(heartbeat);
                 if let Err(err) = result {
@@ -301,7 +296,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     async fn process_query(&self, peer_id: PeerId, query: &Query) -> QueryResult {
         let block_range = query
             .block_range
-            .map(|sqd_messages::Range { begin, end }| (begin as u64, end as u64));
+            .map(|sqd_messages::Range { begin, end }| (begin, end));
         match self.allocations_checker.try_spend(peer_id) {
             gateway_allocations::Status::Spent => {}
             gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),

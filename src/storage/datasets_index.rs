@@ -5,7 +5,6 @@ use std::{
 };
 
 use reqwest::Url;
-use sqd_messages::{DatasetChunks, WorkerAssignment};
 use tracing::error;
 
 use crate::types::{
@@ -85,7 +84,7 @@ impl DatasetsIndex {
 
         let http_headers = headers
             .into_iter()
-            .map(|(k, v)| {
+            .filter_map(|(k, v)| {
                 let key = match reqwest::header::HeaderName::from_str(&k) {
                     Ok(key) => key,
                     Err(err) => {
@@ -102,7 +101,6 @@ impl DatasetsIndex {
                 };
                 Some((key, val))
             })
-            .flatten()
             .collect();
 
         DatasetsIndex {

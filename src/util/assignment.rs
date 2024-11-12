@@ -1,8 +1,5 @@
 use core::str;
-use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    io::Read,
-};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use anyhow::anyhow;
 use crypto_box::{
