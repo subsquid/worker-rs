@@ -13,38 +13,18 @@ pub enum LoadedLogs {
     Partial(Vec<QueryExecuted>),
 }
 
-mod sql {
-    // timestamp is in milliseconds
-    pub const CREATE: &str = r#"
-        BEGIN;
-        CREATE TABLE IF NOT EXISTS query_logs_v2(query_id STRING PRIMARY KEY, timestamp INTEGER, log_msg BLOB);
-        CREATE INDEX IF NOT EXISTS idx_query_logs_v2_timestamp ON query_logs_v2(timestamp);
-        COMMIT;"#;
-
-    pub const CLEANUP: &str = "DELETE FROM query_logs_v2 WHERE timestamp < ?";
-
-    pub const INSERT: &str =
-        "INSERT INTO query_logs_v2(query_id, timestamp, log_msg) VALUES(?, ?, ?)";
-
-    pub const SELECT: &str = r#"
-        SELECT log_msg, query_id
-        FROM query_logs_v2
-        WHERE
-            timestamp >= :timestamp
-            AND (
-                :last_query_id IS NULL
-                OR rowid > (SELECT rowid FROM query_logs_v2 WHERE query_id = :last_query_id)
-            )
-        ORDER BY rowid
-        "#;
-}
-
 impl LogsStorage {
     pub async fn new(logs_path: &str) -> Result<Self> {
         let db = Connection::open(logs_path).await?;
 
         db.call(|db| {
-            db.execute_batch(sql::CREATE)?;
+            // timestamp is in milliseconds
+            db.execute_batch(r"
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS query_logs_v2(query_id STRING PRIMARY KEY, timestamp INTEGER, log_msg BLOB);
+                CREATE INDEX IF NOT EXISTS idx_query_logs_v2_timestamp ON query_logs_v2(timestamp);
+                COMMIT;"
+            )?;
             Ok(())
         })
         .await?;
@@ -57,11 +37,14 @@ impl LogsStorage {
         let timestamp = query.timestamp_ms;
         let id = query.query_id.clone();
         let log_msg = log.encode_to_vec();
+        // TODO: consider storing fields in separate columns
         self.db
             .call(move |db| {
-                db.prepare_cached(sql::INSERT)
-                    .expect("Couldn't prepare INSERT query")
-                    .execute((id, timestamp, log_msg))?;
+                db.prepare_cached(
+                    "INSERT INTO query_logs_v2(query_id, timestamp, log_msg) VALUES(?, ?, ?)",
+                )
+                .expect("Couldn't prepare INSERT query")
+                .execute((id, timestamp, log_msg))?;
                 Ok(())
             })
             .await?;
@@ -77,7 +60,18 @@ impl LogsStorage {
         self.db
             .call_unwrap(move |db| {
                 let mut stmt = db
-                    .prepare_cached(sql::SELECT)
+                    .prepare_cached(r"
+                        SELECT log_msg, query_id
+                        FROM query_logs_v2
+                        WHERE
+                            timestamp >= :timestamp
+                            AND (
+                                :last_query_id IS NULL
+                                OR rowid > (SELECT rowid FROM query_logs_v2 WHERE query_id = :last_query_id)
+                            )
+                        ORDER BY timestamp, query_id
+                        "
+                    )
                     .expect("Couldn't prepare logs query");
                 let mut rows = stmt.query(named_params! {
                     ":timestamp": from_timestamp_ms,
@@ -103,7 +97,7 @@ impl LogsStorage {
     pub async fn cleanup(&self, until: u64) -> Result<()> {
         self.db
             .call(move |db| {
-                db.execute(sql::CLEANUP, [until])?;
+                db.execute("DELETE FROM query_logs_v2 WHERE timestamp < ?", [until])?;
                 Ok(())
             })
             .await?;
