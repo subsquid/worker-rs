@@ -110,6 +110,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?;
 
     let cancellation_token = create_cancellation_token()?;
+    let inner_args = args.clone();
 
     match args.mode {
         cli::Mode::Http(http_args) => {
@@ -163,7 +164,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
             .await?;
             let worker =
                 Arc::new(Worker::new(state_manager, args.parallel_queries).with_peer_id(peer_id));
-
             let controller_fut = async {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
@@ -174,8 +174,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         allocations_checker,
                         scheduler_id,
                         logs_collector_id,
-                        args.data_dir,
-                        args.ping_interval,
+                        inner_args,
                     ) => {
                         controller?.run(cancellation_token.clone()).await;
                     }

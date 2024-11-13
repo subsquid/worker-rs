@@ -1,11 +1,11 @@
 use super::dataset::Dataset;
 use crate::storage::layout::DataChunk;
 use itertools::Itertools;
+use sqd_messages::{Range, RangeSet};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
 };
-use sqd_messages::{Range, RangeSet};
 
 pub type ChunkSet = BTreeSet<ChunkRef>;
 pub type Ranges = HashMap<Dataset, RangeSet>;

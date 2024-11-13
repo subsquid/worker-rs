@@ -1,9 +1,11 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{env, io::Write, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
+use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
-use sqd_messages::{query_error, query_executed, Heartbeat, Query, QueryExecuted};
+use sqd_contract_client::Network;
+use sqd_messages::{query_error, query_executed, BitString, Heartbeat, Query, QueryExecuted};
 use sqd_network_transport::{
     P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
@@ -13,12 +15,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
+    cli::{self, Args},
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
     logs_storage::LogsStorage,
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
-    util::{timestamp_now_ms, UseOnce},
+    storage::datasets_index::DatasetsIndex,
+    util::{assignment::Assignment, timestamp_now_ms, UseOnce},
 };
 
 use super::worker::Worker;
@@ -30,11 +34,14 @@ const CONCURRENT_QUERY_MESSAGES: usize = 32;
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
     heartbeat_interval: Duration,
+    assignment_check_interval: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
+    private_key: Vec<u8>,
+    network: Network,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
 }
@@ -45,28 +52,47 @@ pub async fn create_p2p_controller(
     allocations_checker: AllocationsChecker,
     scheduler_id: PeerId,
     logs_collector_id: PeerId,
-    data_dir: PathBuf,
-    heartbeat_interval: Duration,
+    args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
+    let data_dir = args.data_dir.clone();
+    let heartbeat_interval = args.ping_interval;
+    let assignment_check_interval;
+    let network: Network;
+    if let cli::Mode::P2P(p2p_args) = &args.mode {
+        network = p2p_args.transport.rpc.network;
+        assignment_check_interval = p2p_args.assignment_check_interval;
+    } else {
+        panic!("P2PContoller needs p2p config");
+    };
+
     let worker_id = transport_builder.local_peer_id();
+    let private_key = transport_builder
+        .keypair()
+        .try_into_ed25519()
+        .unwrap()
+        .secret()
+        .as_ref()
+        .to_vec();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, data_dir.join("peer_id"));
 
     let mut config = WorkerConfig::new();
     config.service_nodes = vec![scheduler_id, logs_collector_id];
-    let (event_stream, transport_handle) =
-        transport_builder.build_worker(config).await?;
+    let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
 
     Ok(P2PController {
         worker,
         heartbeat_interval,
+        assignment_check_interval,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
         allocations_checker,
         worker_id,
+        private_key,
+        network,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
     })
@@ -79,6 +105,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             self.run_event_loop(cancellation_token.child_token()),
             self.run_queries_loop(cancellation_token.child_token()),
             self.run_heartbeat_loop(cancellation_token.child_token(), self.heartbeat_interval),
+            self.run_assignments_loop(
+                cancellation_token.child_token(),
+                self.assignment_check_interval
+            ),
             // self._run_logs_loop(cancellation_token.child_token(), *LOGS_SEND_INTERVAL),
             self.worker.run(cancellation_token.child_token()),
             self.allocations_checker
@@ -97,21 +127,47 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         info!("Query processing task finished");
     }
 
-    async fn run_heartbeat_loop(&self, cancellation_token: CancellationToken, heartbeat_interval: Duration) {
-        let mut timer =
-            tokio::time::interval_at(tokio::time::Instant::now() + heartbeat_interval, heartbeat_interval);
+    async fn run_heartbeat_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        heartbeat_interval: Duration,
+    ) {
+        let mut timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + heartbeat_interval,
+            heartbeat_interval,
+        );
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         IntervalStream::new(timer)
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Sending heartbeat");
                 let status = self.worker.status();
+                let assignment_id = match status.assignment_id {
+                    Some(assignment_id) => assignment_id,
+                    None => {
+                        tracing::info!("Skipping heartbeat as assignment is not ready");
+                        return;
+                    }
+                };
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+                let _ = encoder.write_all(
+                    status
+                        .unavailability_map
+                        .iter()
+                        .map(|v| *v as u8)
+                        .collect::<Vec<u8>>()
+                        .as_slice(),
+                );
+                let compressed_bytes = encoder.finish().unwrap();
+                let data_len = status.unavailability_map.len();
                 let heartbeat = Heartbeat {
-                    assignment_id: "".to_owned(), // TODO
-                    missing_chunks: None,
+                    assignment_id,
+                    missing_chunks: Some(BitString {
+                        data: compressed_bytes,
+                        size: data_len as u64,
+                    }),
                     version: WORKER_VERSION.to_string(),
                     stored_bytes: Some(status.stored_bytes),
-                    ..Default::default()
                 };
                 let result = self.transport_handle.send_heartbeat(heartbeat);
                 if let Err(err) = result {
@@ -120,6 +176,65 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             })
             .await;
         info!("Heartbeat processing task finished");
+    }
+
+    async fn run_assignments_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        assignment_check_interval: Duration,
+    ) {
+        let mut timer =
+            tokio::time::interval_at(tokio::time::Instant::now(), assignment_check_interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        IntervalStream::new(timer)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each(|_| async move {
+                tracing::debug!("Checking assignment");
+                let network_state_filename = match self.network {
+                    Network::Tethys => "network-state-tethys.json",
+                    Network::Mainnet => "network-state-mainnet.json",
+                };
+                let network_state_url =
+                    format!("https://metadata.sqd-datasets.io/{network_state_filename}");
+
+                let latest_assignment = self.worker.get_assignment_id();
+                let assignment =
+                    match Assignment::try_download(network_state_url, latest_assignment).await {
+                        Ok(Some(assignment)) => assignment,
+                        Ok(None) => {
+                            info!("Assignment has not been changed");
+                            return;
+                        }
+                        Err(err) => {
+                            error!("Unable to get assignment: {err:?}");
+                            return;
+                        }
+                    };
+                let peer_id = self.worker_id;
+                let calculated_chunks =
+                    match assignment.dataset_chunks_for_peer_id(peer_id.to_string()) {
+                        Some(chunks) => chunks,
+                        None => {
+                            error!("Can not get assigned chunks.");
+                            return;
+                        }
+                    };
+                let headers =
+                    match assignment.headers_for_peer_id(peer_id.to_string(), &self.private_key) {
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            error!("Can not get assigned headers: {error:?}");
+                            return;
+                        }
+                    };
+                let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
+                let chunks = datasets_index.create_chunks_set();
+                self.worker.set_datasets_index(datasets_index);
+                self.worker.set_desired_chunks(chunks);
+                info!("New assignment applied");
+            })
+            .await;
+        info!("Assignment processing task finished");
     }
 
     async fn run_event_loop(&self, cancellation_token: CancellationToken) {
@@ -181,7 +296,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
     async fn process_query(&self, peer_id: PeerId, query: &Query) -> QueryResult {
         let block_range = query
             .block_range
-            .map(|sqd_messages::Range { begin, end }| (begin as u64, end as u64));
+            .map(|sqd_messages::Range { begin, end }| (begin, end));
         match self.allocations_checker.try_spend(peer_id) {
             gateway_allocations::Status::Spent => {}
             gateway_allocations::Status::NotEnoughCU => return Err(QueryError::NoAllocation),

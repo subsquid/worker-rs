@@ -5,7 +5,7 @@ use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
 use sqd_network_transport::{PeerId, TransportArgs};
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(version)]
 pub struct Args {
     /// Directory to keep in the data and state of this worker (defaults to cwd)
@@ -59,7 +59,7 @@ pub struct HttpArgs {
     pub worker_url: String,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct P2PArgs {
     /// Peer ID of the scheduler
     #[clap(long, env)]
@@ -73,12 +73,15 @@ pub struct P2PArgs {
     )]
     pub network_polling_interval: Duration,
 
+    #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
+    pub assignment_check_interval: Duration,
+
     #[command(flatten)]
     pub transport: TransportArgs,
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Clone)]
 pub enum Mode {
     Http(HttpArgs),
     P2P(P2PArgs),

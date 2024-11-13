@@ -60,6 +60,10 @@ impl Worker {
         self.state_manager.set_datasets_index(datasets_index);
     }
 
+    pub fn get_assignment_id(&self) -> Option<String> {
+        self.state_manager.get_assignment_id()
+    }
+
     pub fn stop_downloads(&self) {
         self.state_manager.stop_downloads();
     }

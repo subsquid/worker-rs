@@ -3,6 +3,8 @@ pub mod iterator;
 mod once;
 #[macro_use]
 pub mod run_all;
+pub mod assignment;
+pub mod signature;
 pub mod tests;
 pub mod timestamp;
 
