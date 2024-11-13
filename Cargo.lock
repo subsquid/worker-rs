@@ -6902,6 +6902,8 @@ name = "sqd-messages"
 version = "2.0.0"
 source = "git+https://github.com/subsquid/sqd-network.git?rev=310d32a#310d32ab696cbd2a108a3f5fd24aaa5044c78b04"
 dependencies = [
+ "bytemuck",
+ "flate2",
  "hex",
  "libp2p",
  "prost 0.13.3",

@@ -1,12 +1,12 @@
-use std::{env, io::Write, sync::Arc, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
-use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
 use sqd_contract_client::Network;
 use sqd_messages::{
-    query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
+    query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query, QueryExecuted,
+    QueryLogs,
 };
 use sqd_network_transport::{
     P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent, WorkerTransportHandle,
@@ -163,23 +163,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         return;
                     }
                 };
-                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
-                let _ = encoder.write_all(
-                    status
-                        .unavailability_map
-                        .iter()
-                        .map(|v| *v as u8)
-                        .collect::<Vec<u8>>()
-                        .as_slice(),
-                );
-                let compressed_bytes = encoder.finish().unwrap();
-                let data_len = status.unavailability_map.len();
                 let heartbeat = Heartbeat {
                     assignment_id,
-                    missing_chunks: Some(BitString {
-                        data: compressed_bytes,
-                        size: data_len as u64,
-                    }),
+                    missing_chunks: Some(BitString::new(&status.unavailability_map)),
                     version: WORKER_VERSION.to_string(),
                     stored_bytes: Some(status.stored_bytes),
                 };
