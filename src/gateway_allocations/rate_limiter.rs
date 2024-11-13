@@ -11,9 +11,20 @@ pub struct RateLimiter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    Spent,
-    Paused,
+pub enum RateLimitStatus {
+    Spent(Option<Duration>),
+    Paused(Duration),
+    NoAllocation,
+}
+
+impl RateLimitStatus {
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            RateLimitStatus::Spent(retry_after) => *retry_after,
+            RateLimitStatus::Paused(retry_after) => Some(*retry_after),
+            RateLimitStatus::NoAllocation => None,
+        }
+    }
 }
 
 const MAX_TOKENS: u8 = 3;
@@ -52,7 +63,7 @@ impl Bucket {
         self.tokens = (self.tokens + 1).min(MAX_TOKENS);
     }
 
-    fn empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.tokens == 0
     }
 
@@ -64,7 +75,7 @@ impl Bucket {
 
 impl RateLimiter {
     pub fn update_allocations(&mut self, clusters: Vec<GatewayCluster>, epoch_length: Duration) {
-        self.operator_by_gateway_id.drain();
+        self.operator_by_gateway_id.clear();
         let mut new_operators = HashMap::default();
 
         let now = Instant::now();
@@ -101,23 +112,23 @@ impl RateLimiter {
     }
 
     // Returns whether the request was allowed and how long to wait until the next request can be made
-    pub fn try_run_request(&mut self, gateway_id: PeerId) -> (Status, Option<Duration>) {
+    pub fn try_run_request(&mut self, gateway_id: PeerId) -> RateLimitStatus {
         let Some(operator_id) = self.operator_by_gateway_id.get(&gateway_id) else {
-            return (Status::Paused, None);
+            return RateLimitStatus::NoAllocation;
         };
         let bucket = self.operators.get_mut(operator_id).unwrap();
 
         let now = Instant::now();
         bucket.update(now);
         if bucket.take() {
-            let retry_after = if bucket.empty() {
+            let retry_after = if bucket.is_empty() {
                 Some(bucket.until_next_token(now))
             } else {
                 None
             };
-            (Status::Spent, retry_after)
+            RateLimitStatus::Spent(retry_after)
         } else {
-            (Status::Paused, Some(bucket.until_next_token(now)))
+            RateLimitStatus::Paused(bucket.until_next_token(now))
         }
     }
 
@@ -156,12 +167,12 @@ mod tests {
         bucket.update(now);
         assert_eq!(bucket.take(), true);
         assert_eq!(bucket.take(), true);
-        assert!(bucket.empty());
+        assert!(bucket.is_empty());
         assert_eq!(bucket.until_next_token(now), Duration::from_millis(400));
 
         bucket.put();
         assert_eq!(bucket.take(), true);
-        assert!(bucket.empty());
+        assert!(bucket.is_empty());
         assert_eq!(bucket.until_next_token(now), Duration::from_millis(400));
 
         bucket.update(start + Duration::from_millis(1_200_000));

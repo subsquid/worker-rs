@@ -6,12 +6,12 @@ use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::{rate_limiter::RateLimiter, Status};
+use super::{rate_limiter::RateLimiter, RateLimitStatus};
 
 pub struct AllocationsChecker {
     client: Box<dyn sqd_contract_client::Client>,
     own_id: sqd_contract_client::U256,
-    storage: Mutex<RateLimiter>,
+    rate_limiter: Mutex<RateLimiter>,
     polling_interval: Duration,
 }
 
@@ -25,21 +25,17 @@ impl AllocationsChecker {
         Ok(Self {
             client,
             own_id,
-            storage: Default::default(),
+            rate_limiter: Default::default(),
             polling_interval,
         })
     }
 
-    pub fn try_spend(&self, gateway_id: PeerId) -> (Status, Option<Duration>) {
-        self.storage
-            .lock()
-            .try_run_request(gateway_id)
+    pub fn try_spend(&self, gateway_id: PeerId) -> RateLimitStatus {
+        self.rate_limiter.lock().try_run_request(gateway_id)
     }
 
     pub fn refund(&self, gateway_id: PeerId) {
-        self.storage
-            .lock()
-            .refund(gateway_id);
+        self.rate_limiter.lock().refund(gateway_id);
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
@@ -68,7 +64,9 @@ impl AllocationsChecker {
                     self.client.gateway_clusters(self.own_id)
                 ) {
                     Ok((epoch_length, clusters)) => {
-                        self.storage.lock().update_allocations(clusters, epoch_length);
+                        self.rate_limiter
+                            .lock()
+                            .update_allocations(clusters, epoch_length);
                         current_epoch = epoch;
                     }
                     Err(e) => {

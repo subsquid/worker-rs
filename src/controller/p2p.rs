@@ -298,12 +298,14 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         peer_id: PeerId,
         query: &Query,
     ) -> (QueryResult, Option<Duration>) {
-        let mut retry_after = match self.allocations_checker.try_spend(peer_id) {
-            (gateway_allocations::Status::Spent, retry_after) => retry_after,
-            (gateway_allocations::Status::Paused, retry_after) => {
-                return (Err(QueryError::NoAllocation), retry_after)
+        let status = match self.allocations_checker.try_spend(peer_id) {
+            gateway_allocations::RateLimitStatus::NoAllocation => {
+                return (Err(QueryError::NoAllocation), None)
             }
+            status => status
         };
+        let mut retry_after = status.retry_after();
+
         let block_range = query
             .block_range
             .map(|sqd_messages::Range { begin, end }| (begin, end));
@@ -316,6 +318,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 Some(peer_id),
             )
             .await;
+
         if let Err(QueryError::ServiceOverloaded) = result {
             self.allocations_checker.refund(peer_id);
             retry_after = Some(DEFAULT_BACKOFF);
