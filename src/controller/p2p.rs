@@ -6,10 +6,10 @@ use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
 use sqd_contract_client::Network;
 use sqd_messages::{
-    query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query, QueryExecuted,
+    query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
 };
 use sqd_network_transport::{
-    P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
+    P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -30,6 +30,7 @@ use crate::{
 use super::worker::Worker;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
@@ -51,8 +52,8 @@ pub struct P2PController<EventStream> {
     network: Network,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
-    log_requests_tx: mpsc::Sender<LogsRequest>,
-    log_requests_rx: UseOnce<mpsc::Receiver<LogsRequest>>,
+    log_requests_tx: mpsc::Sender<(LogsRequest, ResponseChannel<QueryLogs>)>,
+    log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseChannel<QueryLogs>)>>,
 }
 
 pub async fn create_p2p_controller(
@@ -90,7 +91,7 @@ pub async fn create_p2p_controller(
     let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
-    let (log_requests_tx, log_requests_rx) = mpsc::channel(1);
+    let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
     Ok(P2PController {
         worker,
@@ -254,13 +255,13 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         let requests = self.log_requests_rx.take().unwrap();
         ReceiverStream::new(requests)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each(|request| async move {
-                if let Err(e) = self.handle_logs_request(request).await {
+            .for_each(|(request, resp_chan)| async move {
+                if let Err(e) = self.handle_logs_request(request, resp_chan).await {
                     warn!("Error handling logs request: {e:?}");
                 }
             })
             .await;
-        info!("Query processing task finished");
+        info!("Logs processing task finished");
     }
 
     async fn run_logs_cleanup_loop(
@@ -309,11 +310,11 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         }
                     }
                 }
-                WorkerEvent::LogsRequest { request, .. } => {
-                    match self.log_requests_tx.try_send(request) {
+                WorkerEvent::LogsRequest { request, resp_chan } => {
+                    match self.log_requests_tx.try_send((request, resp_chan)) {
                         Ok(_) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
-                            warn!("There is an ongoing logs request already");
+                            warn!("There are too many ongoing log requests");
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             break;
@@ -448,7 +449,11 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         })
     }
 
-    async fn handle_logs_request(&self, request: LogsRequest) -> Result<()> {
+    async fn handle_logs_request(
+        &self,
+        request: LogsRequest,
+        resp_chan: ResponseChannel<QueryLogs>,
+    ) -> Result<()> {
         let msg = match self
             .logs_storage
             .get_logs(
@@ -468,7 +473,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             },
         };
         info!("Sending {} logs", msg.queries_executed.len());
-        self.transport_handle.send_logs(msg)?;
+        self.transport_handle.send_logs(msg, resp_chan)?;
         Ok(())
     }
 }
