@@ -22,7 +22,7 @@ impl LogsStorage {
             db.execute_batch(r"
                 BEGIN;
                 CREATE TABLE IF NOT EXISTS query_logs_v2(query_id STRING PRIMARY KEY, timestamp INTEGER, log_msg BLOB);
-                CREATE INDEX IF NOT EXISTS idx_query_logs_v2_timestamp ON query_logs_v2(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_query_logs_v2_timestamp_query_id ON query_logs_v2(timestamp, query_id);
                 COMMIT;"
             )?;
             Ok(())
@@ -51,31 +51,35 @@ impl LogsStorage {
         Ok(())
     }
 
+    // Loads all logs from the given range ordered by timestamps.
+    // If from_query_id is given and there are multiple logs with the timestamp equal `from_timestamp_ms`,
+    // the logs with query_id > from_query_id will be returned for that timestamp.
+    //
+    // Note that logs are not always added in the order of their timestamps,
+    // so only the logs in the distant past should be fetched with this method.
     pub async fn get_logs(
         &self,
         from_timestamp_ms: u64,
-        last_query_id: Option<String>,
+        to_timestamp_ms: u64,
+        from_query_id: Option<String>,
         max_bytes: usize,
     ) -> Result<LoadedLogs> {
         self.db
             .call_unwrap(move |db| {
                 let mut stmt = db
-                    .prepare_cached(r"
+                    .prepare_cached(
+                        r"
                         SELECT log_msg, query_id
                         FROM query_logs_v2
-                        WHERE
-                            timestamp >= :timestamp
-                            AND (
-                                :last_query_id IS NULL
-                                OR rowid > (SELECT rowid FROM query_logs_v2 WHERE query_id = :last_query_id)
-                            )
-                        ORDER BY timestamp, query_id
-                        "
+                        WHERE (timestamp, query_id) > (:from_timestamp, IFNULL(:from_query_id, ''))
+                            AND timestamp <= :to_timestamp
+                        ORDER BY timestamp, query_id",
                     )
                     .expect("Couldn't prepare logs query");
                 let mut rows = stmt.query(named_params! {
-                    ":timestamp": from_timestamp_ms,
-                    ":last_query_id": last_query_id,
+                    ":from_timestamp": from_timestamp_ms,
+                    ":from_query_id": from_query_id,
+                    ":to_timestamp": to_timestamp_ms,
                 })?;
 
                 let mut total_len = 0;
@@ -97,7 +101,13 @@ impl LogsStorage {
     pub async fn cleanup(&self, until: u64) -> Result<()> {
         self.db
             .call(move |db| {
-                db.execute("DELETE FROM query_logs_v2 WHERE timestamp < ?", [until])?;
+                db.prepare_cached(
+                    "
+                    DELETE FROM query_logs_v2 WHERE timestamp < ?;
+                    VACUUM;",
+                )
+                .expect("Couldn't prepare cleanup query")
+                .execute([until])?;
                 Ok(())
             })
             .await?;
@@ -146,50 +156,60 @@ mod tests {
             logs_storage.save_log(log).await.unwrap();
         }
 
-        let LoadedLogs::All(loaded) = logs_storage.get_logs(10000, None, 1000000).await.unwrap()
+        let LoadedLogs::All(loaded) = logs_storage
+            .get_logs(10000, 10500, None, 1000000)
+            .await
+            .unwrap()
         else {
             panic!("Expected LoadedLogs::All");
         };
         assert_eq!(loaded.len(), 5);
         assert_eq!(loaded[0].query.as_ref().unwrap().query_id, "a");
         assert_eq!(loaded[0].result, Some(Result::Ok(Default::default())));
-        assert_eq!(loaded[1].query.as_ref().unwrap().query_id, "b");
-        assert_eq!(loaded[1].result, logs[1].result);
-        assert_eq!(loaded[2].query.as_ref().unwrap().query_id, "c");
+        assert_eq!(loaded[1].query.as_ref().unwrap().query_id, "c");
+        assert_eq!(loaded[2].query.as_ref().unwrap().query_id, "b");
+        assert_eq!(loaded[2].result, logs[1].result);
         assert_eq!(loaded[3].query.as_ref().unwrap().query_id, "d");
         assert_eq!(loaded[4].query.as_ref().unwrap().query_id, "e");
 
         for (index, (call, expected, drained)) in [
-            (logs_storage.get_logs(10000, None, 122), vec!["a"], false),
             (
-                logs_storage.get_logs(10000, None, 380),
-                vec!["a", "b"],
+                logs_storage.get_logs(10000, 11000, None, 122),
+                vec!["a"],
                 false,
             ),
             (
-                logs_storage.get_logs(10100, None, 1000),
+                logs_storage.get_logs(10000, 11000, None, 380),
+                vec!["a", "c"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, None, 1000),
                 vec!["b", "d", "e"],
                 true,
             ),
             (
-                logs_storage.get_logs(10050, None, 381),
-                vec!["b", "c", "d"],
-                false,
-            ),
-            (logs_storage.get_logs(10200, None, 1000), vec!["e"], true),
-            (logs_storage.get_logs(15000, None, 1000), vec![], true),
-            (
-                logs_storage.get_logs(10000, Some("b".to_string()), 300),
-                vec!["c", "d"],
+                logs_storage.get_logs(10050, 11000, None, 381),
+                vec!["c", "b", "d"],
                 false,
             ),
             (
-                logs_storage.get_logs(10000, Some("d".to_string()), 122),
+                logs_storage.get_logs(10200, 11000, None, 1000),
                 vec!["e"],
                 true,
             ),
             (
-                logs_storage.get_logs(10100, Some("b".to_string()), 300),
+                logs_storage.get_logs(15000, 11000, None, 1000),
+                vec![],
+                true,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 122),
+                vec!["e"],
+                true,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 300),
                 vec!["d", "e"],
                 true,
             ),
@@ -220,13 +240,17 @@ mod tests {
         logs_storage.cleanup(10100).await.unwrap();
         for (index, (call, expected, drained)) in [
             (
-                logs_storage.get_logs(0, None, 1000),
+                logs_storage.get_logs(0, 11000, None, 1000),
                 vec!["b", "d", "e"],
                 true,
             ),
-            (logs_storage.get_logs(10000, None, 150), vec!["b"], false),
             (
-                logs_storage.get_logs(10000, Some("b".to_string()), 150),
+                logs_storage.get_logs(10000, 11000, None, 150),
+                vec!["b"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 150),
                 vec!["d"],
                 false,
             ),

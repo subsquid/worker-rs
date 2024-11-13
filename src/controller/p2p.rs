@@ -34,6 +34,7 @@ const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
+const ALLOWED_TIME_LAG: Duration = Duration::from_secs(60);
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_LOGS_SIZE: usize =
@@ -444,6 +445,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .logs_storage
             .get_logs(
                 request.from_timestamp_ms,
+                timestamp_now_ms() - ALLOWED_TIME_LAG.as_millis() as u64,
                 request.last_received_query_id,
                 MAX_LOGS_SIZE,
             )
