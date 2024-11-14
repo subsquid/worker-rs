@@ -26,7 +26,7 @@ pub struct Worker {
     state_manager: Arc<StateManager>,
     queries_running: AtomicUsize,
     max_parallel_queries: usize,
-    pub peer_id: Option<PeerId>,
+    pub peer_id: PeerId,
 }
 
 pub struct QueryTask {
@@ -38,18 +38,13 @@ pub struct QueryTask {
 }
 
 impl Worker {
-    pub fn new(state_manager: StateManager, parallel_queries: usize) -> Self {
+    pub fn new(state_manager: StateManager, parallel_queries: usize, peer_id: PeerId) -> Self {
         Self {
             state_manager: Arc::new(state_manager),
             queries_running: 0.into(),
             max_parallel_queries: parallel_queries,
-            peer_id: None,
+            peer_id,
         }
-    }
-
-    pub fn with_peer_id(mut self, peer_id: PeerId) -> Self {
-        self.peer_id = Some(peer_id);
-        self
     }
 
     pub fn set_desired_chunks(&self, chunks: ChunkSet) {

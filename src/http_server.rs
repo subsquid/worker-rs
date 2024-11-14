@@ -1,57 +1,28 @@
 use std::sync::Arc;
 
-use crate::{cli::HttpArgs, controller::worker::Worker, metrics, types::dataset::Dataset};
+use crate::controller::worker::Worker;
 
 use axum::{
-    extract::Path,
     http::{header, HeaderMap},
-    response::{IntoResponse, Response},
-    routing::{get, post},
+    response::IntoResponse,
+    routing::get,
     Json,
 };
 use prometheus_client::{encoding::text::encode, registry::Registry};
-use reqwest::StatusCode;
 use tokio_util::sync::CancellationToken;
 
-async fn get_status(worker: Arc<Worker>, args: Option<HttpArgs>) -> Json<serde_json::Value> {
+async fn get_status(worker: Arc<Worker>) -> Json<serde_json::Value> {
     let status = worker.status();
-    match args {
-        Some(args) => Json(serde_json::json!({
-            "router_url": args.router,
-            "worker_id": args.worker_id,
-            "worker_url": args.worker_url,
-            "state": {
-                "available": status.available,
-                "downloading": status.downloading,
-            }
-        })),
-        None => Json(serde_json::json!({
-            "state": {
-                "available": status.available,
-                "downloading": status.downloading,
-            }
-        })),
-    }
+    Json(serde_json::json!({
+        "state": {
+            "available": status.available,
+            "downloading": status.downloading,
+        }
+    }))
 }
 
-async fn get_peer_id(worker: Arc<Worker>) -> (StatusCode, String) {
-    match worker.peer_id {
-        Some(peer_id) => (StatusCode::OK, peer_id.to_string()),
-        None => (StatusCode::NOT_FOUND, "".to_owned()),
-    }
-}
-
-async fn run_query(
-    worker: Arc<Worker>,
-    Path(dataset): Path<Dataset>,
-    query_str: String,
-) -> Response {
-    // TODO: remove HTTP transport
-    let result = worker
-        .run_query(&query_str, dataset, None, "<unimplemented>", None)
-        .await;
-    metrics::query_executed(&result);
-    result.map(|result| result.data).into_response()
+async fn get_peer_id(worker: Arc<Worker>) -> String {
+    worker.peer_id.to_string()
 }
 
 async fn get_metrics(registry: Arc<Registry>) -> impl IntoResponse {
@@ -79,14 +50,14 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(worker: Arc<Worker>, args: Option<HttpArgs>, metrics_registry: Registry) -> Self {
+    pub fn new(worker: Arc<Worker>, metrics_registry: Registry) -> Self {
         let metrics_registry = Arc::new(metrics_registry);
         let router = axum::Router::new()
             .route(
                 "/worker/status",
                 get({
                     let worker = worker.clone();
-                    move || get_status(worker, args)
+                    move || get_status(worker)
                 }),
             )
             .route(
@@ -94,13 +65,6 @@ impl Server {
                 get({
                     let worker = worker.clone();
                     move || get_peer_id(worker)
-                }),
-            )
-            .route(
-                "/query/:dataset",
-                post({
-                    let worker = worker.clone();
-                    move |path, body| run_query(worker, path, body)
                 }),
             )
             .route("/metrics", get(move || get_metrics(metrics_registry)));

@@ -18,8 +18,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
-    cli::{self, Args},
-    gateway_allocations::{self, allocations_checker::AllocationsChecker},
+    cli::Args,
+    gateway_allocations::{
+        self,
+        allocations_checker::{self, AllocationsChecker},
+    },
     logs_storage::{LoadedLogs, LogsStorage},
     metrics,
     query::result::{QueryError, QueryResult},
@@ -63,21 +66,9 @@ pub struct P2PController<EventStream> {
 pub async fn create_p2p_controller(
     worker: Arc<Worker>,
     transport_builder: P2PTransportBuilder,
-    allocations_checker: AllocationsChecker,
-    scheduler_id: PeerId,
-    logs_collector_id: PeerId,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
-    let data_dir = args.data_dir.clone();
-    let heartbeat_interval = args.ping_interval;
-    let assignment_check_interval;
-    let network: Network;
-    if let cli::Mode::P2P(p2p_args) = &args.mode {
-        network = p2p_args.transport.rpc.network;
-        assignment_check_interval = p2p_args.assignment_check_interval;
-    } else {
-        panic!("P2PContoller needs p2p config");
-    };
+    let network = args.transport.rpc.network;
 
     let worker_id = transport_builder.local_peer_id();
     let keypair = transport_builder.keypair();
@@ -89,10 +80,17 @@ pub async fn create_p2p_controller(
         .as_ref()
         .to_vec();
     info!("Local peer ID: {worker_id}");
-    check_peer_id(worker_id, data_dir.join("peer_id"));
+    check_peer_id(worker_id, args.data_dir.join("peer_id"));
+
+    let allocations_checker = allocations_checker::AllocationsChecker::new(
+        transport_builder.contract_client(),
+        worker_id,
+        args.network_polling_interval,
+    )
+    .await?;
 
     let mut config = WorkerConfig::new();
-    config.service_nodes = vec![scheduler_id, logs_collector_id];
+    config.service_nodes = vec![args.scheduler_id, args.logs_collector_id];
     let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
@@ -100,11 +98,11 @@ pub async fn create_p2p_controller(
 
     Ok(P2PController {
         worker,
-        heartbeat_interval,
-        assignment_check_interval,
+        heartbeat_interval: args.heartbeat_interval,
+        assignment_check_interval: args.assignment_check_interval,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
-        logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
+        logs_storage: LogsStorage::new(args.data_dir.join("logs.db").as_str()).await?,
         allocations_checker,
         worker_id,
         keypair,
