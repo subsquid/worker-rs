@@ -28,8 +28,10 @@ use crate::{
     query::result::{QueryError, QueryResult},
     run_all,
     storage::datasets_index::DatasetsIndex,
-    util::{assignment::Assignment, timestamp_now_ms, UseOnce},
+    util::{timestamp_now_ms, UseOnce},
 };
+
+use sqd_messages::assignments::Assignment;
 
 use super::worker::Worker;
 
@@ -219,7 +221,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     };
                 let peer_id = self.worker_id;
                 let calculated_chunks =
-                    match assignment.dataset_chunks_for_peer_id(peer_id.to_string()) {
+                    match assignment.dataset_chunks_for_peer_id(&peer_id.to_string()) {
                         Some(chunks) => chunks,
                         None => {
                             error!("Can not get assigned chunks.");
@@ -227,7 +229,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         }
                     };
                 let headers =
-                    match assignment.headers_for_peer_id(peer_id.to_string(), &self.private_key) {
+                    match assignment.headers_for_peer_id(&peer_id.to_string(), &self.private_key) {
                         Ok(headers) => headers,
                         Err(error) => {
                             error!("Can not get assigned headers: {error:?}");

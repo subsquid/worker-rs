@@ -50,7 +50,7 @@ impl DatasetsIndex {
         })
     }
     pub fn from(
-        assigned_data: Vec<crate::util::assignment::Dataset>,
+        assigned_data: Vec<sqd_messages::assignments::Dataset>,
         headers: BTreeMap<String, String>,
         assignment_id: String,
     ) -> Self {

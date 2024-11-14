@@ -6819,7 +6819,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=106bd6c#106bd6c0ae6d8722ae8aba6fce0ecd5f429d9d13"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=459dc92#459dc9283b4a9a3422224981c1d7b59bb1f37afa"
 dependencies = [
  "async-trait",
  "clap",
@@ -6836,23 +6836,29 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=106bd6c#106bd6c0ae6d8722ae8aba6fce0ecd5f429d9d13"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=459dc92#459dc9283b4a9a3422224981c1d7b59bb1f37afa"
 dependencies = [
+ "anyhow",
  "bytemuck",
+ "crypto_box",
  "flate2",
  "hex",
  "libp2p",
  "prost 0.13.3",
  "prost-build",
+ "reqwest 0.12.8",
  "semver",
  "serde",
+ "serde_json",
+ "serde_with",
+ "sha2",
  "sha3",
 ]
 
 [[package]]
 name = "sqd-network-transport"
 version = "2.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=106bd6c#106bd6c0ae6d8722ae8aba6fce0ecd5f429d9d13"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=459dc92#459dc9283b4a9a3422224981c1d7b59bb1f37afa"
 dependencies = [
  "anyhow",
  "async-trait",
