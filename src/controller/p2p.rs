@@ -1,6 +1,6 @@
 use std::{env, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use sqd_contract_client::Network;
@@ -9,7 +9,8 @@ use sqd_messages::{
     QueryLogs,
 };
 use sqd_network_transport::{
-    P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent, WorkerTransportHandle,
+    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent,
+    WorkerTransportHandle,
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -49,10 +50,12 @@ pub struct P2PController<EventStream> {
     logs_storage: LogsStorage,
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
+    keypair: Keypair,
     private_key: Vec<u8>,
     network: Network,
-    queries_tx: mpsc::Sender<(PeerId, Query)>,
-    queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
+    queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
+    queries_rx:
+        UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
     log_requests_tx: mpsc::Sender<(LogsRequest, ResponseChannel<QueryLogs>)>,
     log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseChannel<QueryLogs>)>>,
 }
@@ -77,6 +80,7 @@ pub async fn create_p2p_controller(
     };
 
     let worker_id = transport_builder.local_peer_id();
+    let keypair = transport_builder.keypair();
     let private_key = transport_builder
         .keypair()
         .try_into_ed25519()
@@ -103,6 +107,7 @@ pub async fn create_p2p_controller(
         logs_storage: LogsStorage::new(data_dir.join("logs.db").as_str()).await?,
         allocations_checker,
         worker_id,
+        keypair,
         private_key,
         network,
         queries_tx,
@@ -135,9 +140,12 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         let queries_rx = self.queries_rx.take().unwrap();
         ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query)| async move {
-                self.handle_query(peer_id, query).await;
-            })
+            .for_each_concurrent(
+                CONCURRENT_QUERY_MESSAGES,
+                |(peer_id, query, resp_chan)| async move {
+                    self.handle_query(peer_id, query, resp_chan).await;
+                },
+            )
             .await;
         info!("Query processing task finished");
     }
@@ -286,8 +294,15 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
         while let Some(ev) = event_stream.next().await {
             match ev {
-                WorkerEvent::Query { peer_id, query } => {
-                    match self.queries_tx.try_send((peer_id, query)) {
+                WorkerEvent::Query {
+                    peer_id,
+                    query,
+                    resp_chan,
+                } => {
+                    if !self.validate_query(&query, peer_id) {
+                        continue;
+                    }
+                    match self.queries_tx.try_send((peer_id, query, resp_chan)) {
                         Ok(_) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             warn!("Queries queue is full. Dropping query from {peer_id}");
@@ -314,7 +329,30 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         info!("Transport event loop finished");
     }
 
-    async fn handle_query(&self, peer_id: PeerId, query: Query) {
+    fn validate_query(&self, query: &Query, peer_id: PeerId) -> bool {
+        if !query.verify_signature(peer_id, self.worker_id) {
+            tracing::warn!("Rejected query with invalid signature from {}", peer_id);
+            return false;
+        }
+        if query.timestamp_ms.abs_diff(timestamp_now_ms()) as u128 > ALLOWED_TIME_LAG.as_millis() {
+            tracing::warn!(
+                "Rejected query with invalid timestamp ({}) from {}",
+                query.timestamp_ms,
+                peer_id
+            );
+            return false;
+        }
+        // TODO: check rate limits here
+        // TODO: check that query_id has not been used before
+        true
+    }
+
+    async fn handle_query(
+        &self,
+        peer_id: PeerId,
+        query: Query,
+        resp_chan: ResponseChannel<sqd_messages::QueryResult>,
+    ) {
         let query_id = query.query_id.clone();
 
         let (result, retry_after) = self.process_query(peer_id, &query).await;
@@ -325,7 +363,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         metrics::query_executed(&result);
         let log = self.generate_log(&result, query, peer_id);
 
-        self.send_query_result(query_id, result, retry_after);
+        if let Err(e) = self.send_query_result(query_id, result, resp_chan, retry_after) {
+            tracing::error!("Couldn't send query result: {e:?}, query log: {log:?}");
+        }
 
         if let Some(log) = log {
             if log.encoded_len() > MAX_LOGS_SIZE {
@@ -377,8 +417,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         &self,
         query_id: String,
         result: QueryResult,
+        resp_chan: ResponseChannel<sqd_messages::QueryResult>,
         retry_after: Option<Duration>,
-    ) {
+    ) -> Result<()> {
         let query_result = match result {
             Ok(result) => {
                 let data = result.compressed_data();
@@ -389,15 +430,25 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             }
             Err(e) => query_error::Err::from(e).into(),
         };
-        let msg = sqd_messages::QueryResult {
+        let mut msg = sqd_messages::QueryResult {
             query_id,
             result: Some(query_result),
             retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
             signature: Default::default(),
         };
+        msg.sign(&self.keypair).map_err(|e| anyhow!(e))?;
+
+        let result_size = msg.encoded_len() as u64;
+        if result_size > protocol::MAX_QUERY_RESULT_SIZE {
+            anyhow::bail!("query result size too large: {result_size}");
+        }
+
+        // TODO: propagate backpressure from the transport lib
         self.transport_handle
-            .send_query_result(msg)
-            .unwrap_or_else(|_| error!("Cannot send query result: queue full"));
+            .send_query_result(msg, resp_chan)
+            .map_err(|_| anyhow!("queue full"))?;
+
+        Ok(())
     }
 
     pub fn local_peer_id(&self) -> PeerId {
