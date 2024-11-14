@@ -19,11 +19,8 @@ pub struct Args {
     pub data_dir: PathBuf,
 
     /// Port to listen on
-    #[clap(short, long, env, default_value_t = 8000)]
-    pub port: u16,
-
-    #[command(subcommand)]
-    pub mode: Mode,
+    #[clap(short, long, env, default_value_t = 8000, alias = "port")]
+    pub http_port: u16,
 
     #[clap(env, default_value_t = 20)]
     pub parallel_queries: usize,
@@ -34,33 +31,8 @@ pub struct Args {
     #[clap(env)]
     pub query_threads: Option<usize>,
 
-    #[clap(env = "PING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "55")]
-    pub ping_interval: Duration,
-
-    #[clap(env, hide(true))]
-    pub sentry_dsn: Option<String>,
-
-    #[clap(env, hide(true), default_value_t = 0.001)]
-    pub sentry_traces_sample_rate: f32,
-}
-
-#[derive(clap::Args, Debug, Clone)]
-pub struct HttpArgs {
-    /// URL of the router to connect to
-    #[clap(long, env, value_name = "URL")]
-    pub router: String,
-
-    /// Unique id of this worker
-    #[clap(long, env, value_name = "UID")]
-    pub worker_id: String,
-
-    /// Externally visible URL of this worker
-    #[clap(long, env, value_name = "URL")]
-    pub worker_url: String,
-}
-
-#[derive(clap::Args, Clone)]
-pub struct P2PArgs {
+    #[clap(env = "PING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "55", alias = "ping-interval")]
+    pub heartbeat_interval: Duration,
     /// Peer ID of the scheduler
     #[clap(long, env)]
     pub scheduler_id: PeerId,
@@ -78,13 +50,12 @@ pub struct P2PArgs {
 
     #[command(flatten)]
     pub transport: TransportArgs,
-}
 
-#[allow(clippy::large_enum_variant)]
-#[derive(clap::Subcommand, Clone)]
-pub enum Mode {
-    Http(HttpArgs),
-    P2P(P2PArgs),
+    #[clap(env, hide(true))]
+    pub sentry_dsn: Option<String>,
+
+    #[clap(env, hide(true), default_value_t = 0.001)]
+    pub sentry_traces_sample_rate: f32,
 }
 
 fn parse_seconds(s: &str) -> Result<Duration> {

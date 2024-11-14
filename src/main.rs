@@ -24,11 +24,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
-use sqd_worker::cli::{self, Args, P2PArgs};
-use sqd_worker::controller::http::HttpController;
+use sqd_worker::cli::Args;
 use sqd_worker::controller::p2p::create_p2p_controller;
 use sqd_worker::controller::worker::Worker;
-use sqd_worker::gateway_allocations::allocations_checker;
 use sqd_worker::http_server::Server as HttpServer;
 use sqd_worker::storage::manager::StateManager;
 use sqd_worker::{metrics, run_all};
@@ -104,95 +102,49 @@ async fn run(args: Args) -> anyhow::Result<()> {
     setup_tracing()?;
     let _sentry_guard = setup_sentry(&args);
 
-    let mut metrics_registry = Default::default();
-
     let state_manager =
         StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?;
 
     let cancellation_token = create_cancellation_token()?;
-    let inner_args = args.clone();
+    let args_clone = args.clone();
 
-    match args.mode {
-        cli::Mode::Http(http_args) => {
-            let info = Info::new(vec![(
-                "version".to_owned(),
-                env!("CARGO_PKG_VERSION").to_owned(),
-            )]);
-            metrics::register_metrics(&mut metrics_registry, info);
-            let worker = Arc::new(Worker::new(state_manager, args.parallel_queries));
-            let controller = HttpController::new(
-                worker.clone(),
-                args.ping_interval,
-                http_args.worker_id.clone(),
-                http_args.worker_url.clone(),
-                http_args.router.clone(),
-            );
-            let (_, server_result) = run_all!(
-                cancellation_token,
-                controller.run(cancellation_token.clone()),
-                tokio::spawn(
-                    HttpServer::new(worker, Some(http_args), metrics_registry)
-                        .run(args.port, cancellation_token.clone()),
-                )
-            );
-            server_result??;
-        }
-        cli::Mode::P2P(P2PArgs {
-            scheduler_id,
-            logs_collector_id,
-            network_polling_interval,
-            transport: transport_args,
-            ..
-        }) => {
-            sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
-            let agent_info = get_agent_info!();
-            let transport_builder =
-                P2PTransportBuilder::from_cli(transport_args, agent_info).await?;
-            let peer_id = transport_builder.local_peer_id();
-            let info = Info::new(vec![
-                ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
-                ("peer_id".to_owned(), peer_id.to_string()),
-            ]);
-            metrics::register_metrics(&mut metrics_registry, info);
-            metrics::register_p2p_metrics(&mut metrics_registry);
+    let agent_info = get_agent_info!();
+    let transport_builder = P2PTransportBuilder::from_cli(args.transport, agent_info).await?;
+    let peer_id = transport_builder.local_peer_id();
+    let info = Info::new(vec![
+        ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
+        ("peer_id".to_owned(), peer_id.to_string()),
+    ]);
+    let mut metrics_registry = Default::default();
+    sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
+    metrics::register_metrics(&mut metrics_registry, info);
 
-            let allocations_checker = allocations_checker::AllocationsChecker::new(
-                transport_builder.contract_client(),
-                peer_id,
-                network_polling_interval,
-            )
-            .await?;
-            let worker =
-                Arc::new(Worker::new(state_manager, args.parallel_queries).with_peer_id(peer_id));
-            let controller_fut = async {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                    },
-                    controller = create_p2p_controller(
-                        worker.clone(),
-                        transport_builder,
-                        allocations_checker,
-                        scheduler_id,
-                        logs_collector_id,
-                        inner_args,
-                    ) => {
-                        controller?.run(cancellation_token.clone()).await;
-                    }
-                }
-                anyhow::Ok(())
+    let worker = Arc::new(Worker::new(state_manager, args.parallel_queries, peer_id));
+
+    let (controller_result, server_result) = run_all!(
+        cancellation_token,
+        async {
+            let controller = tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    return Ok(());
+                },
+                controller = create_p2p_controller(
+                    worker.clone(),
+                    transport_builder,
+                    args_clone,
+                ) => controller
             };
+            controller?.run(cancellation_token.clone()).await;
+            anyhow::Ok(())
+        },
+        tokio::spawn(
+            HttpServer::new(worker.clone(), metrics_registry)
+                .run(args.http_port, cancellation_token.clone())
+        )
+    );
+    controller_result?;
+    server_result??;
 
-            let (_, server_result) = run_all!(
-                cancellation_token,
-                controller_fut,
-                tokio::spawn(
-                    HttpServer::new(worker.clone(), None, metrics_registry)
-                        .run(args.port, cancellation_token.clone())
-                )
-            );
-            server_result??;
-        }
-    };
     tracing::info!("Shutting down");
     Ok(())
 }

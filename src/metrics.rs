@@ -137,9 +137,6 @@ pub fn register_metrics(registry: &mut Registry, info: Info<Vec<(String, String)
         "Current number of queries being executed",
         RUNNING_QUERIES.clone(),
     );
-}
-
-pub fn register_p2p_metrics(registry: &mut Registry) {
     registry.register("worker_status", "Status of the worker", STATUS.clone());
     set_status(WorkerStatus::Starting);
 }
