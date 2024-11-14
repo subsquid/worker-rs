@@ -46,7 +46,10 @@ async fn run_query(
     Path(dataset): Path<Dataset>,
     query_str: String,
 ) -> Response {
-    let result = worker.run_query(query_str, dataset, None, None).await;
+    // TODO: remove HTTP transport
+    let result = worker
+        .run_query(&query_str, dataset, None, "<unimplemented>", None)
+        .await;
     metrics::query_executed(&result);
     result.map(|result| result.data).into_response()
 }

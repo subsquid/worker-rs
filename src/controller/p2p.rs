@@ -399,9 +399,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         let result = self
             .worker
             .run_query(
-                query.query.clone(),
+                &query.query,
                 query.dataset.clone(),
                 block_range,
+                &query.chunk_id,
                 Some(peer_id),
             )
             .await;

@@ -2,7 +2,7 @@ use itertools::Itertools;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{info, instrument};
 
-use super::layout::{BlockNumber, DataChunk};
+use super::layout::DataChunk;
 use crate::{
     metrics,
     types::{
@@ -120,29 +120,18 @@ impl State {
         }
     }
 
-    pub fn find_and_lock_chunk(
+    pub fn get_and_lock_chunk(
         &mut self,
         dataset: Arc<Dataset>,
-        block_number: BlockNumber,
+        chunk: DataChunk,
     ) -> Option<ChunkRef> {
-        let from = ChunkRef {
-            dataset: dataset.clone(),
-            chunk: DataChunk {
-                last_block: block_number,
-                first_block: BlockNumber::from(0),
-                ..Default::default()
-            },
-        };
-        let chunk_ref = self.available.range(from..).next()?.clone();
+        let chunk_ref = self.available.get(&ChunkRef { dataset, chunk }).cloned();
 
-        if chunk_ref.dataset != dataset || chunk_ref.chunk.first_block > block_number {
-            return None;
+        if let Some(chunk_ref) = chunk_ref.as_ref() {
+            self.lock_chunk(chunk_ref);
         }
-        assert!(chunk_ref.chunk.last_block >= block_number);
 
-        self.lock_chunk(&chunk_ref);
-
-        Some(chunk_ref)
+        chunk_ref
     }
 
     pub fn release_chunks(&mut self, chunks: impl IntoIterator<Item = ChunkRef>) {
@@ -159,7 +148,7 @@ impl State {
         }
     }
 
-    fn unlock_chunk(&mut self, chunk: &ChunkRef) {
+    pub fn unlock_chunk(&mut self, chunk: &ChunkRef) {
         let remove = self
             .locks
             .get_mut(chunk)
@@ -200,10 +189,7 @@ mod tests {
 
     use itertools::Itertools;
 
-    use crate::{
-        storage::layout::{BlockNumber, DataChunk},
-        types::state::ChunkRef,
-    };
+    use crate::{storage::layout::DataChunk, types::state::ChunkRef};
 
     use super::State;
 
@@ -245,73 +231,5 @@ mod tests {
             &[b.clone(), d.clone()]
         );
         assert_eq!(state.status().downloading.into_iter().collect_vec(), &[]);
-    }
-
-    #[test]
-    fn test_data_chunk_comparison() {
-        // Chunks lookup depends on sorting by last_block
-        assert!(
-            DataChunk {
-                first_block: 1.into(),
-                last_block: 2.into(),
-                ..Default::default()
-            } < DataChunk {
-                first_block: 0.into(),
-                last_block: 3.into(),
-                ..Default::default()
-            }
-        )
-    }
-
-    #[test]
-    fn test_search() {
-        let ds0 = Arc::new("ds0".to_owned());
-        let ds1 = Arc::new("ds1".to_owned());
-        let chunk_ref = |ds: &Arc<String>, path| ChunkRef {
-            dataset: ds.clone(),
-            chunk: DataChunk::from_path(path).unwrap(),
-        };
-        let a = chunk_ref(&ds0, "0000000000/0000000000-0000000009-00000000");
-        let b = chunk_ref(&ds0, "0000000000/0000000010-0000000019-00000000");
-        let c = chunk_ref(&ds0, "0000000000/0000000100-0000000109-00000000");
-        let d = chunk_ref(&ds1, "0000000000/0000000000-0000000009-00000000");
-
-        let mut state = State::new(
-            [a.clone(), b.clone(), c.clone(), d.clone()]
-                .into_iter()
-                .collect(),
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(0)),
-            Some(a.clone())
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(8)),
-            Some(a.clone())
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(9)),
-            Some(a.clone())
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(10)),
-            Some(b.clone())
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(19)),
-            Some(b.clone())
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(99)),
-            None
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(100)),
-            Some(c.clone())
-        );
-        assert_eq!(
-            state.find_and_lock_chunk(ds0.clone(), BlockNumber::from(110)),
-            None
-        );
     }
 }

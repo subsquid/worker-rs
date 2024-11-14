@@ -9,7 +9,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::{
     metrics,
     types::{
-        dataset,
+        dataset::{self, Dataset},
         state::{to_ranges, ChunkRef, ChunkSet, Ranges},
     },
 };
@@ -17,7 +17,7 @@ use crate::{
 use super::{
     datasets_index::DatasetsIndex,
     downloader::ChunkDownloader,
-    layout::{self, BlockNumber, DataChunk},
+    layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
     state::{State, UpdateStatus},
     Filesystem,
@@ -162,22 +162,19 @@ impl StateManager {
         }
     }
 
-    pub fn find_chunk(
+    pub fn get_chunk(
         self: Arc<Self>,
-        encoded_dataset: &str,
-        block_number: BlockNumber,
-    ) -> Result<scopeguard::ScopeGuard<Option<PathBuf>, impl FnOnce(Option<PathBuf>)>> {
-        let dataset = dataset::decode_dataset(encoded_dataset)
-            .with_context(|| format!("Couldn't decode dataset: {encoded_dataset}"))?;
+        dataset: Dataset,
+        chunk: DataChunk,
+    ) -> Option<scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>> {
+        let encoded_dataset = dataset::encode_dataset(&dataset);
         let chunk = self
             .state
             .lock()
-            .find_and_lock_chunk(Arc::new(dataset), block_number);
-        let path = chunk
-            .as_ref()
-            .map(|chunk| self.fs.root.join(encoded_dataset).join(chunk.chunk.path()));
-        let guard = scopeguard::guard(path, move |_| self.state.lock().release_chunks(chunk));
-        Ok(guard)
+            .get_and_lock_chunk(Arc::new(dataset), chunk)?;
+        let path = self.fs.root.join(encoded_dataset).join(chunk.chunk.path());
+        let guard = scopeguard::guard(path, move |_| self.state.lock().unlock_chunk(&chunk));
+        Some(guard)
     }
 
     #[instrument(err, skip(self))]
