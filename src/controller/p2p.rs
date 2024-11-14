@@ -236,11 +236,22 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                             return;
                         }
                     };
+                let status = match assignment.worker_status(peer_id.to_string()) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        error!("Can not get assigned headers: {error:?}");
+                        return;
+                    }
+                };
                 let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
                 let chunks = datasets_index.create_chunks_set();
                 self.worker.set_datasets_index(datasets_index);
                 self.worker.set_desired_chunks(chunks);
-                info!("New assignment applied");
+                if status.to_ascii_lowercase() == "ok" {
+                    info!("New assignment applied");
+                } else {
+                    warn!("Worker is considered unreliable: {status}");
+                }
             })
             .await;
         info!("Assignment processing task finished");
@@ -389,7 +400,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             gateway_allocations::RateLimitStatus::NoAllocation => {
                 return (Err(QueryError::NoAllocation), None)
             }
-            status => status
+            status => status,
         };
         let mut retry_after = status.retry_after();
 
