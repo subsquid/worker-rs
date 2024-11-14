@@ -74,9 +74,10 @@ impl Worker {
 
     pub async fn run_query(
         &self,
-        query_str: String,
+        query_str: &str,
         dataset: Dataset,
         block_range: Option<(u64, u64)>,
+        chunk_id: &str,
         client_id: Option<PeerId>,
     ) -> QueryResult {
         let before = self.queries_running.fetch_add(1, Ordering::SeqCst);
@@ -88,13 +89,15 @@ impl Worker {
         if before >= self.max_parallel_queries {
             return Err(QueryError::ServiceOverloaded);
         }
+
         tracing::debug!(
             "Running query from {}",
             client_id
                 .map(|id| id.to_string())
                 .unwrap_or("{unknown}".to_string())
         );
-        self.execute_query(query_str, dataset, block_range).await
+        self.execute_query(query_str, dataset, block_range, chunk_id)
+            .await
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
@@ -105,10 +108,16 @@ impl Worker {
 
     async fn execute_query(
         &self,
-        query_str: String,
-        dataset: String,
+        query_str: &str,
+        dataset: Dataset,
         block_range: Option<(u64, u64)>,
+        chunk_id: &str,
     ) -> QueryResult {
+        let Ok(chunk) = chunk_id.parse() else {
+            return Err(QueryError::BadRequest(format!(
+                "Can't parse chunk id '{chunk_id}'"
+            )));
+        };
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
         if let Some((from_block, to_block)) = block_range {
@@ -116,17 +125,7 @@ impl Worker {
             query.set_last_block(Some(to_block));
         }
 
-        // First block may be either set by the `block_range` arg or defined in the query.
-        let Some(first_block) = query.first_block() else {
-            return Err(QueryError::BadRequest(
-                "Query without first_block".to_owned(),
-            ));
-        };
-        let chunk_guard = self
-            .state_manager
-            .clone()
-            .find_chunk(&dataset, first_block.into())?;
-        if chunk_guard.is_none() {
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk) else {
             return Err(QueryError::NotFound);
         };
 
@@ -135,7 +134,7 @@ impl Worker {
             let result = (move || {
                 let start_time = std::time::Instant::now();
 
-                let chunk = ParquetChunk::new(chunk_guard.as_ref().unwrap().as_str());
+                let chunk = ParquetChunk::new(chunk_guard.as_str());
                 let plan = query.compile();
                 let data = Vec::with_capacity(1024 * 1024);
                 let mut writer = sqd_query::JsonLinesWriter::new(data);
