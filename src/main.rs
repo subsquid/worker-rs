@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -115,11 +116,13 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     let agent_info = get_agent_info!();
     let transport_builder = P2PTransportBuilder::from_cli(args.transport, agent_info).await?;
     let peer_id = transport_builder.local_peer_id();
-    let info = Info::new(vec![
-        ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
-        ("peer_id".to_owned(), peer_id.to_string()),
-    ]);
-    let mut metrics_registry = Default::default();
+    let info = Info::new(vec![(
+        "version".to_owned(),
+        env!("CARGO_PKG_VERSION").to_owned(),
+    )]);
+    let mut metrics_registry = prometheus_client::registry::Registry::with_labels(
+        [(Cow::Borrowed("worker_id"), Cow::Owned(peer_id.to_string()))].into_iter(),
+    );
     sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
     metrics::register_metrics(&mut metrics_registry, info);
 
