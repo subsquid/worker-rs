@@ -1,13 +1,15 @@
-use std::{env, io::Write, sync::Arc, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
-use flate2::{write::DeflateEncoder, Compression};
 use futures::{Stream, StreamExt};
 use sqd_contract_client::Network;
-use sqd_messages::{query_error, query_executed, BitString, Heartbeat, Query, QueryExecuted};
+use sqd_messages::{
+    query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query, QueryExecuted,
+    QueryLogs,
+};
 use sqd_network_transport::{
-    P2PTransportBuilder, PeerId, WorkerConfig, WorkerEvent, WorkerTransportHandle,
+    P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -17,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::{
     cli::{self, Args},
     gateway_allocations::{self, allocations_checker::AllocationsChecker},
-    logs_storage::LogsStorage,
+    logs_storage::{LoadedLogs, LogsStorage},
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
@@ -28,9 +30,15 @@ use crate::{
 use super::worker::Worker;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
+const ALLOWED_TIME_LAG: Duration = Duration::from_secs(60);
+const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
+const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_LOGS_SIZE: usize =
+    sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 1024;
 
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
@@ -45,6 +53,8 @@ pub struct P2PController<EventStream> {
     network: Network,
     queries_tx: mpsc::Sender<(PeerId, Query)>,
     queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query)>>,
+    log_requests_tx: mpsc::Sender<(LogsRequest, ResponseChannel<QueryLogs>)>,
+    log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseChannel<QueryLogs>)>>,
 }
 
 pub async fn create_p2p_controller(
@@ -82,6 +92,7 @@ pub async fn create_p2p_controller(
     let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
+    let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
     Ok(P2PController {
         worker,
@@ -96,6 +107,8 @@ pub async fn create_p2p_controller(
         network,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
+        log_requests_tx,
+        log_requests_rx: UseOnce::new(log_requests_rx),
     })
 }
 
@@ -110,7 +123,8 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 cancellation_token.child_token(),
                 self.assignment_check_interval
             ),
-            // self._run_logs_loop(cancellation_token.child_token(), *LOGS_SEND_INTERVAL),
+            self.run_logs_loop(cancellation_token.child_token()),
+            self.run_logs_cleanup_loop(cancellation_token.child_token(), LOGS_CLEANUP_INTERVAL),
             self.worker.run(cancellation_token.child_token()),
             self.allocations_checker
                 .run(cancellation_token.child_token()),
@@ -150,23 +164,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         return;
                     }
                 };
-                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
-                let _ = encoder.write_all(
-                    status
-                        .unavailability_map
-                        .iter()
-                        .map(|v| *v as u8)
-                        .collect::<Vec<u8>>()
-                        .as_slice(),
-                );
-                let compressed_bytes = encoder.finish().unwrap();
-                let data_len = status.unavailability_map.len();
                 let heartbeat = Heartbeat {
                     assignment_id,
-                    missing_chunks: Some(BitString {
-                        data: compressed_bytes,
-                        size: data_len as u64,
-                    }),
+                    missing_chunks: Some(BitString::new(&status.unavailability_map)),
                     version: WORKER_VERSION.to_string(),
                     stored_bytes: Some(status.stored_bytes),
                 };
@@ -238,6 +238,44 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         info!("Assignment processing task finished");
     }
 
+    async fn run_logs_loop(&self, cancellation_token: CancellationToken) {
+        let requests = self.log_requests_rx.take().unwrap();
+        ReceiverStream::new(requests)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each(|(request, resp_chan)| async move {
+                if let Err(e) = self.handle_logs_request(request, resp_chan).await {
+                    warn!("Error handling logs request: {e:?}");
+                }
+            })
+            .await;
+        info!("Logs processing task finished");
+    }
+
+    async fn run_logs_cleanup_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        cleanup_interval: Duration,
+    ) {
+        let mut timer = tokio::time::interval(cleanup_interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        IntervalStream::new(timer)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each(|_| async move {
+                let timestamp = (std::time::SystemTime::now() - LOGS_KEEP_DURATION)
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("Invalid current time")
+                    .as_millis() as u64;
+                self.logs_storage
+                    .cleanup(timestamp)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!("Couldn't cleanup logs: {e:?}");
+                    });
+            })
+            .await;
+        info!("Logs cleanup task finished");
+    }
+
     async fn run_event_loop(&self, cancellation_token: CancellationToken) {
         let event_stream = self
             .raw_event_stream
@@ -259,7 +297,17 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         }
                     }
                 }
-                WorkerEvent::LogsRequest { .. } => todo!(),
+                WorkerEvent::LogsRequest { request, resp_chan } => {
+                    match self.log_requests_tx.try_send((request, resp_chan)) {
+                        Ok(_) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!("There are too many ongoing log requests");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -268,11 +316,6 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
     async fn handle_query(&self, peer_id: PeerId, query: Query) {
         let query_id = query.query_id.clone();
-
-        if !self.logs_storage.is_initialized() {
-            warn!("Logs storage not initialized. Cannot execute queries yet.");
-            return;
-        }
 
         let (result, retry_after) = self.process_query(peer_id, &query).await;
         if let Err(e) = &result {
@@ -285,6 +328,10 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
         self.send_query_result(query_id, result, retry_after);
 
         if let Some(log) = log {
+            if log.encoded_len() > MAX_LOGS_SIZE {
+                warn!("Query log is too big: {log:?}");
+                return;
+            }
             let result = self.logs_storage.save_log(log).await;
             if let Err(e) = result {
                 warn!("Couldn't save query log: {e:?}");
@@ -387,6 +434,35 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             result: Some(result),
             worker_version: WORKER_VERSION.to_string(),
         })
+    }
+
+    async fn handle_logs_request(
+        &self,
+        request: LogsRequest,
+        resp_chan: ResponseChannel<QueryLogs>,
+    ) -> Result<()> {
+        let msg = match self
+            .logs_storage
+            .get_logs(
+                request.from_timestamp_ms,
+                timestamp_now_ms() - ALLOWED_TIME_LAG.as_millis() as u64,
+                request.last_received_query_id,
+                MAX_LOGS_SIZE,
+            )
+            .await?
+        {
+            LoadedLogs::All(logs) => sqd_messages::QueryLogs {
+                queries_executed: logs,
+                has_more: false,
+            },
+            LoadedLogs::Partial(logs) => sqd_messages::QueryLogs {
+                queries_executed: logs,
+                has_more: true,
+            },
+        };
+        info!("Sending {} logs", msg.queries_executed.len());
+        self.transport_handle.send_logs(msg, resp_chan)?;
+        Ok(())
     }
 }
 

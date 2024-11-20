@@ -1,149 +1,282 @@
-use std::sync::atomic::Ordering;
-
 use anyhow::Result;
-use atomic_enum::atomic_enum;
 use sqd_messages::{ProstMsg, QueryExecuted};
-use tokio_rusqlite::Connection;
+use tokio_rusqlite::{named_params, Connection};
 
 pub const LOGS_PER_PAGE: usize = 256;
 
 pub struct LogsStorage {
     db: Connection,
-    init_state: AtomicInitState,
 }
 
-#[atomic_enum]
-#[derive(PartialEq)]
-enum InitState {
-    NotInitialized = 0,
-    Initializing = 1,
-    Initialized = 2,
+pub enum LoadedLogs {
+    All(Vec<QueryExecuted>),
+    Partial(Vec<QueryExecuted>),
 }
 
-// TODO: reimplement according to https://github.com/subsquid/sqd-network/issues/122
 impl LogsStorage {
     pub async fn new(logs_path: &str) -> Result<Self> {
         let db = Connection::open(logs_path).await?;
-        let state = db
-            .call(|db| {
-                db.execute_batch(
-                    r#"
-                    BEGIN;
-                    CREATE TABLE IF NOT EXISTS query_logs(seq_no INTEGER PRIMARY KEY, log_msg BLOB);
-                    CREATE TABLE IF NOT EXISTS next_seq_no(seq_no);
-                    COMMIT;"#,
-                )?;
-                let has_next_seq_no = db
-                    .prepare_cached("SELECT seq_no FROM next_seq_no")?
-                    .exists(())?;
-                match has_next_seq_no {
-                    false => Ok(InitState::NotInitialized),
-                    true => Ok(InitState::Initialized),
-                }
+
+        db.call(|db| {
+            // timestamp is in milliseconds
+            db.execute_batch(r"
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS query_logs_v2(query_id STRING PRIMARY KEY, timestamp INTEGER, log_msg BLOB);
+                CREATE INDEX IF NOT EXISTS idx_query_logs_v2_timestamp_query_id ON query_logs_v2(timestamp, query_id);
+                COMMIT;"
+            )?;
+            Ok(())
+        })
+        .await?;
+
+        Ok(Self { db })
+    }
+
+    pub async fn save_log(&self, log: QueryExecuted) -> Result<()> {
+        let query = log.query.as_ref().expect("Log should be well formed");
+        let timestamp = log.timestamp_ms;
+        let id = query.query_id.clone();
+        let log_msg = log.encode_to_vec();
+        // TODO: consider storing fields in separate columns
+        self.db
+            .call(move |db| {
+                db.prepare_cached(
+                    "INSERT INTO query_logs_v2(query_id, timestamp, log_msg) VALUES(?, ?, ?)",
+                )
+                .expect("Couldn't prepare INSERT query")
+                .execute((id, timestamp, log_msg))?;
+                Ok(())
             })
             .await?;
-
-        Ok(Self {
-            db,
-            init_state: state.into(),
-        })
-    }
-
-    pub fn is_initialized(&self) -> bool {
-        self.init_state.load(Ordering::SeqCst) == InitState::Initialized
-    }
-
-    pub async fn save_log(&self, _log: QueryExecuted) -> Result<()> {
-        // assert!(self.is_initialized());
-        // self.db
-        //     .call(move |db| {
-        //         let tx = db.transaction()?;
-        //         log.timestamp_ms = timestamp_now_ms();
-        //         tx.prepare_cached("INSERT INTO query_logs SELECT seq_no, ? FROM next_seq_no")
-        //             .expect("Couldn't prepare logs insertion query")
-        //             .execute([log.encode_to_vec()])?;
-        //         tx.prepare_cached("UPDATE next_seq_no SET seq_no = seq_no + 1")
-        //             .expect("Couldn't prepare next_seq_no update query")
-        //             .execute(())?;
-        //         tx.commit()?;
-        //         Ok(())
-        //     })
-        //     .await?;
         Ok(())
     }
 
-    /// All logs with sequence numbers up to `last_collected_seq_no` have been saved by the logs collector
-    /// and should be discarded from the storage.
-    pub async fn _logs_collected(&self, last_collected_seq_no: Option<u64>) {
-        tracing::info!(
-            "Logs up to {} collected",
-            last_collected_seq_no.unwrap_or(0)
-        );
-        let next_seq_no = last_collected_seq_no.map(|x| x + 1).unwrap_or(0);
-        match self.init_state.compare_exchange(
-            InitState::NotInitialized,
-            InitState::Initializing,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            Ok(InitState::NotInitialized) => {
-                self.db
-                    .call_unwrap(move |db| {
-                        db.execute("INSERT INTO next_seq_no VALUES(?)", [next_seq_no])
-                    })
-                    .await
-                    .expect("Couldn't initialize logs storage");
-                self.init_state
-                    .store(InitState::Initialized, Ordering::SeqCst);
-                tracing::info!("Initialized logs storage");
-            }
-            Err(InitState::Initializing) => {
-                tracing::warn!("Trying to initialize logs storage concurrently");
-            }
-            Err(InitState::Initialized) => {
-                self.db
-                    .call_unwrap(move |db| {
-                        let stored_next_seq_no: u64 = db
-                            .prepare_cached("SELECT seq_no FROM next_seq_no")
-                            .expect("Couldn't prepare next_seq_no query")
-                            .query_row((), |row| row.get(0))
-                            .expect("Couldn't find next_seq_no");
-                        if stored_next_seq_no < next_seq_no {
-                            panic!(
-                                "Trying to collect logs up to seq_no {} while next_seq_no is {}",
-                                next_seq_no, stored_next_seq_no
-                            );
-                        }
-                        db.prepare_cached("DELETE FROM query_logs WHERE seq_no < ?")
-                            .expect("Couldn't prepare logs deletion query")
-                            .execute([next_seq_no])
-                    })
-                    .await
-                    .expect("Couldn't delete logs from DB");
-            }
-            _ => unreachable!("Invalid compare_exchange result while handling collected logs"),
-        };
-    }
-
-    pub async fn _get_logs(&self, from_seq_no: Option<u64>) -> Result<Vec<QueryExecuted>> {
-        let from_seq_no = from_seq_no.unwrap_or(0);
+    // Loads all logs from the given range ordered by timestamps.
+    // If from_query_id is given and there are multiple logs with the timestamp equal `from_timestamp_ms`,
+    // the logs with query_id > from_query_id will be returned for that timestamp.
+    //
+    // Note that logs are not always added in the order of their timestamps,
+    // so only the logs in the distant past should be fetched with this method.
+    pub async fn get_logs(
+        &self,
+        from_timestamp_ms: u64,
+        to_timestamp_ms: u64,
+        from_query_id: Option<String>,
+        max_bytes: usize,
+    ) -> Result<LoadedLogs> {
         self.db
             .call_unwrap(move |db| {
                 let mut stmt = db
                     .prepare_cached(
-                        "SELECT seq_no, log_msg FROM query_logs WHERE seq_no >= ? ORDER BY seq_no LIMIT ?",
+                        r"
+                        SELECT log_msg, query_id
+                        FROM query_logs_v2
+                        WHERE (timestamp, query_id) > (:from_timestamp, IFNULL(:from_query_id, ''))
+                            AND timestamp <= :to_timestamp
+                        ORDER BY timestamp, query_id",
                     )
                     .expect("Couldn't prepare logs query");
-                let logs = stmt.query([from_seq_no, LOGS_PER_PAGE as u64])?.and_then(|row| {
-                    let seq_no: u64 = row.get(0)?;
-                    let log_msg: Vec<u8> = row.get(1)?;
-                    let mut log: QueryExecuted =
-                        QueryExecuted::decode(&log_msg[..]).expect("Invalid log proto in DB");
-                    // log.seq_no = Some(seq_no);
-                    Ok(log)
-                });
-                logs.collect::<Result<Vec<_>>>()
+                let mut rows = stmt.query(named_params! {
+                    ":from_timestamp": from_timestamp_ms,
+                    ":from_query_id": from_query_id,
+                    ":to_timestamp": to_timestamp_ms,
+                })?;
+
+                let mut total_len = 0;
+                let mut logs = Vec::new();
+                while let Some(row) = rows.next()? {
+                    let log_msg: Vec<u8> = row.get(0)?;
+                    total_len += log_msg.len();
+                    if total_len > max_bytes {
+                        return Ok(LoadedLogs::Partial(logs));
+                    }
+                    let log = QueryExecuted::decode(&log_msg[..]).expect("Invalid log proto in DB");
+                    logs.push(log);
+                }
+                Ok(LoadedLogs::All(logs))
             })
             .await
+    }
+
+    pub async fn cleanup(&self, until: u64) -> Result<()> {
+        self.db
+            .call(move |db| {
+                db.prepare_cached(
+                    "
+                    DELETE FROM query_logs_v2 WHERE timestamp < ?;
+                    VACUUM;",
+                )
+                .expect("Couldn't prepare cleanup query")
+                .execute([until])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::panic;
+
+    use sqd_messages::{query_error, query_executed::Result};
+
+    use super::*;
+
+    fn query_log(id: impl Into<String>, timestamp_ms: u64) -> QueryExecuted {
+        QueryExecuted {
+            query: Some(sqd_messages::Query {
+                query_id: id.into(),
+                dataset: "eth-main".to_owned(),
+                query: [' '; 100].iter().collect(),
+                timestamp_ms,
+                ..Default::default()
+            }),
+            timestamp_ms,
+            result: Some(Result::Ok(Default::default())),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logs_storage() {
+        let logs_storage = LogsStorage::new(":memory:").await.unwrap();
+
+        let mut logs = [
+            query_log("a", 10000), // 125 bytes
+            query_log("b", 10100), // 140 bytes
+            query_log("c", 10050), // 125 bytes
+            query_log("d", 10100), // 125 bytes
+            query_log("e", 10200), // 125 bytes
+        ];
+        logs[1].result = Some(query_error::Err::BadRequest("Invalid query".to_owned()).into());
+        assert_eq!(logs[0].encoded_len(), 125);
+        assert_eq!(logs[1].encoded_len(), 140);
+
+        for log in logs.clone() {
+            logs_storage.save_log(log).await.unwrap();
+        }
+
+        let LoadedLogs::All(loaded) = logs_storage
+            .get_logs(10000, 10500, None, 1000000)
+            .await
+            .unwrap()
+        else {
+            panic!("Expected LoadedLogs::All");
+        };
+        assert_eq!(loaded.len(), 5);
+        assert_eq!(loaded[0].query.as_ref().unwrap().query_id, "a");
+        assert_eq!(loaded[0].result, Some(Result::Ok(Default::default())));
+        assert_eq!(loaded[1].query.as_ref().unwrap().query_id, "c");
+        assert_eq!(loaded[2].query.as_ref().unwrap().query_id, "b");
+        assert_eq!(loaded[2].result, logs[1].result);
+        assert_eq!(loaded[3].query.as_ref().unwrap().query_id, "d");
+        assert_eq!(loaded[4].query.as_ref().unwrap().query_id, "e");
+
+        for (index, (call, expected, drained)) in [
+            (
+                logs_storage.get_logs(10000, 11000, None, 125),
+                vec!["a"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10000, 11000, None, 380),
+                vec!["a", "c"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, None, 1000),
+                vec!["b", "d", "e"],
+                true,
+            ),
+            (
+                logs_storage.get_logs(10050, 11000, None, 390),
+                vec!["c", "b", "d"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10200, 11000, None, 1000),
+                vec!["e"],
+                true,
+            ),
+            (
+                logs_storage.get_logs(15000, 11000, None, 1000),
+                vec![],
+                true,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 125),
+                vec!["e"],
+                true,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 300),
+                vec!["d", "e"],
+                true,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let logs = match call.await.unwrap() {
+                LoadedLogs::All(logs) => {
+                    assert!(drained);
+                    logs
+                }
+                LoadedLogs::Partial(logs) => {
+                    assert!(!drained);
+                    logs
+                }
+            };
+            assert_eq!(
+                logs.into_iter()
+                    .map(|log| log.query.unwrap().query_id)
+                    .collect::<Vec<_>>(),
+                expected,
+                "case #{}",
+                index,
+            );
+        }
+
+        logs_storage.cleanup(10100).await.unwrap();
+        for (index, (call, expected, drained)) in [
+            (
+                logs_storage.get_logs(0, 11000, None, 1000),
+                vec!["b", "d", "e"],
+                true,
+            ),
+            (
+                logs_storage.get_logs(10000, 11000, None, 150),
+                vec!["b"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 150),
+                vec!["d"],
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let logs = match call.await.unwrap() {
+                LoadedLogs::All(logs) => {
+                    assert!(drained);
+                    logs
+                }
+                LoadedLogs::Partial(logs) => {
+                    assert!(!drained);
+                    logs
+                }
+            };
+            assert_eq!(
+                logs.into_iter()
+                    .map(|log| log.query.unwrap().query_id)
+                    .collect::<Vec<_>>(),
+                expected,
+                "case #{}",
+                index,
+            );
+        }
     }
 }

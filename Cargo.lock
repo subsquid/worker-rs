@@ -539,17 +539,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atomic_enum"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99e1aca718ea7b89985790c94aad72d77533063fe00bc497bb79a7c2dae6a661"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.82",
-]
-
-[[package]]
 name = "attohttpc"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6894,7 +6883,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=18e463b#18e463b2b98d3e89ab3fc66b7a95f045281201f2"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=310d32a#310d32ab696cbd2a108a3f5fd24aaa5044c78b04"
 dependencies = [
  "async-trait",
  "clap",
@@ -6911,8 +6900,10 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=18e463b#18e463b2b98d3e89ab3fc66b7a95f045281201f2"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=310d32a#310d32ab696cbd2a108a3f5fd24aaa5044c78b04"
 dependencies = [
+ "bytemuck",
+ "flate2",
  "hex",
  "libp2p",
  "prost 0.13.3",
@@ -6925,7 +6916,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "2.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=18e463b#18e463b2b98d3e89ab3fc66b7a95f045281201f2"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=310d32a#310d32ab696cbd2a108a3f5fd24aaa5044c78b04"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7000,7 +6991,6 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "atomic_enum",
  "axum",
  "base64 0.21.7",
  "bs58",
