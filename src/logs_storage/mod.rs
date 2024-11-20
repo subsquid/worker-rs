@@ -34,7 +34,7 @@ impl LogsStorage {
 
     pub async fn save_log(&self, log: QueryExecuted) -> Result<()> {
         let query = log.query.as_ref().expect("Log should be well formed");
-        let timestamp = query.timestamp_ms;
+        let timestamp = log.timestamp_ms;
         let id = query.query_id.clone();
         let log_msg = log.encode_to_vec();
         // TODO: consider storing fields in separate columns
@@ -132,6 +132,7 @@ mod tests {
                 timestamp_ms,
                 ..Default::default()
             }),
+            timestamp_ms,
             result: Some(Result::Ok(Default::default())),
             ..Default::default()
         }
@@ -142,15 +143,15 @@ mod tests {
         let logs_storage = LogsStorage::new(":memory:").await.unwrap();
 
         let mut logs = [
-            query_log("a", 10000), // 122 bytes
-            query_log("b", 10100), // 137 bytes
-            query_log("c", 10050), // 122 bytes
-            query_log("d", 10100), // 122 bytes
-            query_log("e", 10200), // 122 bytes
+            query_log("a", 10000), // 125 bytes
+            query_log("b", 10100), // 140 bytes
+            query_log("c", 10050), // 125 bytes
+            query_log("d", 10100), // 125 bytes
+            query_log("e", 10200), // 125 bytes
         ];
         logs[1].result = Some(query_error::Err::BadRequest("Invalid query".to_owned()).into());
-        assert_eq!(logs[0].encoded_len(), 122);
-        assert_eq!(logs[1].encoded_len(), 137);
+        assert_eq!(logs[0].encoded_len(), 125);
+        assert_eq!(logs[1].encoded_len(), 140);
 
         for log in logs.clone() {
             logs_storage.save_log(log).await.unwrap();
@@ -174,7 +175,7 @@ mod tests {
 
         for (index, (call, expected, drained)) in [
             (
-                logs_storage.get_logs(10000, 11000, None, 122),
+                logs_storage.get_logs(10000, 11000, None, 125),
                 vec!["a"],
                 false,
             ),
@@ -189,7 +190,7 @@ mod tests {
                 true,
             ),
             (
-                logs_storage.get_logs(10050, 11000, None, 381),
+                logs_storage.get_logs(10050, 11000, None, 390),
                 vec!["c", "b", "d"],
                 false,
             ),
@@ -204,7 +205,7 @@ mod tests {
                 true,
             ),
             (
-                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 122),
+                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 125),
                 vec!["e"],
                 true,
             ),
