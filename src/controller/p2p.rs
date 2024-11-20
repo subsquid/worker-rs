@@ -5,8 +5,8 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use sqd_contract_client::Network;
 use sqd_messages::{
-    query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query, QueryExecuted,
-    QueryLogs,
+    assignments, query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query,
+    QueryExecuted, QueryLogs,
 };
 use sqd_network_transport::{
     protocol, Keypair, P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent,
@@ -222,6 +222,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     match assignment.dataset_chunks_for_peer_id(&peer_id.to_string()) {
                         Some(chunks) => chunks,
                         None => {
+                            metrics::set_status(metrics::WorkerStatus::NotRegistered);
                             error!("Can not get assigned chunks.");
                             return;
                         }
@@ -234,21 +235,37 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                             return;
                         }
                     };
-                let status = match assignment.worker_status(peer_id.to_string()) {
-                    Ok(status) => status,
-                    Err(error) => {
-                        error!("Can not get assigned headers: {error:?}");
-                        return;
-                    }
-                };
-                let datasets_index = DatasetsIndex::from(calculated_chunks, headers, assignment.id);
+                let datasets_index =
+                    DatasetsIndex::from(calculated_chunks, headers, assignment.id.clone());
                 let chunks = datasets_index.create_chunks_set();
                 self.worker.set_datasets_index(datasets_index);
                 self.worker.set_desired_chunks(chunks);
-                if status.to_ascii_lowercase() == "ok" {
-                    info!("New assignment applied");
-                } else {
-                    warn!("Worker is considered unreliable: {status}");
+
+                let status = match assignment.worker_status(peer_id.to_string()) {
+                    Some(status) => status,
+                    None => {
+                        error!("Can not get worker status");
+                        metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                        return;
+                    }
+                };
+                match status {
+                    assignments::WorkerStatus::Ok => {
+                        info!("New assignment applied");
+                        metrics::set_status(metrics::WorkerStatus::Active);
+                    }
+                    assignments::WorkerStatus::Unreliable => {
+                        warn!("Worker is considered unreliable");
+                        metrics::set_status(metrics::WorkerStatus::Unreliable);
+                    }
+                    assignments::WorkerStatus::DeprecatedVersion => {
+                        warn!("Worker should be updated");
+                        metrics::set_status(metrics::WorkerStatus::DeprecatedVersion);
+                    }
+                    assignments::WorkerStatus::UnsupportedVersion => {
+                        warn!("Worker version is unsupported");
+                        metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
+                    }
                 }
             })
             .await;
@@ -343,7 +360,9 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             tracing::warn!("Rejected query with invalid signature from {}", peer_id);
             return false;
         }
-        if query.timestamp_ms.abs_diff(timestamp_now_ms()) as u128 > protocol::MAX_TIME_LAG.as_millis() {
+        if query.timestamp_ms.abs_diff(timestamp_now_ms()) as u128
+            > protocol::MAX_TIME_LAG.as_millis()
+        {
             tracing::warn!(
                 "Rejected query with invalid timestamp ({}) from {}",
                 query.timestamp_ms,

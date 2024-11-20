@@ -11,8 +11,9 @@ use crate::query::result::{QueryError, QueryResult};
 pub enum WorkerStatus {
     Starting,
     NotRegistered,
+    DeprecatedVersion,
     UnsupportedVersion,
-    Jailed,
+    Unreliable,
     Active,
 }
 
@@ -146,8 +147,9 @@ impl prometheus_client::encoding::EncodeLabelValue for WorkerStatus {
         let status = match self {
             WorkerStatus::Starting => "starting",
             WorkerStatus::NotRegistered => "not_registered",
+            WorkerStatus::DeprecatedVersion => "deprecated_version",
             WorkerStatus::UnsupportedVersion => "unsupported_version",
-            WorkerStatus::Jailed => "jailed",
+            WorkerStatus::Unreliable => "unreliable",
             WorkerStatus::Active => "active",
         };
         encoder.write_str(status)?;
