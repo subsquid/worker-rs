@@ -90,9 +90,8 @@ pub async fn create_p2p_controller(
     )
     .await?;
 
-    let mut config = WorkerConfig::new();
-    config.service_nodes = vec![args.scheduler_id, args.logs_collector_id];
-    let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
+    let (event_stream, transport_handle) =
+        transport_builder.build_worker(WorkerConfig::new()).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);

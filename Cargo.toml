@@ -53,9 +53,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 url = "2.5.2"
 walkdir = "2.5.0"
 
-sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "ae53674", version = "1.1.0" }
-sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "ae53674", version = "2.0.0", features = ["bitstring", "assignment_reader"] }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "ae53674", version = "2.0.0", features = ["worker", "metrics"] }
+sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "7d24593", version = "1.1.0" }
+sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "7d24593", version = "2.0.0", features = ["bitstring", "assignment_reader"] }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "7d24593", version = "2.0.0", features = ["worker", "metrics"] }
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "f7f39e4", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "f7f39e4" }
 

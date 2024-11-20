@@ -20,7 +20,7 @@ use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
@@ -55,9 +55,12 @@ fn init_single_threaded(args: &Args) -> anyhow::Result<()> {
 }
 
 fn setup_tracing() -> Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::builder().parse_lossy(
+        std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).unwrap_or("info".to_string()),
+    );
     let fmt = tracing_subscriber::fmt::layer()
         .compact()
-        .with_filter(EnvFilter::from_default_env());
+        .with_filter(env_filter);
     tracing_subscriber::registry()
         .with(fmt)
         .with(sentry::integrations::tracing::layer())
@@ -98,8 +101,9 @@ fn create_cancellation_token() -> Result<CancellationToken> {
     Ok(token)
 }
 
-async fn run(args: Args) -> anyhow::Result<()> {
+async fn run(mut args: Args) -> anyhow::Result<()> {
     setup_tracing()?;
+    args.fill_defaults(); // tracing should be initialized at this point
     let _sentry_guard = setup_sentry(&args);
 
     let state_manager =
@@ -129,7 +133,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     return Ok(());
                 },
                 controller = create_p2p_controller(
-                    worker.clone(),
+                    worker,
                     transport_builder,
                     args_clone,
                 ) => controller
@@ -138,8 +142,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
             anyhow::Ok(())
         },
         tokio::spawn(
-            HttpServer::new(worker.clone(), metrics_registry)
-                .run(args.http_port, cancellation_token.clone())
+            HttpServer::new(peer_id, metrics_registry)
+                .run(args.prometheus_port, cancellation_token.clone())
         )
     );
     controller_result?;

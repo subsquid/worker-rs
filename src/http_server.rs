@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::controller::worker::Worker;
+use crate::metrics;
 
 use axum::{
     http::{header, HeaderMap},
@@ -9,20 +9,20 @@ use axum::{
     Json,
 };
 use prometheus_client::{encoding::text::encode, registry::Registry};
+use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 
-async fn get_status(worker: Arc<Worker>) -> Json<serde_json::Value> {
-    let status = worker.status();
+async fn get_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "state": {
-            "available": status.available,
-            "downloading": status.downloading,
+            "available": metrics::CHUNKS_AVAILABLE.get(),
+            "downloading": metrics::CHUNKS_DOWNLOADING.get(),
         }
     }))
 }
 
-async fn get_peer_id(worker: Arc<Worker>) -> String {
-    worker.peer_id.to_string()
+async fn get_peer_id(peer_id: PeerId) -> String {
+    peer_id.to_string()
 }
 
 async fn get_metrics(registry: Arc<Registry>) -> impl IntoResponse {
@@ -50,23 +50,11 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(worker: Arc<Worker>, metrics_registry: Registry) -> Self {
+    pub fn new(peer_id: PeerId, metrics_registry: Registry) -> Self {
         let metrics_registry = Arc::new(metrics_registry);
         let router = axum::Router::new()
-            .route(
-                "/worker/status",
-                get({
-                    let worker = worker.clone();
-                    move || get_status(worker)
-                }),
-            )
-            .route(
-                "/worker/peer-id",
-                get({
-                    let worker = worker.clone();
-                    move || get_peer_id(worker)
-                }),
-            )
+            .route("/worker/status", get(get_status))
+            .route("/worker/peer-id", get(move || get_peer_id(peer_id)))
             .route("/metrics", get(move || get_metrics(metrics_registry)));
         let router = Self::add_common_layers(router);
         Self { router }
