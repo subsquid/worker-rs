@@ -382,7 +382,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
 
         let (result, retry_after) = self.process_query(peer_id, &query).await;
         if let Err(e) = &result {
-            warn!("Query {query_id} execution failed: {e:?}");
+            warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
         }
 
         metrics::query_executed(&result);
