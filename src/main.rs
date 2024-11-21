@@ -32,12 +32,8 @@ use sqd_worker::http_server::Server as HttpServer;
 use sqd_worker::storage::manager::StateManager;
 use sqd_worker::{metrics, run_all};
 
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // This function is guaranteed to run before any other threads are spawned.
 fn init_single_threaded(args: &Args) -> anyhow::Result<()> {

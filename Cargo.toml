@@ -27,6 +27,7 @@ glob = "0.3.1"
 hmac = "0.12.1"
 itertools = "0.12.0"
 lazy_static = "1.4.0"
+mimalloc = "0.1.43"
 parking_lot = "0.12.1"
 prometheus-client = "0.22.2"
 prost = "0.12.3"
@@ -58,9 +59,6 @@ sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "195
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "195d8bd", version = "2.0.0", features = ["worker", "metrics"] }
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "f7f39e4", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "f7f39e4" }
-
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.6"
 
 [profile.release]
 debug = true
