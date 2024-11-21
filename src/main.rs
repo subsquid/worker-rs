@@ -65,12 +65,14 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
-fn setup_sentry(args: &Args) -> Option<sentry::ClientInitGuard> {
+fn setup_sentry(args: &Args, peer_id: String) -> Option<sentry::ClientInitGuard> {
     args.sentry_dsn.as_ref().map(|dsn| {
         sentry::init((
             dsn.as_str(),
             sentry::ClientOptions {
                 release: sentry::release_name!(),
+                environment: Some(args.transport.rpc.network.to_string().into()),
+                server_name: Some(peer_id.into()),
                 traces_sample_rate: args.sentry_traces_sample_rate,
                 ..Default::default()
             },
@@ -101,13 +103,10 @@ fn create_cancellation_token() -> Result<CancellationToken> {
 async fn run(mut args: Args) -> anyhow::Result<()> {
     setup_tracing()?;
     args.fill_defaults(); // tracing should be initialized at this point
-    let _sentry_guard = setup_sentry(&args);
+    let args_clone = args.clone();
 
     let state_manager =
         StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?;
-
-    let cancellation_token = create_cancellation_token()?;
-    let args_clone = args.clone();
 
     let agent_info = get_agent_info!();
     let transport_builder = P2PTransportBuilder::from_cli(args.transport, agent_info).await?;
@@ -122,30 +121,20 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
     metrics::register_metrics(&mut metrics_registry, info);
 
-    let worker = Arc::new(Worker::new(state_manager, args.parallel_queries, peer_id));
+    let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
 
-    let (controller_result, server_result) = run_all!(
+    let worker = Arc::new(Worker::new(state_manager, args.parallel_queries, peer_id));
+    let controller = create_p2p_controller(worker, transport_builder, args_clone).await?;
+
+    let cancellation_token = create_cancellation_token()?;
+    let ((), server_result) = run_all!(
         cancellation_token,
-        async {
-            let controller = tokio::select! {
-                _ = cancellation_token.cancelled() => {
-                    return Ok(());
-                },
-                controller = create_p2p_controller(
-                    worker,
-                    transport_builder,
-                    args_clone,
-                ) => controller
-            };
-            controller?.run(cancellation_token.clone()).await;
-            anyhow::Ok(())
-        },
+        controller.run(cancellation_token.clone()),
         tokio::spawn(
             HttpServer::new(peer_id, metrics_registry)
                 .run(args.prometheus_port, cancellation_token.clone())
         )
     );
-    controller_result?;
     server_result??;
 
     tracing::info!("Shutting down");

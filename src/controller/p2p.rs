@@ -197,11 +197,8 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Checking assignment");
-                let network_state_filename = match self.network {
-                    Network::Tethys => "network-state-tethys.json",
-                    Network::Mainnet => "network-state-mainnet.json",
-                };
-                let network_state_url =
+                let network_state_filename = format!("network-state-{}.json", self.network);
+                let network_state_url =  // TODO: put to CLI args
                     format!("https://metadata.sqd-datasets.io/{network_state_filename}");
 
                 let latest_assignment = self.worker.get_assignment_id();
