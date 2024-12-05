@@ -216,7 +216,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     };
                 let peer_id = self.worker_id;
                 let calculated_chunks =
-                    match assignment.dataset_chunks_for_peer_id(&peer_id.to_string()) {
+                    match assignment.dataset_chunks_for_peer_id(&peer_id) {
                         Some(chunks) => chunks,
                         None => {
                             metrics::set_status(metrics::WorkerStatus::NotRegistered);
@@ -225,7 +225,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                         }
                     };
                 let headers =
-                    match assignment.headers_for_peer_id(&peer_id.to_string(), &self.private_key) {
+                    match assignment.headers_for_peer_id(&peer_id, &self.private_key) {
                         Ok(headers) => headers,
                         Err(error) => {
                             error!("Can not get assigned headers: {error:?}");
@@ -238,7 +238,7 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                 self.worker.set_datasets_index(datasets_index);
                 self.worker.set_desired_chunks(chunks);
 
-                let status = match assignment.worker_status(peer_id.to_string()) {
+                let status = match assignment.worker_status(&peer_id) {
                     Some(status) => status,
                     None => {
                         error!("Can not get worker status");
