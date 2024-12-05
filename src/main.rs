@@ -124,17 +124,26 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
 
     let worker = Arc::new(Worker::new(state_manager, args.parallel_queries, peer_id));
-    let controller = create_p2p_controller(worker, transport_builder, args_clone).await?;
 
     let cancellation_token = create_cancellation_token()?;
-    let ((), server_result) = run_all!(
+    let controller_fut = async {
+        let controller = tokio::select!{
+            controller = create_p2p_controller(worker, transport_builder, args_clone) => controller?,
+            _ = cancellation_token.cancelled() => return Ok(()),
+        };
+        controller.run(cancellation_token.clone()).await;
+        anyhow::Ok(())
+    };
+
+    let (controller_result, server_result) = run_all!(
         cancellation_token,
-        controller.run(cancellation_token.clone()),
+        controller_fut,
         tokio::spawn(
             HttpServer::new(peer_id, metrics_registry)
-                .run(args.prometheus_port, cancellation_token.clone())
-        )
+                .run(args.prometheus_port, cancellation_token.child_token())
+        ),
     );
+    controller_result?;
     server_result??;
 
     tracing::info!("Shutting down");
