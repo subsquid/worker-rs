@@ -85,9 +85,11 @@ impl StateManager {
                 downloader.cancel(&chunk);
             }
 
-            for chunk in self.state.lock().take_removals() {
+            let removals = self.state.lock().take_removals();
+            for chunk in removals {
                 info!("Removing chunk {chunk}");
                 self.drop_chunk(&chunk)
+                    .await
                     .unwrap_or_else(|_| panic!("Couldn't remove chunk {chunk}"));
                 metrics::CHUNKS_REMOVED.inc();
             }
@@ -178,11 +180,11 @@ impl StateManager {
     }
 
     #[instrument(err, skip(self))]
-    fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
+    async fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
         let path = self.chunk_path(chunk);
         let tmp = add_temp_prefix(&path)?;
-        std::fs::rename(&path, &tmp)?;
-        std::fs::remove_dir_all(tmp)?;
+        tokio::fs::rename(&path, &tmp).await?;
+        tokio::fs::remove_dir_all(tmp).await?;
         layout::clean_chunk_ancestors(path)?;
         Ok(())
     }

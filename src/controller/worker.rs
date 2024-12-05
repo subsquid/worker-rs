@@ -96,9 +96,7 @@ impl Worker {
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        self.state_manager
-            .run(cancellation_token.child_token())
-            .await
+        self.state_manager.run(cancellation_token).await
     }
 
     async fn execute_query(
