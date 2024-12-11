@@ -113,25 +113,31 @@ impl StateManager {
         let status = self.state.lock().status();
         let stored_bytes = get_directory_size(&self.fs.root);
         let datasets_index = self.datasets_index.lock();
+        let assignment_id = datasets_index.get_assignment_id();
         let ordinals_len = datasets_index.get_ordinals_len();
         let mut unavailability_map: Vec<bool> = vec![true; ordinals_len];
-        for chunk_ref in &status.available {
-            if let Some(ordinal) = datasets_index.get_ordinal(&chunk_ref.dataset, &chunk_ref.chunk)
-            {
-                unavailability_map[ordinal as usize] = false
-            } else {
-                warn!(
-                    "Ordinal for {:?} {:?} not set",
-                    &chunk_ref.dataset, &chunk_ref.chunk
-                );
+        if assignment_id.is_some() {
+            for chunk_ref in &status.available {
+                if let Some(ordinal) =
+                    datasets_index.get_ordinal(&chunk_ref.dataset, &chunk_ref.chunk)
+                {
+                    unavailability_map[ordinal as usize] = false
+                } else {
+                    warn!(
+                        "Ordinal for {:?} {:?} not set",
+                        &chunk_ref.dataset, &chunk_ref.chunk
+                    );
+                }
             }
+        } else {
+            info!("Assignment is not present yet, can't report missing chunks");
         }
         Status {
             available: to_ranges(status.available),
             downloading: to_ranges(status.downloading),
             unavailability_map,
             stored_bytes,
-            assignment_id: datasets_index.get_assignment_id(),
+            assignment_id,
         }
     }
 
