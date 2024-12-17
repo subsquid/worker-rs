@@ -6911,7 +6911,7 @@ dependencies = [
 [[package]]
 name = "sqd-polars"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=f7f39e4#f7f39e4bb8bae127f7b85763ed22c87eac0a6d23"
+source = "git+https://github.com/subsquid/data.git?rev=7ab6807#7ab6807306d35852b0957264486eef70bba80098"
 dependencies = [
  "anyhow",
  "arrow",
@@ -6923,12 +6923,12 @@ dependencies = [
 [[package]]
 name = "sqd-primitives"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=f7f39e4#f7f39e4bb8bae127f7b85763ed22c87eac0a6d23"
+source = "git+https://github.com/subsquid/data.git?rev=7ab6807#7ab6807306d35852b0957264486eef70bba80098"
 
 [[package]]
 name = "sqd-query"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=f7f39e4#f7f39e4bb8bae127f7b85763ed22c87eac0a6d23"
+source = "git+https://github.com/subsquid/data.git?rev=7ab6807#7ab6807306d35852b0957264486eef70bba80098"
 dependencies = [
  "anyhow",
  "arrow",
@@ -6949,7 +6949,7 @@ dependencies = [
 
 [[package]]
 name = "sqd-worker"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "async-stream",
