@@ -13,6 +13,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::{
+        chunk_ordinals::Ordinals,
         datasets_index::DatasetsIndex,
         manager::{self, StateManager},
     },
@@ -55,8 +56,13 @@ impl Worker {
         self.state_manager.set_datasets_index(datasets_index);
     }
 
+    pub fn populate_with_ordinals(&self, ordinals: Ordinals, timestamp: u64) {
+        self.state_manager
+            .populate_with_ordinals(ordinals, timestamp);
+    }
+
     pub fn get_assignment_id(&self) -> Option<String> {
-        self.state_manager.get_assignment_id()
+        self.state_manager.get_latest_assignment_id()
     }
 
     pub fn stop_downloads(&self) {

@@ -27,7 +27,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
-    storage::datasets_index::DatasetsIndex,
+    storage::{chunk_ordinals::Ordinals, datasets_index::DatasetsIndex},
     util::{timestamp_now_ms, UseOnce},
 };
 
@@ -277,11 +277,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                         return;
                     }
                 };
-                let datasets_index =
-                    DatasetsIndex::from(calculated_chunks, headers, assignment.id.clone());
+                let datasets_index = DatasetsIndex::from(calculated_chunks.clone(), headers);
                 let chunks = datasets_index.create_chunks_set();
+                let ordinals = Ordinals::new(calculated_chunks, assignment.id.clone());
                 self.worker.set_datasets_index(datasets_index);
                 self.worker.set_desired_chunks(chunks);
+                self.worker
+                    .populate_with_ordinals(ordinals, assignment.effective_from);
 
                 let status = match assignment.worker_status(&peer_id) {
                     Some(status) => status,
