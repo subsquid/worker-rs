@@ -49,6 +49,7 @@ pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
     heartbeat_interval: Duration,
     assignment_check_interval: Duration,
+    assignment_fetch_timeout: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
@@ -100,6 +101,7 @@ pub async fn create_p2p_controller(
         worker,
         heartbeat_interval: args.heartbeat_interval,
         assignment_check_interval: args.assignment_check_interval,
+        assignment_fetch_timeout: args.assignment_fetch_timeout,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(args.data_dir.join("logs.db").as_str()).await?,
@@ -202,36 +204,39 @@ impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
                     format!("https://metadata.sqd-datasets.io/{network_state_filename}");
 
                 let latest_assignment = self.worker.get_assignment_id();
-                let assignment =
-                    match Assignment::try_download(network_state_url, latest_assignment).await {
-                        Ok(Some(assignment)) => assignment,
-                        Ok(None) => {
-                            info!("Assignment has not been changed");
-                            return;
-                        }
-                        Err(err) => {
-                            error!("Unable to get assignment: {err:?}");
-                            return;
-                        }
-                    };
+                let assignment = match tokio::time::timeout(
+                    self.assignment_fetch_timeout,
+                    Assignment::try_download(network_state_url, latest_assignment),
+                )
+                .await
+                .unwrap_or_else(|e| Err(e.into()))
+                {
+                    Ok(Some(assignment)) => assignment,
+                    Ok(None) => {
+                        info!("Assignment has not been changed");
+                        return;
+                    }
+                    Err(err) => {
+                        error!("Unable to get assignment: {err:?}");
+                        return;
+                    }
+                };
                 let peer_id = self.worker_id;
-                let calculated_chunks =
-                    match assignment.dataset_chunks_for_peer_id(&peer_id) {
-                        Some(chunks) => chunks,
-                        None => {
-                            metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                            error!("Can not get assigned chunks.");
-                            return;
-                        }
-                    };
-                let headers =
-                    match assignment.headers_for_peer_id(&peer_id, &self.private_key) {
-                        Ok(headers) => headers,
-                        Err(error) => {
-                            error!("Can not get assigned headers: {error:?}");
-                            return;
-                        }
-                    };
+                let calculated_chunks = match assignment.dataset_chunks_for_peer_id(&peer_id) {
+                    Some(chunks) => chunks,
+                    None => {
+                        metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                        error!("Can not get assigned chunks.");
+                        return;
+                    }
+                };
+                let headers = match assignment.headers_for_peer_id(&peer_id, &self.private_key) {
+                    Ok(headers) => headers,
+                    Err(error) => {
+                        error!("Can not get assigned headers: {error:?}");
+                        return;
+                    }
+                };
                 let datasets_index =
                     DatasetsIndex::from(calculated_chunks, headers, assignment.id.clone());
                 let chunks = datasets_index.create_chunks_set();
