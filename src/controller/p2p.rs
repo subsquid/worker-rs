@@ -117,22 +117,62 @@ pub async fn create_p2p_controller(
     })
 }
 
-impl<EventStream: Stream<Item = WorkerEvent>> P2PController<EventStream> {
-    pub async fn run(&self, cancellation_token: CancellationToken) {
-        run_all!(
+impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<EventStream> {
+    pub async fn run(self: Arc<Self>, cancellation_token: CancellationToken) {
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let event_task = tokio::spawn(async move { this.run_event_loop(token).await });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let queries_task = tokio::spawn(async move { this.run_queries_loop(token).await });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let heartbeat_task = tokio::spawn(async move {
+            this.run_heartbeat_loop(token, this.heartbeat_interval)
+                .await
+        });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let assignments_task = tokio::spawn(async move {
+            this.run_assignments_loop(token, this.assignment_check_interval)
+                .await
+        });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let logs_task: tokio::task::JoinHandle<()> =
+            tokio::spawn(async move { this.run_logs_loop(token).await });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let logs_cleanup_task: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+            this.run_logs_cleanup_loop(token, LOGS_CLEANUP_INTERVAL)
+                .await
+        });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let worker_task: tokio::task::JoinHandle<()> =
+            tokio::spawn(async move { this.worker.run(token).await });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let allocations_task: tokio::task::JoinHandle<()> =
+            tokio::spawn(async move { this.allocations_checker.run(token).await });
+
+        let _ = run_all!(
             cancellation_token,
-            self.run_event_loop(cancellation_token.child_token()),
-            self.run_queries_loop(cancellation_token.child_token()),
-            self.run_heartbeat_loop(cancellation_token.child_token(), self.heartbeat_interval),
-            self.run_assignments_loop(
-                cancellation_token.child_token(),
-                self.assignment_check_interval
-            ),
-            self.run_logs_loop(cancellation_token.child_token()),
-            self.run_logs_cleanup_loop(cancellation_token.child_token(), LOGS_CLEANUP_INTERVAL),
-            self.worker.run(cancellation_token.child_token()),
-            self.allocations_checker
-                .run(cancellation_token.child_token()),
+            event_task,
+            queries_task,
+            heartbeat_task,
+            assignments_task,
+            logs_task,
+            logs_cleanup_task,
+            worker_task,
+            allocations_task,
         );
     }
 
