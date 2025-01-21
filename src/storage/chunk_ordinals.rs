@@ -1,5 +1,3 @@
-use tracing::error;
-
 use super::layout::DataChunk;
 use crate::types::dataset::Dataset;
 use std::collections::{BTreeMap, HashMap};
@@ -58,7 +56,6 @@ pub struct OrdinalsHolder {
 
 impl OrdinalsHolder {
     pub fn populate_with_ordinals(&mut self, ordinals: Ordinals, timestamp: u64) {
-        error!("New ordinals for id: {:?}@{timestamp}", ordinals.assignment_id);
         self.ordinals.insert(timestamp, ordinals);
     }
 
@@ -78,33 +75,34 @@ impl OrdinalsHolder {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let t = self.get_ordinals_by_time(unix_time);
-        match t.clone() {
-            Some(a) => error!("Got ordinal {:?}", a.get_assignment_id()),
-            None => error!("No ordinals at this time"),
-        }
-        t
+        self.cleanup_ordinals_by_time(unix_time);
+        self.get_ordinals_by_time(unix_time)
     }
 
-    pub fn get_ordinals_by_time(&mut self, timestamp: u64) -> Option<Ordinals> {
-        if !self.ordinals.is_empty() {
-            // We BTreeMap keys are sorted so we get sorted list of effective_from times for each allocations
-            let keys = self.ordinals.keys().cloned().collect::<Vec<_>>();
-            // We want state in which only first allocation may be active, so we pop till _second_ effective_from is greater than current time.
-            // If first effective_from is less than current time, than first allocation is active, otherwise no allocation is active.
-            for &from_time in keys.iter().skip(1) {
-                if from_time < timestamp {
-                    let t = self.ordinals.pop_first().unwrap();
-                    error!("Dropping ordinal: {:?} ({:?} against {:?})", t.1.get_assignment_id(), t.0, timestamp);
-                } else {
-                    break;
-                }
-            }
-        };
+    pub fn get_ordinals_by_time(&self, timestamp: u64) -> Option<Ordinals> {
+        // If first effective_from is less than current time, than first allocation is active, otherwise no allocation is active.
         self.ordinals
             .first_key_value()
             .filter(|(&ts, _)| ts < timestamp)
             .map(|(_, ordinals)| ordinals.clone())
+    }
+
+    pub fn cleanup_ordinals_by_time(&mut self, timestamp: u64) {
+        if !self.ordinals.is_empty() {
+            // We BTreeMap keys are sorted so we get sorted list of effective_from times for each allocations
+            // We want state in which only first allocation may be active, so we count elements to remove till _second_ effective_from is greater than current time.
+            let mut advance_counter = 0;
+            for &from_time in self.ordinals.keys().skip(1) {
+                if from_time < timestamp {
+                    advance_counter += 1;
+                } else {
+                    break;
+                }
+            }
+            for _ in 0..advance_counter {
+                self.ordinals.pop_first().unwrap();
+            }
+        };
     }
 }
 
@@ -125,6 +123,32 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_ordinals_by_time() {
+        let mut holder = OrdinalsHolder::default();
+        let assigned_data = vec![sqd_messages::assignments::Dataset {
+            id: "dataset1".to_owned(),
+            base_url: "http://sqd.dev".to_owned(),
+            chunks: vec![],
+        }];
+        holder.populate_with_data(assigned_data, 100, "1".to_owned());
+        // Test that cleanup_ordinals_by_time does not remove single active assignment
+        holder.cleanup_ordinals_by_time(142);
+        assert!(holder.ordinals.len() == 1);
+        assert!(holder.ordinals.iter().last().unwrap().1.assignment_id == "1".to_owned());
+
+        let assigned_data = vec![sqd_messages::assignments::Dataset {
+            id: "dataset2".to_owned(),
+            base_url: "http://sqd.dev".to_owned(),
+            chunks: vec![],
+        }];
+        holder.populate_with_data(assigned_data, 200, "2".to_owned());
+        // Test that cleanup_ordinals_by_time actually remove outdated assignments
+        holder.cleanup_ordinals_by_time(242);
+        assert!(holder.ordinals.len() == 1);
+        assert!(holder.ordinals.iter().last().unwrap().1.assignment_id == "2".to_owned());
+    }
+
+    #[test]
     fn test_get_ordinals_by_time() {
         let mut holder = OrdinalsHolder::default();
         let assigned_data = vec![sqd_messages::assignments::Dataset {
@@ -135,11 +159,15 @@ mod tests {
         holder.populate_with_data(assigned_data, 100, "1".to_owned());
 
         // Test that get_ordinals_by_time returns None for times before first
-        let ordinals = holder.get_ordinals_by_time(42);
+        let timestamp = 42;
+        holder.cleanup_ordinals_by_time(timestamp);
+        let ordinals = holder.get_ordinals_by_time(timestamp);
         assert!(ordinals.is_none());
 
         // Test that get_ordinals_by_time returns something for times after first
-        let ordinals = holder.get_ordinals_by_time(142);
+        let timestamp = 142;
+        holder.cleanup_ordinals_by_time(timestamp);
+        let ordinals = holder.get_ordinals_by_time(timestamp);
         assert!(ordinals.is_some());
 
         let assigned_data = vec![sqd_messages::assignments::Dataset {
@@ -150,7 +178,9 @@ mod tests {
         holder.populate_with_data(assigned_data, 200, "2".to_owned());
 
         // Test that get_ordinals_by_time returns first allocation if time in between
-        let ordinals = holder.get_ordinals_by_time(142);
+        let timestamp = 142;
+        holder.cleanup_ordinals_by_time(timestamp);
+        let ordinals = holder.get_ordinals_by_time(timestamp);
         assert!(ordinals.is_some());
         let ordinals = ordinals.unwrap();
         assert_eq!(ordinals.assignment_id, "1".to_owned());
@@ -163,7 +193,9 @@ mod tests {
         holder.populate_with_data(assigned_data, 300, "3".to_owned());
 
         // Test that get_ordinals_by_time returns first allocation if time after last
-        let ordinals = holder.get_ordinals_by_time(342);
+        let timestamp = 342;
+        holder.cleanup_ordinals_by_time(timestamp);
+        let ordinals = holder.get_ordinals_by_time(timestamp);
         assert!(ordinals.is_some());
         let ordinals = ordinals.unwrap();
         assert_eq!(ordinals.assignment_id, "3".to_owned());
