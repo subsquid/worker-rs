@@ -127,7 +127,7 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
 
     let cancellation_token = create_cancellation_token()?;
     let controller_fut = async {
-        let controller = tokio::select!{
+        let controller = tokio::select! {
             controller = create_p2p_controller(worker, transport_builder, args_clone) => Arc::new(controller?),
             _ = cancellation_token.cancelled() => return Ok(()),
         };

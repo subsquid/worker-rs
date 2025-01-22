@@ -3,8 +3,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use parking_lot::Mutex;
+use sqd_contract_client::PeerId;
+use sqd_messages::assignments::Assignment;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     metrics,
@@ -151,7 +153,7 @@ impl StateManager {
 
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
-    pub fn set_desired_chunks(&self, desired_chunks: ChunkSet) {
+    fn set_desired_chunks(&self, desired_chunks: ChunkSet) {
         match self.state.lock().set_desired_chunks(desired_chunks) {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
@@ -161,11 +163,11 @@ impl StateManager {
         }
     }
 
-    pub fn set_datasets_index(&self, index: DatasetsIndex) {
+    fn set_datasets_index(&self, index: DatasetsIndex) {
         *self.datasets_index.lock() = index;
     }
 
-    pub fn populate_with_ordinals(&self, ordinals: Ordinals, timestamp: u64) {
+    fn populate_with_ordinals(&self, ordinals: Ordinals, timestamp: u64) {
         let new_assignment_id = ordinals.get_assignment_id();
         {
             let mut assignment_id = self.latests_assignment_id.lock();
@@ -181,6 +183,36 @@ impl StateManager {
         self.ordinals_holder
             .lock()
             .populate_with_ordinals(ordinals, timestamp);
+    }
+
+    pub fn register_assignment(
+        &self,
+        assignment: &Assignment,
+        peer_id: &PeerId,
+        secret_key: &Vec<u8>,
+    ) -> bool {
+        let calculated_chunks = match assignment.dataset_chunks_for_peer_id(peer_id) {
+            Some(chunks) => chunks,
+            None => {
+                metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                error!("Can not get assigned chunks.");
+                return false;
+            }
+        };
+        let headers = match assignment.headers_for_peer_id(peer_id, secret_key) {
+            Ok(headers) => headers,
+            Err(error) => {
+                error!("Can not get assigned headers: {error:?}");
+                return false;
+            }
+        };
+        let datasets_index = DatasetsIndex::from(calculated_chunks.clone(), headers);
+        let chunks = datasets_index.create_chunks_set();
+        let ordinals = Ordinals::new(calculated_chunks, assignment.id.clone());
+        self.set_datasets_index(datasets_index);
+        self.set_desired_chunks(chunks);
+        self.populate_with_ordinals(ordinals, assignment.effective_from);
+        true
     }
 
     pub fn get_latest_assignment_id(&self) -> Option<String> {
