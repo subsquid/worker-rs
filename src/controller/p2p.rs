@@ -27,7 +27,6 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
-    storage::datasets_index::DatasetsIndex,
     util::{timestamp_now_ms, UseOnce},
 };
 
@@ -262,26 +261,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     }
                 };
                 let peer_id = self.worker_id;
-                let calculated_chunks = match assignment.dataset_chunks_for_peer_id(&peer_id) {
-                    Some(chunks) => chunks,
-                    None => {
-                        metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                        error!("Can not get assigned chunks.");
-                        return;
-                    }
-                };
-                let headers = match assignment.headers_for_peer_id(&peer_id, &self.private_key) {
-                    Ok(headers) => headers,
-                    Err(error) => {
-                        error!("Can not get assigned headers: {error:?}");
-                        return;
-                    }
-                };
-                let datasets_index =
-                    DatasetsIndex::from(calculated_chunks, headers, assignment.id.clone());
-                let chunks = datasets_index.create_chunks_set();
-                self.worker.set_datasets_index(datasets_index);
-                self.worker.set_desired_chunks(chunks);
+                if !self
+                    .worker
+                    .register_assignment(&assignment, &peer_id, &self.private_key)
+                {
+                    return;
+                }
 
                 let status = match assignment.worker_status(&peer_id) {
                     Some(status) => status,
