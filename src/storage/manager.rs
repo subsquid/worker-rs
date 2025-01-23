@@ -33,7 +33,7 @@ pub struct StateManager {
     notify: tokio::sync::Notify,
     datasets_index: Mutex<DatasetsIndex>,
     ordinals_holder: Mutex<OrdinalsHolder>,
-    latests_assignment_id: Mutex<Option<String>>,
+    latest_assignment_id: Mutex<Option<String>>,
     concurrent_downloads: usize,
 }
 
@@ -168,7 +168,7 @@ impl StateManager {
     fn populate_with_ordinals(&self, ordinals: Ordinals, timestamp: u64) {
         let new_assignment_id = ordinals.get_assignment_id();
         {
-            let mut assignment_id = self.latests_assignment_id.lock();
+            let mut assignment_id = self.latest_assignment_id.lock();
             match &mut *assignment_id {
                 Some(last_assignment_id) => {
                     if new_assignment_id > *last_assignment_id {
@@ -214,7 +214,7 @@ impl StateManager {
     }
 
     pub fn get_latest_assignment_id(&self) -> Option<String> {
-        self.latests_assignment_id.lock().clone()
+        self.latest_assignment_id.lock().clone()
     }
 
     pub fn stop_downloads(&self) {
