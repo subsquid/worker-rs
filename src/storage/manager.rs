@@ -117,7 +117,7 @@ impl StateManager {
     pub fn current_status(&self) -> Status {
         let status = self.state.lock().status();
         let stored_bytes = get_directory_size(&self.fs.root);
-        let Some(ordinals) = self.ordinals_holder.lock().produce_active_ordinals() else {
+        let Some(ordinals) = self.ordinals_holder.lock().get_active_ordinals() else {
             info!("Assignment is not present yet, can't report missing chunks");
             return Status {
                 available: to_ranges(status.available),

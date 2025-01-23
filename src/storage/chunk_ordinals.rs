@@ -55,18 +55,22 @@ pub struct OrdinalsHolder {
 }
 
 impl OrdinalsHolder {
-    pub fn populate_with_ordinals(&mut self, ordinals: Ordinals, timestamp: u64) {
-        self.ordinals.insert(timestamp, ordinals);
-    }
-
-    pub fn produce_active_ordinals(&mut self) -> Option<Ordinals> {
+    fn get_current_time() -> u64 {
         let system_time = std::time::SystemTime::now();
-        let unix_time = system_time
+        system_time
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        self.cleanup_ordinals_by_time(unix_time);
-        self.get_ordinals_by_time(unix_time)
+            .as_secs()
+    }
+    pub fn populate_with_ordinals(&mut self, ordinals: Ordinals, timestamp: u64) {
+        self.ordinals.insert(timestamp, ordinals);
+        let current_time = Self::get_current_time();
+        self.cleanup_ordinals_by_time(current_time);
+    }
+
+    pub fn get_active_ordinals(&self) -> Option<Ordinals> {
+        let current_time = Self::get_current_time();
+        self.get_ordinals_by_time(current_time)
     }
 
     fn get_ordinals_by_time(&self, timestamp: u64) -> Option<Ordinals> {
@@ -109,7 +113,7 @@ mod tests {
             chunks: vec![],
         }];
         let ordinals = Ordinals::new(assigned_data, "1".to_owned());
-        holder.populate_with_ordinals(ordinals, 42);
+        holder.ordinals.insert(42, ordinals);
         assert!(holder.ordinals.contains_key(&42));
     }
 
@@ -122,7 +126,7 @@ mod tests {
             chunks: vec![],
         }];
         let ordinals = Ordinals::new(assigned_data, "1".to_owned());
-        holder.populate_with_ordinals(ordinals, 100);
+        holder.ordinals.insert(100, ordinals);
         // Test that cleanup_ordinals_by_time does not remove single active assignment
         holder.cleanup_ordinals_by_time(142);
         assert!(holder.ordinals.len() == 1);
@@ -134,7 +138,7 @@ mod tests {
             chunks: vec![],
         }];
         let ordinals = Ordinals::new(assigned_data, "2".to_owned());
-        holder.populate_with_ordinals(ordinals, 200);
+        holder.ordinals.insert(200, ordinals);
         // Test that cleanup_ordinals_by_time actually remove outdated assignments
         holder.cleanup_ordinals_by_time(242);
         assert!(holder.ordinals.len() == 1);
@@ -150,7 +154,7 @@ mod tests {
             chunks: vec![],
         }];
         let ordinals = Ordinals::new(assigned_data, "1".to_owned());
-        holder.populate_with_ordinals(ordinals, 100);
+        holder.ordinals.insert(100, ordinals);
 
         // Test that get_ordinals_by_time returns None for times before first
         let timestamp = 42;
@@ -170,7 +174,7 @@ mod tests {
             chunks: vec![],
         }];
         let ordinals = Ordinals::new(assigned_data, "2".to_owned());
-        holder.populate_with_ordinals(ordinals, 200);
+        holder.ordinals.insert(200, ordinals);
 
         // Test that get_ordinals_by_time returns first allocation if time in between
         let timestamp = 142;
@@ -186,7 +190,7 @@ mod tests {
             chunks: vec![],
         }];
         let ordinals = Ordinals::new(assigned_data, "3".to_owned());
-        holder.populate_with_ordinals(ordinals, 300);
+        holder.ordinals.insert(300, ordinals);
 
         // Test that get_ordinals_by_time returns first allocation if time after last
         let timestamp = 342;
