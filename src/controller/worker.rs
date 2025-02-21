@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 
+use sqd_messages::assignments::Assignment;
 use sqd_query::ParquetChunk;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -12,11 +13,8 @@ use sqd_network_transport::PeerId;
 use crate::{
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
-    storage::{
-        datasets_index::DatasetsIndex,
-        manager::{self, StateManager},
-    },
-    types::{dataset::Dataset, state::ChunkSet},
+    storage::manager::{self, StateManager},
+    types::dataset::Dataset,
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -47,16 +45,18 @@ impl Worker {
         }
     }
 
-    pub fn set_desired_chunks(&self, chunks: ChunkSet) {
-        self.state_manager.set_desired_chunks(chunks);
-    }
-
-    pub fn set_datasets_index(&self, datasets_index: DatasetsIndex) {
-        self.state_manager.set_datasets_index(datasets_index);
+    pub fn register_assignment(
+        &self,
+        assignment: &Assignment,
+        peer_id: &PeerId,
+        secret_key: &Vec<u8>,
+    ) -> bool {
+        self.state_manager
+            .register_assignment(assignment, peer_id, secret_key)
     }
 
     pub fn get_assignment_id(&self) -> Option<String> {
-        self.state_manager.get_assignment_id()
+        self.state_manager.get_latest_assignment_id()
     }
 
     pub fn stop_downloads(&self) {
