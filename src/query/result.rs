@@ -32,7 +32,7 @@ impl QueryOk {
     pub fn compressed_data(&self) -> Vec<u8> {
         use flate2::write::GzEncoder;
         use std::io::Write;
-        let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder.write_all(&self.data).expect("Couldn't gzip data");
         encoder.finish().expect("Couldn't finish gzipping data")
     }
