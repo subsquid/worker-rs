@@ -1,7 +1,7 @@
 [package]
 name = "sqd-worker"
 license = "AGPL-3.0-or-later"
-version = "2.0.3"
+version = "2.1.0"
 edition = "2021"
 
 [[bin]]
@@ -54,9 +54,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 url = "2.5.2"
 walkdir = "2.5.0"
 
-sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "eac1eef", version = "1.2.1" }
-sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "eac1eef", version = "2.0.0", features = ["bitstring", "assignment_reader"] }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "eac1eef", version = "2.0.0", features = ["worker", "metrics"] }
+sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "d7dd5e5", version = "1.2.1" }
+sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "d7dd5e5", version = "2.0.0", features = ["bitstring", "assignment_reader"] }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "d7dd5e5", version = "2.0.0", features = ["worker", "metrics"] }
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "7ab6807", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "7ab6807" }
 
