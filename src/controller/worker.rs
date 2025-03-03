@@ -13,7 +13,10 @@ use sqd_network_transport::PeerId;
 use crate::{
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
-    storage::manager::{self, StateManager},
+    storage::{
+        layout::DataChunk,
+        manager::{self, StateManager},
+    },
     types::dataset::Dataset,
 };
 
@@ -106,7 +109,7 @@ impl Worker {
         block_range: Option<(u64, u64)>,
         chunk_id: &str,
     ) -> QueryResult {
-        let Ok(chunk) = chunk_id.parse() else {
+        let Ok(chunk) = chunk_id.parse::<DataChunk>() else {
             return Err(QueryError::BadRequest(format!(
                 "Can't parse chunk id '{chunk_id}'"
             )));
@@ -114,11 +117,11 @@ impl Worker {
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
         if let Some((from_block, to_block)) = block_range {
-            query.set_first_block(Some(from_block));
+            query.set_first_block(from_block);
             query.set_last_block(Some(to_block));
         }
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk) else {
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk.clone()) else {
             return Err(QueryError::NotFound);
         };
 
@@ -127,13 +130,21 @@ impl Worker {
             let result = (move || {
                 let start_time = std::time::Instant::now();
 
-                let chunk = ParquetChunk::new(chunk_guard.as_str());
+                let data_chunk = ParquetChunk::new(chunk_guard.as_str());
                 let plan = query.compile();
                 let data = Vec::with_capacity(1024 * 1024);
                 let mut writer = sqd_query::JsonLinesWriter::new(data);
-                let mut blocks = plan.execute(&chunk)?;
-                let last_block = blocks.last_block();
-                writer.write_blocks(&mut blocks)?;
+                let blocks = plan.execute(&data_chunk)?;
+                let last_block = if let Some(mut blocks) = blocks {
+                    writer.write_blocks(&mut blocks)?;
+                    blocks.last_block()
+                } else {
+                    if let Some(last_query_block) = query.last_block() {
+                        std::cmp::min(last_query_block, chunk.last_block.into())
+                    } else {
+                        chunk.last_block.into()
+                    }
+                };
                 let bytes = writer.finish()?;
 
                 if bytes.len() > RESPONSE_LIMIT {

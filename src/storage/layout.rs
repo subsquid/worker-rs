@@ -39,6 +39,12 @@ impl From<u64> for BlockNumber {
     }
 }
 
+impl Into<u64> for BlockNumber {
+    fn into(self) -> u64 {
+        self.0
+    }
+}
+
 impl AsRef<u64> for BlockNumber {
     fn as_ref(&self) -> &u64 {
         &self.0
