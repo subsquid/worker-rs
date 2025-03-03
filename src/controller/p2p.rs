@@ -23,7 +23,7 @@ use crate::{
         self,
         allocations_checker::{self, AllocationsChecker},
     },
-    logs_storage::{LoadedLogs, LogsStorage},
+    logs_storage::LogsStorage,
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
@@ -548,7 +548,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         request: LogsRequest,
         resp_chan: ResponseChannel<QueryLogs>,
     ) -> Result<()> {
-        let msg = match self
+        let msg = self
             .logs_storage
             .get_logs(
                 request.from_timestamp_ms,
@@ -556,17 +556,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 request.last_received_query_id,
                 MAX_LOGS_SIZE,
             )
-            .await?
-        {
-            LoadedLogs::All(logs) => sqd_messages::QueryLogs {
-                queries_executed: logs,
-                has_more: false,
-            },
-            LoadedLogs::Partial(logs) => sqd_messages::QueryLogs {
-                queries_executed: logs,
-                has_more: true,
-            },
-        };
+            .await?;
         info!("Sending {} logs", msg.queries_executed.len());
         self.transport_handle.send_logs(msg, resp_chan)?;
         Ok(())

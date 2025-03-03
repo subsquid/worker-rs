@@ -8,11 +8,6 @@ pub struct LogsStorage {
     db: Connection,
 }
 
-pub enum LoadedLogs {
-    All(Vec<QueryExecuted>),
-    Partial(Vec<QueryExecuted>),
-}
-
 impl LogsStorage {
     pub async fn new(logs_path: &str) -> Result<Self> {
         let db = Connection::open(logs_path).await?;
@@ -63,7 +58,7 @@ impl LogsStorage {
         to_timestamp_ms: u64,
         from_query_id: Option<String>,
         max_bytes: usize,
-    ) -> Result<LoadedLogs> {
+    ) -> Result<sqd_messages::QueryLogs> {
         self.db
             .call_unwrap(move |db| {
                 let mut stmt = db
@@ -82,18 +77,24 @@ impl LogsStorage {
                     ":to_timestamp": to_timestamp_ms,
                 })?;
 
-                let mut total_len = 0;
+                let mut total_len = 10; // for other fields
                 let mut logs = Vec::new();
                 while let Some(row) = rows.next()? {
                     let log_msg: Vec<u8> = row.get(0)?;
-                    total_len += log_msg.len();
+                    total_len += log_msg.len() + 2; // each record is prepended with 2-bytes metadata
                     if total_len > max_bytes {
-                        return Ok(LoadedLogs::Partial(logs));
+                        return Ok(sqd_messages::QueryLogs {
+                            queries_executed: logs,
+                            has_more: true,
+                        });
                     }
                     let log = QueryExecuted::decode(&log_msg[..]).expect("Invalid log proto in DB");
                     logs.push(log);
                 }
-                Ok(LoadedLogs::All(logs))
+                Ok(sqd_messages::QueryLogs {
+                    queries_executed: logs,
+                    has_more: false,
+                })
             })
             .await
     }
@@ -143,11 +144,11 @@ mod tests {
         let logs_storage = LogsStorage::new(":memory:").await.unwrap();
 
         let mut logs = [
-            query_log("a", 10000), // 125 bytes
-            query_log("b", 10100), // 140 bytes
-            query_log("c", 10050), // 125 bytes
-            query_log("d", 10100), // 125 bytes
-            query_log("e", 10200), // 125 bytes
+            query_log("a", 10000), // 125+2 bytes
+            query_log("b", 10100), // 140+2 bytes
+            query_log("c", 10050), // 125+2 bytes
+            query_log("d", 10100), // 125+2 bytes
+            query_log("e", 10200), // 125+2 bytes
         ];
         logs[1].result = Some(query_error::Err::BadRequest("Invalid query".to_owned()).into());
         assert_eq!(logs[0].encoded_len(), 125);
@@ -157,12 +158,15 @@ mod tests {
             logs_storage.save_log(log).await.unwrap();
         }
 
-        let LoadedLogs::All(loaded) = logs_storage
+        let sqd_messages::QueryLogs {
+            queries_executed: loaded,
+            has_more: false,
+        } = logs_storage
             .get_logs(10000, 10500, None, 1000000)
             .await
             .unwrap()
         else {
-            panic!("Expected LoadedLogs::All");
+            panic!("Expected all logs to be loaded");
         };
         assert_eq!(loaded.len(), 5);
         assert_eq!(loaded[0].query.as_ref().unwrap().query_id, "a");
@@ -173,63 +177,65 @@ mod tests {
         assert_eq!(loaded[3].query.as_ref().unwrap().query_id, "d");
         assert_eq!(loaded[4].query.as_ref().unwrap().query_id, "e");
 
-        for (index, (call, expected, drained)) in [
+        for (index, (call, expected, has_more, bytes)) in [
             (
-                logs_storage.get_logs(10000, 11000, None, 125),
+                logs_storage.get_logs(10000, 11000, None, 140),
                 vec!["a"],
-                false,
+                true,
+                127 + 2,
             ),
             (
                 logs_storage.get_logs(10000, 11000, None, 380),
                 vec!["a", "c"],
-                false,
+                true,
+                254 + 2,
             ),
             (
                 logs_storage.get_logs(10100, 11000, None, 1000),
                 vec!["b", "d", "e"],
-                true,
+                false,
+                397,
             ),
             (
-                logs_storage.get_logs(10050, 11000, None, 390),
+                logs_storage.get_logs(10050, 11000, None, 406),
                 vec!["c", "b", "d"],
-                false,
+                true,
+                399,
             ),
             (
                 logs_storage.get_logs(10200, 11000, None, 1000),
                 vec!["e"],
-                true,
+                false,
+                127,
             ),
             (
                 logs_storage.get_logs(15000, 11000, None, 1000),
                 vec![],
-                true,
+                false,
+                0,
             ),
             (
-                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 125),
+                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 140),
                 vec!["e"],
-                true,
+                false,
+                127,
             ),
             (
                 logs_storage.get_logs(10100, 11000, Some("b".to_string()), 300),
                 vec!["d", "e"],
-                true,
+                false,
+                254,
             ),
         ]
         .into_iter()
         .enumerate()
         {
-            let logs = match call.await.unwrap() {
-                LoadedLogs::All(logs) => {
-                    assert!(drained);
-                    logs
-                }
-                LoadedLogs::Partial(logs) => {
-                    assert!(!drained);
-                    logs
-                }
-            };
+            let logs = call.await.unwrap();
+            assert_eq!(logs.has_more, has_more, "case #{}", index);
+            assert_eq!(logs.encoded_len(), bytes, "case #{}", index);
             assert_eq!(
-                logs.into_iter()
+                logs.queries_executed
+                    .into_iter()
                     .map(|log| log.query.unwrap().query_id)
                     .collect::<Vec<_>>(),
                 expected,
@@ -239,38 +245,31 @@ mod tests {
         }
 
         logs_storage.cleanup(10100).await.unwrap();
-        for (index, (call, expected, drained)) in [
+        for (index, (call, expected, has_more)) in [
             (
                 logs_storage.get_logs(0, 11000, None, 1000),
                 vec!["b", "d", "e"],
+                false,
+            ),
+            (
+                logs_storage.get_logs(10000, 11000, None, 155),
+                vec!["b"],
                 true,
             ),
             (
-                logs_storage.get_logs(10000, 11000, None, 150),
-                vec!["b"],
-                false,
-            ),
-            (
-                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 150),
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 155),
                 vec!["d"],
-                false,
+                true,
             ),
         ]
         .into_iter()
         .enumerate()
         {
-            let logs = match call.await.unwrap() {
-                LoadedLogs::All(logs) => {
-                    assert!(drained);
-                    logs
-                }
-                LoadedLogs::Partial(logs) => {
-                    assert!(!drained);
-                    logs
-                }
-            };
+            let logs = call.await.unwrap();
+            assert_eq!(logs.has_more, has_more);
             assert_eq!(
-                logs.into_iter()
+                logs.queries_executed
+                    .into_iter()
                     .map(|log| log.query.unwrap().query_id)
                     .collect::<Vec<_>>(),
                 expected,
