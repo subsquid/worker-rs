@@ -41,8 +41,9 @@ const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+// TODO: find out why the margin is required
 const MAX_LOGS_SIZE: usize =
-    sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 1024;
+    sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
 
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
@@ -557,7 +558,11 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 MAX_LOGS_SIZE,
             )
             .await?;
-        info!("Sending {} logs", msg.queries_executed.len());
+        info!(
+            "Sending {} logs ({} bytes)",
+            msg.queries_executed.len(),
+            msg.encoded_len()
+        );
         self.transport_handle.send_logs(msg, resp_chan)?;
         Ok(())
     }
