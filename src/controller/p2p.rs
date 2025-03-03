@@ -557,7 +557,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 MAX_LOGS_SIZE,
             )
             .await?;
-        info!("Sending {} logs", msg.queries_executed.len());
+        info!("Sending {} logs ({} bytes)", msg.queries_executed.len(), msg.encoded_len());
         self.transport_handle.send_logs(msg, resp_chan)?;
         Ok(())
     }
