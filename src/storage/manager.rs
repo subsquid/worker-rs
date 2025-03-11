@@ -50,7 +50,7 @@ impl StateManager {
         let fs = LocalFs::new(workdir);
         remove_temps(&fs)?;
         let existing_chunks = load_state(&fs).await?;
-        debug!("Loaded state: {:?}", existing_chunks);
+        debug!("Loaded state: {:#?}", existing_chunks);
 
         Ok(Self {
             fs,
