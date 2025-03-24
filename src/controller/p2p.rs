@@ -244,12 +244,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     format!("https://metadata.sqd-datasets.io/{network_state_filename}");
 
                 let latest_assignment = self.worker.get_assignment_id();
-                let assignment = match tokio::time::timeout(
+                let assignment = match Assignment::try_download(
+                    network_state_url,
+                    latest_assignment,
                     self.assignment_fetch_timeout,
-                    Assignment::try_download(network_state_url, latest_assignment),
                 )
                 .await
-                .unwrap_or_else(|e| Err(e.into()))
                 {
                     Ok(Some(assignment)) => assignment,
                     Ok(None) => {
