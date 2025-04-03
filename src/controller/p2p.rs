@@ -253,7 +253,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 {
                     Ok(Some(assignment)) => assignment,
                     Ok(None) => {
-                        info!("Assignment has not been changed");
+                        tracing::debug!("Assignment has not been changed");
                         return;
                     }
                     Err(err) => {
