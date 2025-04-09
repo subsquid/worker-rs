@@ -9,8 +9,7 @@ use sqd_messages::{
     QueryExecuted, QueryLogs,
 };
 use sqd_network_transport::{
-    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseChannel, WorkerConfig, WorkerEvent,
-    WorkerTransportHandle,
+    protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig, WorkerEvent, WorkerTransportHandle
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -227,6 +226,20 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Heartbeat processing task finished");
     }
 
+    fn get_worker_status(&self) -> sqd_messages::WorkerStatus {
+        let status = self.worker.status();
+        let assignment_id = match status.assignment_id {
+            Some(assignment_id) => assignment_id,
+            None => String::new(),
+        };
+        sqd_messages::WorkerStatus {
+            assignment_id,
+            missing_chunks: Some(BitString::new(&status.unavailability_map)),
+            version: WORKER_VERSION.to_string(),
+            stored_bytes: Some(status.stored_bytes),
+        }
+    }
+
     async fn run_assignments_loop(
         &self,
         cancellation_token: CancellationToken,
@@ -374,6 +387,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             break;
+                        }
+                    }
+                }
+                WorkerEvent::StatusRequest { peer_id, resp_chan } => {
+                    let status = self.get_worker_status();
+                    match self.transport_handle.send_status(status, resp_chan) {
+                        Ok(_) => {}
+                        Err(QueueFull) => {
+                            warn!("Couldn't respond with status to {peer_id}: out queue full");
                         }
                     }
                 }
