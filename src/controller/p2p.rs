@@ -5,7 +5,7 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use sqd_contract_client::Network;
 use sqd_messages::{
-    assignments, query_error, query_executed, BitString, Heartbeat, LogsRequest, ProstMsg, Query,
+    assignments, query_error, query_executed, BitString, LogsRequest, ProstMsg, Query,
     QueryExecuted, QueryLogs,
 };
 use sqd_network_transport::{
@@ -47,7 +47,6 @@ const MAX_LOGS_SIZE: usize =
 
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
-    heartbeat_interval: Duration,
     assignment_check_interval: Duration,
     assignment_fetch_timeout: Duration,
     raw_event_stream: UseOnce<EventStream>,
@@ -103,7 +102,6 @@ pub async fn create_p2p_controller(
 
     Ok(P2PController {
         worker,
-        heartbeat_interval: args.heartbeat_interval,
         assignment_check_interval: args.assignment_check_interval,
         assignment_fetch_timeout: args.assignment_fetch_timeout,
         raw_event_stream: UseOnce::new(event_stream),
@@ -130,13 +128,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let this = self.clone();
         let token = cancellation_token.child_token();
         let queries_task = tokio::spawn(async move { this.run_queries_loop(token).await });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let heartbeat_task = tokio::spawn(async move {
-            this.run_heartbeat_loop(token, this.heartbeat_interval)
-                .await
-        });
 
         let this = self.clone();
         let token = cancellation_token.child_token();
@@ -171,7 +162,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             cancellation_token,
             event_task,
             queries_task,
-            heartbeat_task,
             assignments_task,
             logs_task,
             logs_cleanup_task,
@@ -192,43 +182,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             )
             .await;
         info!("Query processing task finished");
-    }
-
-    async fn run_heartbeat_loop(
-        &self,
-        cancellation_token: CancellationToken,
-        heartbeat_interval: Duration,
-    ) {
-        let mut timer = tokio::time::interval_at(
-            tokio::time::Instant::now() + heartbeat_interval,
-            heartbeat_interval,
-        );
-        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        IntervalStream::new(timer)
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each(|_| async move {
-                tracing::debug!("Sending heartbeat");
-                let status = self.worker.status();
-                let assignment_id = match status.assignment_id {
-                    Some(assignment_id) => assignment_id,
-                    None => {
-                        tracing::info!("Skipping heartbeat as assignment is not ready");
-                        return;
-                    }
-                };
-                let heartbeat = Heartbeat {
-                    assignment_id,
-                    missing_chunks: Some(BitString::new(&status.unavailability_map)),
-                    version: WORKER_VERSION.to_string(),
-                    stored_bytes: Some(status.stored_bytes),
-                };
-                let result = self.transport_handle.send_heartbeat(heartbeat);
-                if let Err(err) = result {
-                    warn!("Couldn't send heartbeat: {:?}", err);
-                }
-            })
-            .await;
-        info!("Heartbeat processing task finished");
     }
 
     fn get_worker_status(&self) -> sqd_messages::WorkerStatus {

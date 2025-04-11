@@ -7075,7 +7075,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.2.1"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=4398659#4398659c94918fc8ac99fdbf44aff23b66aeb324"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c00d6a6#c00d6a6850d1ebb6c0318f71b5d9b530acd36f6a"
 dependencies = [
  "async-trait",
  "clap",
@@ -7094,7 +7094,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.0.2"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=4398659#4398659c94918fc8ac99fdbf44aff23b66aeb324"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c00d6a6#c00d6a6850d1ebb6c0318f71b5d9b530acd36f6a"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -7117,7 +7117,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=4398659#4398659c94918fc8ac99fdbf44aff23b66aeb324"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c00d6a6#c00d6a6850d1ebb6c0318f71b5d9b530acd36f6a"
 dependencies = [
  "anyhow",
  "async-trait",
