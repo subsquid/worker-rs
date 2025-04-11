@@ -2,7 +2,7 @@ use super::layout::DataChunk;
 use crate::types::dataset::Dataset;
 use std::collections::{BTreeMap, HashMap};
 
-pub type OrdinalMap = HashMap<DataChunk, u64>;
+pub type OrdinalMap = HashMap<DataChunk, Vec<u64>>;
 
 #[derive(Default, Clone)]
 pub struct Ordinals {
@@ -22,7 +22,13 @@ impl Ordinals {
             let mut chunks_ordinals_map = OrdinalMap::new();
             for chunk in dataset.chunks {
                 let data_chunk = DataChunk::from_path(&chunk.id).unwrap();
-                chunks_ordinals_map.insert(data_chunk, ordinal);
+                if let Some(ord) = chunks_ordinals_map.get(&data_chunk) {
+                    let mut local_ord = ord.clone();
+                    local_ord.push(ordinal);
+                    chunks_ordinals_map.insert(data_chunk, local_ord);
+                } else {
+                    chunks_ordinals_map.insert(data_chunk, vec![ordinal]);
+                }
                 ordinal += 1;
             }
             datasets.insert(dataset_id, chunks_ordinals_map);
@@ -35,13 +41,13 @@ impl Ordinals {
     }
 
     pub fn get_ordinals_len(&self) -> usize {
-        self.datasets.values().map(|v| v.len()).sum()
+        self.datasets.values().map(|v| v.values().map(|v| v.len()).sum::<usize>()).sum()
     }
 
-    pub fn get_ordinal(&self, dataset: &Dataset, chunk: &DataChunk) -> Option<u64> {
+    pub fn get_ordinal(&self, dataset: &Dataset, chunk: &DataChunk) -> Option<Vec<u64>> {
         self.datasets
             .get(dataset)
-            .and_then(|v| v.get(chunk).copied())
+            .and_then(|v| v.get(chunk).cloned())
     }
 
     pub fn get_assignment_id(&self) -> String {

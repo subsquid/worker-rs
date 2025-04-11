@@ -131,8 +131,10 @@ impl StateManager {
         let ordinals_len = ordinals.get_ordinals_len();
         let mut unavailability_map: Vec<bool> = vec![true; ordinals_len];
         for chunk_ref in &status.available {
-            if let Some(ordinal) = ordinals.get_ordinal(&chunk_ref.dataset, &chunk_ref.chunk) {
-                unavailability_map[ordinal as usize] = false
+            if let Some(ordinal_vec) = ordinals.get_ordinal(&chunk_ref.dataset, &chunk_ref.chunk) {
+                for ordinal in ordinal_vec {
+                    unavailability_map[ordinal as usize] = false
+                }
             } else {
                 warn!(
                     "Ordinal for {:?} {:?} not set",
