@@ -9,7 +9,8 @@ use sqd_messages::{
     QueryExecuted, QueryLogs,
 };
 use sqd_network_transport::{
-    protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig, WorkerEvent, WorkerTransportHandle
+    protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig,
+    WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -90,8 +91,12 @@ pub async fn create_p2p_controller(
     )
     .await?;
 
-    let (event_stream, transport_handle) =
-        transport_builder.build_worker(WorkerConfig::new()).await?;
+    let mut config = WorkerConfig::new();
+    config.status_queue_size = std::env::var("WORKER_STATUS_QUEUE_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000);
+    let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
