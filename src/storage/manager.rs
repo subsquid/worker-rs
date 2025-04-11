@@ -136,7 +136,7 @@ impl StateManager {
                     unavailability_map[ordinal as usize] = false
                 }
             } else {
-                warn!(
+                debug!(
                     "Ordinal for {:?} {:?} not set",
                     &chunk_ref.dataset, &chunk_ref.chunk
                 );
