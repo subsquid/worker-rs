@@ -46,6 +46,9 @@ pub struct Args {
     #[clap(env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "90")]
     pub assignment_fetch_timeout: Duration,
 
+    #[clap(env, hide(true), default_value_t = false)]
+    pub log_span_durations: bool,
+
     #[command(flatten)]
     pub transport: TransportArgs,
 

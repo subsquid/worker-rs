@@ -52,13 +52,17 @@ fn init_single_threaded(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn setup_tracing() -> Result<()> {
+fn setup_tracing(args: &Args) -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::builder().parse_lossy(
         std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).unwrap_or("info".to_string()),
     );
     let fmt = tracing_subscriber::fmt::layer()
         .compact()
-        .with_span_events(FmtSpan::CLOSE)
+        .with_span_events(if args.log_span_durations {
+            FmtSpan::CLOSE
+        } else {
+            FmtSpan::NONE
+        })
         .with_filter(env_filter);
     tracing_subscriber::registry()
         .with(fmt)
@@ -103,7 +107,7 @@ fn create_cancellation_token() -> Result<CancellationToken> {
 }
 
 async fn run(mut args: Args) -> anyhow::Result<()> {
-    setup_tracing()?;
+    setup_tracing(&args)?;
     args.fill_defaults(); // tracing should be initialized at this point
     let args_clone = args.clone();
 
