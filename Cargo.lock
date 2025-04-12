@@ -7190,7 +7190,7 @@ dependencies = [
 
 [[package]]
 name = "sqd-worker"
-version = "2.3.0"
+version = "2.3.1-rc1"
 dependencies = [
  "anyhow",
  "async-stream",

@@ -21,6 +21,7 @@ use anyhow::Result;
 use clap::Parser;
 use prometheus_client::metrics::info::Info;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
@@ -57,6 +58,7 @@ fn setup_tracing() -> Result<()> {
     );
     let fmt = tracing_subscriber::fmt::layer()
         .compact()
+        .with_span_events(FmtSpan::CLOSE)
         .with_filter(env_filter);
     tracing_subscriber::registry()
         .with(fmt)

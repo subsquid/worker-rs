@@ -184,6 +184,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Query processing task finished");
     }
 
+    #[tracing::instrument(skip(self))]
     fn get_worker_status(&self) -> sqd_messages::WorkerStatus {
         let status = self.worker.status();
         let assignment_id = match status.assignment_id {
