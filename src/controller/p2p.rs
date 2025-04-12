@@ -3,10 +3,11 @@ use std::{env, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
+use parking_lot::RwLock;
 use sqd_contract_client::Network;
 use sqd_messages::{
     assignments, query_error, query_executed, BitString, LogsRequest, ProstMsg, Query,
-    QueryExecuted, QueryLogs,
+    QueryExecuted, QueryLogs, WorkerStatus,
 };
 use sqd_network_transport::{
     protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig,
@@ -41,12 +42,14 @@ const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 // TODO: find out why the margin is required
 const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
 
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
+    worker_status: RwLock<WorkerStatus>,
     assignment_check_interval: Duration,
     assignment_fetch_timeout: Duration,
     raw_event_stream: UseOnce<EventStream>,
@@ -83,6 +86,8 @@ pub async fn create_p2p_controller(
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, args.data_dir.join("peer_id"));
 
+    let worker_status = get_worker_status(&worker);
+
     let allocations_checker = allocations_checker::AllocationsChecker::new(
         transport_builder.contract_client(),
         worker_id,
@@ -102,6 +107,7 @@ pub async fn create_p2p_controller(
 
     Ok(P2PController {
         worker,
+        worker_status: RwLock::new(worker_status),
         assignment_check_interval: args.assignment_check_interval,
         assignment_fetch_timeout: args.assignment_fetch_timeout,
         raw_event_stream: UseOnce::new(event_stream),
@@ -150,6 +156,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
         let this = self.clone();
         let token = cancellation_token.child_token();
+        let status_update_task: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+            this.run_status_update_loop(token, STATUS_UPDATE_INTERVAL)
+                .await
+        });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
         let worker_task: tokio::task::JoinHandle<()> =
             tokio::spawn(async move { this.worker.run(token).await });
 
@@ -165,6 +178,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             assignments_task,
             logs_task,
             logs_cleanup_task,
+            status_update_task,
             worker_task,
             allocations_task,
         );
@@ -182,21 +196,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             )
             .await;
         info!("Query processing task finished");
-    }
-
-    #[tracing::instrument(skip(self))]
-    fn get_worker_status(&self) -> sqd_messages::WorkerStatus {
-        let status = self.worker.status();
-        let assignment_id = match status.assignment_id {
-            Some(assignment_id) => assignment_id,
-            None => String::new(),
-        };
-        sqd_messages::WorkerStatus {
-            assignment_id,
-            missing_chunks: Some(BitString::new(&status.unavailability_map)),
-            version: WORKER_VERSION.to_string(),
-            stored_bytes: Some(status.stored_bytes),
-        }
     }
 
     async fn run_assignments_loop(
@@ -285,6 +284,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Logs processing task finished");
     }
 
+    async fn run_status_update_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        interval: Duration,
+    ) {
+        let mut timer = tokio::time::interval(interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        IntervalStream::new(timer)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each(|_| async move {
+                let status = get_worker_status(&self.worker);
+                *self.worker_status.write() = status;
+            })
+            .await;
+        info!("Status update task finished");
+    }
+
     async fn run_logs_cleanup_loop(
         &self,
         cancellation_token: CancellationToken,
@@ -350,7 +366,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     }
                 }
                 WorkerEvent::StatusRequest { peer_id, resp_chan } => {
-                    let status = self.get_worker_status();
+                    let status = self.worker_status.read().clone();
                     match self.transport_handle.send_status(status, resp_chan) {
                         Ok(_) => {}
                         Err(QueueFull) => {
@@ -546,6 +562,21 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         );
         self.transport_handle.send_logs(msg, resp_chan)?;
         Ok(())
+    }
+}
+
+#[tracing::instrument(skip_all)]
+fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
+    let status = worker.status();
+    let assignment_id = match status.assignment_id {
+        Some(assignment_id) => assignment_id,
+        None => String::new(),
+    };
+    sqd_messages::WorkerStatus {
+        assignment_id,
+        missing_chunks: Some(BitString::new(&status.unavailability_map)),
+        version: WORKER_VERSION.to_string(),
+        stored_bytes: Some(status.stored_bytes),
     }
 }
 
