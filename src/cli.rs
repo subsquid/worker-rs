@@ -33,6 +33,9 @@ pub struct Args {
     #[clap(long, env)]
     pub query_threads: Option<usize>,
 
+    #[clap(long, env, default_value = "")]
+    pub assignment_url: String,
+
     #[clap(env = "HEARTBEAT_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "55", alias = "ping-interval")]
     pub heartbeat_interval: Duration,
 
@@ -106,6 +109,19 @@ impl Args {
                 );
             } else {
                 tracing::warn!("Overriding provided public IP with P2P_PUBLIC_ADDRS");
+            }
+        }
+
+        if self.assignment_url.is_empty() {
+            match self.transport.rpc.network {
+                sqd_contract_client::Network::Mainnet => {
+                    self.assignment_url =
+                        "https://metadata.sqd-datasets.io/network-state-mainnet.json".to_owned();
+                }
+                sqd_contract_client::Network::Tethys => {
+                    self.assignment_url =
+                        "https://metadata.sqd-datasets.io/network-state-tethys.json".to_owned();
+                }
             }
         }
 

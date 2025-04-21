@@ -4,7 +4,6 @@ use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use parking_lot::RwLock;
-use sqd_contract_client::Network;
 use sqd_messages::{
     assignments, query_error, query_executed, BitString, LogsRequest, ProstMsg, Query,
     QueryExecuted, QueryLogs, WorkerStatus,
@@ -59,7 +58,7 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     private_key: Vec<u8>,
-    network: Network,
+    assignment_url: String,
     queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
     queries_rx:
         UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
@@ -72,8 +71,6 @@ pub async fn create_p2p_controller(
     transport_builder: P2PTransportBuilder,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
-    let network = args.transport.rpc.network;
-
     let worker_id = transport_builder.local_peer_id();
     let keypair = transport_builder.keypair();
     let private_key = transport_builder
@@ -117,7 +114,7 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         private_key,
-        network,
+        assignment_url: args.assignment_url,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
         log_requests_tx,
@@ -210,13 +207,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
                 tracing::debug!("Checking assignment");
-                let network_state_filename = format!("network-state-{}.json", self.network);
-                let network_state_url =  // TODO: put to CLI args
-                    format!("https://metadata.sqd-datasets.io/{network_state_filename}");
 
                 let latest_assignment = self.worker.get_assignment_id();
                 let assignment = match Assignment::try_download(
-                    network_state_url,
+                    self.assignment_url.clone(),
                     latest_assignment,
                     self.assignment_fetch_timeout,
                 )
