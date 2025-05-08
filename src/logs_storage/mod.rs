@@ -77,7 +77,7 @@ impl LogsStorage {
                     ":to_timestamp": to_timestamp_ms,
                 })?;
 
-                let mut total_len = 10; // for other fields
+                let mut total_len = 10; // for other fields (is this correct? --ts)
                 let mut logs = Vec::new();
                 while let Some(row) = rows.next()? {
                     let log_msg: Vec<u8> = row.get(0)?;
@@ -89,6 +89,7 @@ impl LogsStorage {
                         });
                     }
                     let log = QueryExecuted::decode(&log_msg[..]).expect("Invalid log proto in DB");
+                    println!("query executed: {:?}", log);
                     logs.push(log);
                 }
                 Ok(sqd_messages::QueryLogs {
@@ -124,10 +125,13 @@ mod tests {
 
     use super::*;
 
+    static REQUEST_ID: &str = "67e55044-10b1-426f-9247-bb680e5fe0c8";
+
     fn query_log(id: impl Into<String>, timestamp_ms: u64) -> QueryExecuted {
         QueryExecuted {
             query: Some(sqd_messages::Query {
                 query_id: id.into(),
+                request_id: REQUEST_ID.to_string(),
                 dataset: "eth-main".to_owned(),
                 query: [' '; 100].iter().collect(),
                 timestamp_ms,
@@ -144,15 +148,16 @@ mod tests {
         let logs_storage = LogsStorage::new(":memory:").await.unwrap();
 
         let mut logs = [
-            query_log("a", 10000), // 125+2 bytes
-            query_log("b", 10100), // 140+2 bytes
-            query_log("c", 10050), // 125+2 bytes
-            query_log("d", 10100), // 125+2 bytes
-            query_log("e", 10200), // 125+2 bytes
+            query_log("a", 10000), // 125+36+2 bytes
+            query_log("b", 10100), // 140+36+2 bytes (because it is overwritten below)
+            query_log("c", 10050), // 125+36+2 bytes
+            query_log("d", 10100), // 125+36+2 bytes
+            query_log("e", 10200), // 125+36+2 bytes
         ];
         logs[1].result = Some(query_error::Err::BadRequest("Invalid query".to_owned()).into());
-        assert_eq!(logs[0].encoded_len(), 125);
-        assert_eq!(logs[1].encoded_len(), 140);
+        println!("log-len: {} {}", logs[0].encoded_len(), logs[1].encoded_len());
+        assert_eq!(logs[0].encoded_len(), 164);
+        assert_eq!(logs[1].encoded_len(), 179);
 
         for log in logs.clone() {
             logs_storage.save_log(log).await.unwrap();
@@ -179,34 +184,34 @@ mod tests {
 
         for (index, (call, expected, has_more, bytes)) in [
             (
-                logs_storage.get_logs(10000, 11000, None, 140),
+                logs_storage.get_logs(10000, 11000, None, 179),
                 vec!["a"],
                 true,
-                127 + 2,
+                167 + 2,
             ),
             (
-                logs_storage.get_logs(10000, 11000, None, 380),
+                logs_storage.get_logs(10000, 11000, None, 346),
                 vec!["a", "c"],
                 true,
-                254 + 2,
+                334 + 2,
             ),
             (
                 logs_storage.get_logs(10100, 11000, None, 1000),
                 vec!["b", "d", "e"],
                 false,
-                397,
+                516,
             ),
             (
-                logs_storage.get_logs(10050, 11000, None, 406),
+                logs_storage.get_logs(10050, 11000, None, 528),
                 vec!["c", "b", "d"],
                 true,
-                399,
+                518,
             ),
             (
                 logs_storage.get_logs(10200, 11000, None, 1000),
                 vec!["e"],
                 false,
-                127,
+                167,
             ),
             (
                 logs_storage.get_logs(15000, 11000, None, 1000),
@@ -215,22 +220,23 @@ mod tests {
                 0,
             ),
             (
-                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 140),
+                logs_storage.get_logs(10100, 11000, Some("d".to_string()), 177),
                 vec!["e"],
                 false,
-                127,
+                167,
             ),
             (
-                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 300),
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 344),
                 vec!["d", "e"],
                 false,
-                254,
+                334,
             ),
         ]
         .into_iter()
         .enumerate()
         {
             let logs = call.await.unwrap();
+
             assert_eq!(logs.has_more, has_more, "case #{}", index);
             assert_eq!(logs.encoded_len(), bytes, "case #{}", index);
             assert_eq!(
@@ -252,12 +258,12 @@ mod tests {
                 false,
             ),
             (
-                logs_storage.get_logs(10000, 11000, None, 155),
+                logs_storage.get_logs(10000, 11000, None, 195),
                 vec!["b"],
                 true,
             ),
             (
-                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 155),
+                logs_storage.get_logs(10100, 11000, Some("b".to_string()), 195),
                 vec!["d"],
                 true,
             ),
