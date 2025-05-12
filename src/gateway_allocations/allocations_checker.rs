@@ -75,5 +75,6 @@ impl AllocationsChecker {
                 }
             }
         }
+        info!("Allocations update task finished");
     }
 }
