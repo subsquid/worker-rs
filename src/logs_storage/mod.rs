@@ -89,7 +89,6 @@ impl LogsStorage {
                         });
                     }
                     let log = QueryExecuted::decode(&log_msg[..]).expect("Invalid log proto in DB");
-                    println!("query executed: {:?}", log);
                     logs.push(log);
                 }
                 Ok(sqd_messages::QueryLogs {
@@ -155,7 +154,6 @@ mod tests {
             query_log("e", 10200), // 125+36+2 bytes
         ];
         logs[1].result = Some(query_error::Err::BadRequest("Invalid query".to_owned()).into());
-        println!("log-len: {} {}", logs[0].encoded_len(), logs[1].encoded_len());
         assert_eq!(logs[0].encoded_len(), 164);
         assert_eq!(logs[1].encoded_len(), 179);
 
