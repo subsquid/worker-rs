@@ -77,7 +77,7 @@ impl LogsStorage {
                     ":to_timestamp": to_timestamp_ms,
                 })?;
 
-                let mut total_len = 10; // for other fields (is this correct? --ts)
+                let mut total_len = 10; // for other fields
                 let mut logs = Vec::new();
                 while let Some(row) = rows.next()? {
                     let log_msg: Vec<u8> = row.get(0)?;
