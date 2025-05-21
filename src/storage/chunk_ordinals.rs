@@ -74,8 +74,9 @@ impl OrdinalsHolder {
         self.cleanup_ordinals_by_time(current_time);
     }
 
-    pub fn get_active_ordinals(&self) -> Option<Ordinals> {
+    pub fn get_active_ordinals(&mut self) -> Option<Ordinals> {
         let current_time = Self::get_current_time();
+        self.cleanup_ordinals_by_time(current_time);
         self.get_ordinals_by_time(current_time)
     }
 
