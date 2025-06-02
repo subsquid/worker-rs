@@ -84,7 +84,6 @@ impl Args {
                     self.transport.boot_nodes.extend_from_slice(&[
                         "12D3KooW9tLMANc4Vnxp27Ypyq8m8mUv45nASahj3eSnMbGWSk1b /dns4/mainnet.subsquid.io/udp/22445/quic-v1".parse().unwrap(),
                         "12D3KooWEhPC7rsHAcifstVwJ3Cj55sWn7zXWuHrtAQUCGhGYnQz /dns4/mainnet.subsquid.io/udp/22446/quic-v1".parse().unwrap(),
-                        "12D3KooWS5N8ygU6fRy4EZtzdHf4QZnkCaZrwCha9eYKH3LwNvsP /dns4/mainnet.subsquid.io/udp/32445/quic-v1".parse().unwrap(),
                     ]);
                 }
             }
