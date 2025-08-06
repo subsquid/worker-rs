@@ -12,7 +12,7 @@ use crate::{
     metrics,
     types::{
         dataset::{self, Dataset},
-        state::{to_ranges, ChunkRef, ChunkSet, Ranges},
+        state::{ChunkRef, ChunkSet},
     },
 };
 
@@ -38,8 +38,6 @@ pub struct StateManager {
 }
 
 pub struct Status {
-    pub available: Ranges,
-    pub downloading: Ranges,
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
     pub assignment_id: Option<String>,
@@ -118,10 +116,8 @@ impl StateManager {
         let status = self.state.lock().status();
         let stored_bytes = get_directory_size(&self.fs.root);
         let Some(ordinals) = self.ordinals_holder.lock().get_active_ordinals() else {
-            info!("Assignment is not present yet, can't report missing chunks");
+            debug!("Assignment is not present yet, can't report missing chunks");
             return Status {
-                available: to_ranges(status.available),
-                downloading: to_ranges(status.downloading),
                 unavailability_map: Default::default(),
                 stored_bytes,
                 assignment_id: None,
@@ -143,8 +139,6 @@ impl StateManager {
             }
         }
         Status {
-            available: to_ranges(status.available),
-            downloading: to_ranges(status.downloading),
             unavailability_map,
             stored_bytes,
             assignment_id: Some(assignment_id),
