@@ -28,7 +28,7 @@ pub enum UpdateStatus {
 
 pub struct Status {
     pub available: ChunkSet,
-    pub downloading: ChunkSet,
+    pub desired: ChunkSet,
 }
 
 impl State {
@@ -143,8 +143,8 @@ impl State {
     #[instrument(skip_all)]
     pub fn status(&self) -> Status {
         Status {
-            downloading: self.to_download.union(&self.downloading).cloned().collect(),
             available: self.available.clone(),
+            desired: self.desired.clone(),
         }
     }
 
@@ -230,6 +230,9 @@ mod tests {
             state.status().available.into_iter().collect_vec(),
             &[b.clone(), d.clone()]
         );
-        assert_eq!(state.status().downloading.into_iter().collect_vec(), &[]);
+        assert_eq!(
+            state.status().desired.into_iter().collect_vec(),
+            &[b.clone(), d.clone()]
+        );
     }
 }

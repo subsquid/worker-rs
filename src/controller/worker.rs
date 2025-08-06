@@ -3,12 +3,12 @@ use std::sync::{
     Arc,
 };
 
-use sqd_messages::assignments::Assignment;
+use sqd_assignments::Assignment;
 use sqd_query::ParquetChunk;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use sqd_network_transport::PeerId;
+use sqd_network_transport::{Keypair, PeerId};
 
 use crate::{
     metrics,
@@ -50,12 +50,11 @@ impl Worker {
 
     pub fn register_assignment(
         &self,
-        assignment: &Assignment,
-        peer_id: &PeerId,
-        secret_key: &Vec<u8>,
+        assignment: Assignment,
+        id: impl Into<String>,
+        key: &Keypair,
     ) -> bool {
-        self.state_manager
-            .register_assignment(assignment, peer_id, secret_key)
+        self.state_manager.set_assignment(assignment, id, key)
     }
 
     pub fn get_assignment_id(&self) -> Option<String> {

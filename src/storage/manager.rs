@@ -3,8 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use parking_lot::Mutex;
-use sqd_contract_client::PeerId;
-use sqd_messages::assignments::Assignment;
+use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -17,7 +16,6 @@ use crate::{
 };
 
 use super::{
-    chunk_ordinals::{Ordinals, OrdinalsHolder},
     datasets_index::DatasetsIndex,
     downloader::ChunkDownloader,
     layout::{self, DataChunk},
@@ -31,8 +29,7 @@ pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
     notify: tokio::sync::Notify,
-    datasets_index: Mutex<DatasetsIndex>,
-    ordinals_holder: Mutex<OrdinalsHolder>,
+    datasets_index: Mutex<Option<DatasetsIndex>>,
     latest_assignment_id: Mutex<Option<String>>,
     concurrent_downloads: usize,
 }
@@ -97,7 +94,10 @@ impl StateManager {
                 metrics::CHUNKS_REMOVED.inc();
             }
 
-            let index = self.datasets_index.lock();
+            let guard = self.datasets_index.lock();
+            let Some(index) = guard.as_ref() else {
+                continue;
+            };
             while downloader.download_count() < self.concurrent_downloads {
                 if let Some(chunk) = self.state.lock().take_next_download() {
                     info!("Downloading chunk {chunk}");
@@ -115,7 +115,12 @@ impl StateManager {
     pub fn current_status(&self) -> Status {
         let status = self.state.lock().status();
         let stored_bytes = get_directory_size(&self.fs.root);
-        let Some(ordinals) = self.ordinals_holder.lock().get_active_ordinals() else {
+        let Some(assignment_id) = self
+            .datasets_index
+            .lock()
+            .as_ref()
+            .map(|index| index.assignment_id().to_owned())
+        else {
             debug!("Assignment is not present yet, can't report missing chunks");
             return Status {
                 unavailability_map: Default::default(),
@@ -123,89 +128,48 @@ impl StateManager {
                 assignment_id: None,
             };
         };
-        let assignment_id = ordinals.get_assignment_id();
-        let ordinals_len = ordinals.get_ordinals_len();
-        let mut unavailability_map: Vec<bool> = vec![true; ordinals_len];
-        for chunk_ref in &status.available {
-            if let Some(ordinal_vec) = ordinals.get_ordinal(&chunk_ref.dataset, &chunk_ref.chunk) {
-                for ordinal in ordinal_vec {
-                    unavailability_map[ordinal as usize] = false
-                }
-            } else {
-                debug!(
-                    "Ordinal for {:?} {:?} not set",
-                    &chunk_ref.dataset, &chunk_ref.chunk
-                );
-            }
+        let mut unavailability_map = Vec::with_capacity(status.desired.len());
+        for chunk_ref in &status.desired {
+            unavailability_map.push(!status.available.contains(chunk_ref));
         }
         Status {
             unavailability_map,
             stored_bytes,
-            assignment_id: Some(assignment_id),
+            assignment_id: Some(assignment_id.to_owned()),
         }
     }
 
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
-    fn set_desired_chunks(&self, desired_chunks: ChunkSet) {
-        match self.state.lock().set_desired_chunks(desired_chunks) {
+    fn set_desired_chunks(&self, desired_chunks: ChunkSet, datasets_index: DatasetsIndex) {
+        let mut state = self.state.lock();
+        let mut index = self.datasets_index.lock();
+        match state.set_desired_chunks(desired_chunks) {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
                 info!("Got new assignment");
                 self.notify.notify_one();
             }
         }
+        *index = Some(datasets_index);
     }
 
-    fn set_datasets_index(&self, index: DatasetsIndex) {
-        *self.datasets_index.lock() = index;
-    }
-
-    fn populate_with_ordinals(&self, ordinals: Ordinals, timestamp: u64) {
-        let new_assignment_id = ordinals.get_assignment_id();
-        {
-            let mut assignment_id = self.latest_assignment_id.lock();
-            match &mut *assignment_id {
-                Some(last_assignment_id) => {
-                    if new_assignment_id > *last_assignment_id {
-                        *assignment_id = Some(new_assignment_id)
-                    }
-                }
-                None => *assignment_id = Some(new_assignment_id),
-            }
-        }
-        self.ordinals_holder
-            .lock()
-            .populate_with_ordinals(ordinals, timestamp);
-    }
-
-    pub fn register_assignment(
+    pub fn set_assignment(
         &self,
-        assignment: &Assignment,
-        peer_id: &PeerId,
-        secret_key: &Vec<u8>,
+        assignment: sqd_assignments::Assignment,
+        id: impl Into<String>,
+        key: &Keypair,
     ) -> bool {
-        let calculated_chunks = match assignment.dataset_chunks_for_peer_id(peer_id) {
-            Some(chunks) => chunks,
-            None => {
+        let datasets_index = match DatasetsIndex::new(assignment, id, key) {
+            Ok(result) => result,
+            Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                error!("Can not get assigned chunks.");
+                error!("Can not get assigned chunks: {e}");
                 return false;
             }
         };
-        let headers = match assignment.headers_for_peer_id(peer_id, secret_key) {
-            Ok(headers) => headers,
-            Err(error) => {
-                error!("Can not get assigned headers: {error:?}");
-                return false;
-            }
-        };
-        let datasets_index = DatasetsIndex::from(calculated_chunks.clone(), headers);
         let chunks = datasets_index.create_chunks_set();
-        let ordinals = Ordinals::new(calculated_chunks, assignment.id.clone());
-        self.set_datasets_index(datasets_index);
-        self.set_desired_chunks(chunks);
-        self.populate_with_ordinals(ordinals, assignment.effective_from);
+        self.set_desired_chunks(chunks, datasets_index);
         true
     }
 

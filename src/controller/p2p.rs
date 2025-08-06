@@ -5,8 +5,8 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::{Stream, StreamExt};
 use parking_lot::RwLock;
 use sqd_messages::{
-    assignments, query_error, query_executed, BitString, LogsRequest, ProstMsg, Query,
-    QueryExecuted, QueryLogs, WorkerStatus,
+    query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
+    WorkerStatus,
 };
 use sqd_network_transport::{
     protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig,
@@ -29,8 +29,6 @@ use crate::{
     run_all,
     util::{timestamp_now_ms, UseOnce},
 };
-
-use sqd_messages::assignments::Assignment;
 
 use super::worker::Worker;
 
@@ -57,7 +55,6 @@ pub struct P2PController<EventStream> {
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
     keypair: Keypair,
-    private_key: Vec<u8>,
     assignment_url: String,
     queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
     queries_rx:
@@ -73,13 +70,6 @@ pub async fn create_p2p_controller(
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
     let worker_id = transport_builder.local_peer_id();
     let keypair = transport_builder.keypair();
-    let private_key = transport_builder
-        .keypair()
-        .try_into_ed25519()
-        .unwrap()
-        .secret()
-        .as_ref()
-        .to_vec();
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, args.data_dir.join("peer_id"));
 
@@ -113,7 +103,6 @@ pub async fn create_p2p_controller(
         allocations_checker,
         worker_id,
         keypair,
-        private_key,
         assignment_url: args.assignment_url,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
@@ -200,68 +189,49 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         cancellation_token: CancellationToken,
         assignment_check_interval: Duration,
     ) {
-        let mut timer =
-            tokio::time::interval_at(tokio::time::Instant::now(), assignment_check_interval);
-        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        IntervalStream::new(timer)
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each(|_| async move {
-                tracing::debug!("Checking assignment");
-
-                let latest_assignment = self.worker.get_assignment_id();
-                let assignment = match Assignment::try_download(
-                    self.assignment_url.clone(),
-                    latest_assignment,
-                    self.assignment_fetch_timeout,
-                )
-                .await
-                {
-                    Ok(Some(assignment)) => assignment,
-                    Ok(None) => {
-                        tracing::debug!("Assignment has not been changed");
-                        return;
-                    }
-                    Err(err) => {
-                        error!("Unable to get assignment: {err:?}");
-                        return;
-                    }
-                };
-                let peer_id = self.worker_id;
-                if !self
-                    .worker
-                    .register_assignment(&assignment, &peer_id, &self.private_key)
-                {
+        super::assignments::new_assignments_stream(
+            self.assignment_url.clone(),
+            assignment_check_interval,
+            self.assignment_fetch_timeout,
+        )
+        .take_until(cancellation_token.cancelled_owned())
+        .for_each(|update| async move {
+            let status = match update.assignment.get_worker(self.worker_id) {
+                Some(worker) => worker.status(),
+                None => {
+                    error!("No assignment found for this worker, waiting for the next epoch");
+                    metrics::set_status(metrics::WorkerStatus::NotRegistered);
                     return;
                 }
+            };
 
-                let status = match assignment.worker_status(&peer_id) {
-                    Some(status) => status,
-                    None => {
-                        error!("Can not get worker status");
-                        metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                        return;
-                    }
-                };
-                match status {
-                    assignments::WorkerStatus::Ok => {
-                        info!("New assignment applied");
-                        metrics::set_status(metrics::WorkerStatus::Active);
-                    }
-                    assignments::WorkerStatus::Unreliable => {
-                        warn!("Worker is considered unreliable");
-                        metrics::set_status(metrics::WorkerStatus::Unreliable);
-                    }
-                    assignments::WorkerStatus::DeprecatedVersion => {
-                        warn!("Worker should be updated");
-                        metrics::set_status(metrics::WorkerStatus::DeprecatedVersion);
-                    }
-                    assignments::WorkerStatus::UnsupportedVersion => {
-                        warn!("Worker version is unsupported");
-                        metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
-                    }
+            if !self
+                .worker
+                .register_assignment(update.assignment, update.id, &self.keypair)
+            {
+                return;
+            }
+
+            match status {
+                sqd_assignments::WorkerStatus::Ok => {
+                    info!("New assignment applied");
+                    metrics::set_status(metrics::WorkerStatus::Active);
                 }
-            })
-            .await;
+                sqd_assignments::WorkerStatus::Unreliable => {
+                    warn!("Worker is considered unreliable");
+                    metrics::set_status(metrics::WorkerStatus::Unreliable);
+                }
+                sqd_assignments::WorkerStatus::DeprecatedVersion => {
+                    warn!("Worker should be updated");
+                    metrics::set_status(metrics::WorkerStatus::DeprecatedVersion);
+                }
+                sqd_assignments::WorkerStatus::UnsupportedVersion => {
+                    warn!("Worker version is unsupported");
+                    metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
+                }
+            }
+        })
+        .await;
         info!("Assignment processing task finished");
     }
 
