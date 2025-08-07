@@ -1,6 +1,6 @@
 pub mod cli;
+pub mod compute_units;
 pub mod controller;
-pub mod gateway_allocations;
 pub mod http_server;
 pub mod logs_storage;
 pub mod metrics;

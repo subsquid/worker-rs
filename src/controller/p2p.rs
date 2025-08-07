@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     cli::Args,
-    gateway_allocations::{
+    compute_units::{
         self,
         allocations_checker::{self, AllocationsChecker},
     },
@@ -82,7 +82,7 @@ pub async fn create_p2p_controller(
     )
     .await?;
 
-    let mut config = WorkerConfig::new();
+    let mut config = WorkerConfig::default();
     config.status_queue_size = std::env::var("WORKER_STATUS_QUEUE_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -403,7 +403,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         query: &Query,
     ) -> (QueryResult, Option<Duration>) {
         let status = match self.allocations_checker.try_spend(peer_id) {
-            gateway_allocations::RateLimitStatus::NoAllocation => {
+            compute_units::RateLimitStatus::NoAllocation => {
                 return (Err(QueryError::NoAllocation), None)
             }
             status => status,

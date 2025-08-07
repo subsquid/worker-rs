@@ -1,13 +1,13 @@
 use std::{collections::HashMap, time::Duration};
 
-use sqd_contract_client::{Address, GatewayCluster};
+use sqd_contract_client::{Address, PortalCluster};
 use sqd_network_transport::PeerId;
 use tokio::time::Instant;
 
 #[derive(Default)]
 pub struct RateLimiter {
     operators: HashMap<Address, Bucket>,
-    operator_by_gateway_id: HashMap<PeerId, Address>,
+    operator_by_portal_id: HashMap<PeerId, Address>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,8 +74,8 @@ impl Bucket {
 }
 
 impl RateLimiter {
-    pub fn update_allocations(&mut self, clusters: Vec<GatewayCluster>, epoch_length: Duration) {
-        self.operator_by_gateway_id.clear();
+    pub fn update_allocations(&mut self, clusters: Vec<PortalCluster>, epoch_length: Duration) {
+        self.operator_by_portal_id.clear();
         let mut new_operators = HashMap::default();
 
         let now = Instant::now();
@@ -103,17 +103,17 @@ impl RateLimiter {
                     new_operators.insert(cluster.operator_addr, bucket);
                 }
             };
-            for gateway in cluster.gateway_ids {
-                self.operator_by_gateway_id
-                    .insert(gateway, cluster.operator_addr);
+            for portal in cluster.portal_ids {
+                self.operator_by_portal_id
+                    .insert(portal, cluster.operator_addr);
             }
         }
         self.operators = new_operators;
     }
 
     // Returns whether the request was allowed and how long to wait until the next request can be made
-    pub fn try_run_request(&mut self, gateway_id: PeerId) -> RateLimitStatus {
-        let Some(operator_id) = self.operator_by_gateway_id.get(&gateway_id) else {
+    pub fn try_run_request(&mut self, portal_id: PeerId) -> RateLimitStatus {
+        let Some(operator_id) = self.operator_by_portal_id.get(&portal_id) else {
             return RateLimitStatus::NoAllocation;
         };
         let bucket = self.operators.get_mut(operator_id).unwrap();
@@ -132,8 +132,8 @@ impl RateLimiter {
         }
     }
 
-    pub fn refund(&mut self, gateway_id: PeerId) {
-        let Some(operator_id) = self.operator_by_gateway_id.get(&gateway_id) else {
+    pub fn refund(&mut self, portal_id: PeerId) {
+        let Some(operator_id) = self.operator_by_portal_id.get(&portal_id) else {
             return;
         };
         let bucket = self.operators.get_mut(operator_id).unwrap();

@@ -30,12 +30,12 @@ impl AllocationsChecker {
         })
     }
 
-    pub fn try_spend(&self, gateway_id: PeerId) -> RateLimitStatus {
-        self.rate_limiter.lock().try_run_request(gateway_id)
+    pub fn try_spend(&self, portal_id: PeerId) -> RateLimitStatus {
+        self.rate_limiter.lock().try_run_request(portal_id)
     }
 
-    pub fn refund(&self, gateway_id: PeerId) {
-        self.rate_limiter.lock().refund(gateway_id);
+    pub fn refund(&self, portal_id: PeerId) {
+        self.rate_limiter.lock().refund(portal_id);
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
@@ -61,7 +61,7 @@ impl AllocationsChecker {
                 info!("New epoch started. Updating allocations");
                 match tokio::try_join!(
                     self.client.epoch_length(),
-                    self.client.gateway_clusters(self.own_id)
+                    self.client.portal_clusters(self.own_id)
                 ) {
                     Ok((epoch_length, clusters)) => {
                         self.rate_limiter
@@ -70,7 +70,7 @@ impl AllocationsChecker {
                         current_epoch = epoch;
                     }
                     Err(e) => {
-                        warn!("Couldn't fetch gateway allocations: {e:?}");
+                        warn!("Couldn't fetch CU allocations: {e:?}");
                     }
                 }
             }
