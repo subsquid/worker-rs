@@ -92,5 +92,5 @@ async fn fetch_assignment(
         .read_to_end(&mut buf)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to decompress assignment: {}", e))?;
-    Ok(sqd_assignments::Assignment::from_owned(buf)?)
+    Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
 }
