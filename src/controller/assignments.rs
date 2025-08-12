@@ -25,40 +25,50 @@ pub fn new_assignments_stream(
     stream! {
         loop {
             timer.tick().await;
-            tracing::debug!("Checking for new assignment");
-            let Ok(network_state) = fetch_network_state(&url, &reqwest_client).await.map_err(
-                |e| tracing::warn!(error = %e, "Failed to update assignment, waiting for the next one"),
-            ) else {
-                continue;
-            };
-            let assignment_id = network_state.assignment.id;
-            if last_id.as_ref() == Some(&assignment_id) {
-                tracing::debug!("Assignment has not been changed");
-                continue;
+
+            match update_assignment(&url, &reqwest_client, &mut last_id).await {
+                Ok(Some(data)) => yield data,
+                Ok(None) => {},
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to update assignment, waiting for the next one");
+                    continue;
+                }
             }
-    
-            let Some(url) = &network_state.assignment.fb_url else {
-                tracing::warn!("Missing fb_url");
-                continue;
-            };
-    
-            tracing::debug!("Downloading assignment \"{}\"", assignment_id);
-            let Ok(assignment) = fetch_assignment(url, &reqwest_client).await.map_err(
-                |e| tracing::warn!(error = %e, "Failed to update assignment, waiting for the next one"),
-            ) else {
-                continue;
-            };
-            last_id = Some(assignment_id.clone());
-    
-            tracing::debug!("Downloaded assignment \"{}\"", assignment_id);
-    
-            yield AssignmentUpdate {
-                assignment,
-                id: assignment_id,
-                effective_from: network_state.assignment.effective_from,
-            };
         }
     }
+}
+
+async fn update_assignment(
+    url: &str,
+    reqwest_client: &reqwest::Client,
+    last_id: &mut Option<String>,
+) -> anyhow::Result<Option<AssignmentUpdate>> {
+    tracing::debug!("Checking for new assignment");
+    let network_state = fetch_network_state(&url, &reqwest_client).await?;
+    let assignment_id = network_state.assignment.id;
+    if last_id.as_ref() == Some(&assignment_id) {
+        tracing::debug!("Assignment has not been changed");
+        return anyhow::Ok(None);
+    }
+
+    tracing::debug!("Downloading assignment \"{}\"", assignment_id);
+    let assignment = fetch_assignment(
+        &network_state
+            .assignment
+            .fb_url
+            .ok_or(anyhow::anyhow!("Missing fb_url"))?,
+        &reqwest_client,
+    )
+    .await?;
+    *last_id = Some(assignment_id.clone());
+
+    tracing::debug!("Downloaded assignment \"{}\"", assignment_id);
+
+    Ok(Some(AssignmentUpdate {
+        assignment,
+        id: assignment_id,
+        effective_from: network_state.assignment.effective_from,
+    }))
 }
 
 async fn fetch_network_state(
