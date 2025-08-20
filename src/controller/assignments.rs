@@ -75,7 +75,7 @@ async fn fetch_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
 ) -> anyhow::Result<sqd_messages::assignments::NetworkState> {
-    let response = reqwest_client.get(url).send().await?;
+    let response = reqwest_client.get(url).send().await?.error_for_status()?;
     let network_state = response.json().await?;
     Ok(network_state)
 }
@@ -89,7 +89,7 @@ async fn fetch_assignment(
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
 
-    let response = reqwest_client.get(url).send().await?;
+    let response = reqwest_client.get(url).send().await?.error_for_status()?;
     let stream = response.bytes_stream();
     let reader = StreamReader::new(stream.map_err(|e| std::io::Error::new(ErrorKind::Other, e)));
     let mut buf = Vec::new();
@@ -97,6 +97,6 @@ async fn fetch_assignment(
     decoder
         .read_to_end(&mut buf)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to decompress assignment: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to download assignment: {}", e))?;
     Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
 }
