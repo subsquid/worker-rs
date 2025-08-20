@@ -2,6 +2,7 @@ use std::{io::ErrorKind, time::Duration};
 
 use async_stream::stream;
 use futures::Stream;
+use rand::Rng;
 use tokio::time::MissedTickBehavior;
 
 pub struct AssignmentUpdate {
@@ -26,12 +27,20 @@ pub fn new_assignments_stream(
         loop {
             timer.tick().await;
 
-            match update_assignment(&url, &reqwest_client, &mut last_id).await {
-                Ok(Some(data)) => yield data,
-                Ok(None) => {},
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to update assignment, waiting for the next one");
-                    continue;
+            let mut current_delay = Duration::from_secs(1);
+            loop {
+                match update_assignment(&url, &reqwest_client, &mut last_id).await {
+                    Ok(Some(data)) => {
+                        yield data;
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let jitter = Duration::from_millis(rand::rng().random_range(0..=200));
+                        current_delay += jitter;
+                        tracing::warn!(error = %e, "Failed to update assignment, retrying in {:?}", current_delay);
+                        tokio::time::sleep(current_delay).await;
+                    }
                 }
             }
         }
