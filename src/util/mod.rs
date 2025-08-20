@@ -3,6 +3,7 @@ pub mod iterator;
 mod once;
 #[macro_use]
 pub mod run_all;
+#[cfg(test)]
 pub mod tests;
 pub mod timestamp;
 

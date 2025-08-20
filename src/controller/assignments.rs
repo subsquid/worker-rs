@@ -7,7 +7,7 @@ use tokio::time::MissedTickBehavior;
 pub struct AssignmentUpdate {
     pub assignment: sqd_assignments::Assignment,
     pub id: String,
-    pub effective_from: u64,
+    pub _effective_from: u64,
 }
 
 pub fn new_assignments_stream(
@@ -67,7 +67,7 @@ async fn update_assignment(
     Ok(Some(AssignmentUpdate {
         assignment,
         id: assignment_id,
-        effective_from: network_state.assignment.effective_from,
+        _effective_from: network_state.assignment.effective_from,
     }))
 }
 

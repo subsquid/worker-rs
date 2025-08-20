@@ -1,13 +1,8 @@
 use super::dataset::Dataset;
 use crate::storage::layout::DataChunk;
-use sqd_messages::RangeSet;
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 pub type ChunkSet = BTreeSet<ChunkRef>;
-pub type Ranges = HashMap<Dataset, RangeSet>;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkRef {

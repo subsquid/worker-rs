@@ -36,9 +36,6 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub assignment_url: String,
 
-    #[clap(env = "HEARTBEAT_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "55", alias = "ping-interval")]
-    pub heartbeat_interval: Duration,
-
     #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,

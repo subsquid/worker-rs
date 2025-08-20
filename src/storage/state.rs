@@ -60,7 +60,7 @@ impl State {
     }
 
     // make desired = available + downloading
-    pub fn stop_downloads(&mut self) -> UpdateStatus {
+    pub fn _stop_downloads(&mut self) -> UpdateStatus {
         if self.to_download.is_empty() {
             return UpdateStatus::Unchanged;
         };
@@ -132,12 +132,6 @@ impl State {
         }
 
         chunk_ref
-    }
-
-    pub fn release_chunks(&mut self, chunks: impl IntoIterator<Item = ChunkRef>) {
-        for chunk in chunks {
-            self.unlock_chunk(&chunk);
-        }
     }
 
     #[instrument(skip_all)]

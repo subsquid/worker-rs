@@ -469,10 +469,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         Ok(())
     }
 
-    pub fn local_peer_id(&self) -> PeerId {
-        self.worker_id
-    }
-
     fn generate_log(
         &self,
         query_result: &QueryResult,

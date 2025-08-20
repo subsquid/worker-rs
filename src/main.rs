@@ -26,12 +26,22 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
-use sqd_worker::cli::Args;
-use sqd_worker::controller::p2p::create_p2p_controller;
-use sqd_worker::controller::worker::Worker;
-use sqd_worker::http_server::Server as HttpServer;
-use sqd_worker::storage::manager::StateManager;
-use sqd_worker::{metrics, run_all};
+use crate::cli::Args;
+use crate::controller::p2p::create_p2p_controller;
+use crate::controller::worker::Worker;
+use crate::http_server::Server as HttpServer;
+use crate::storage::manager::StateManager;
+
+mod cli;
+mod compute_units;
+mod controller;
+mod http_server;
+mod logs_storage;
+mod metrics;
+mod query;
+mod storage;
+mod types;
+mod util;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -129,7 +139,7 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
 
     let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
 
-    let worker = Arc::new(Worker::new(state_manager, args.parallel_queries, peer_id));
+    let worker = Arc::new(Worker::new(state_manager, args.parallel_queries));
 
     let cancellation_token = create_cancellation_token()?;
     let controller_fut = async {

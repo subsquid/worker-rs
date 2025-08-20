@@ -30,7 +30,6 @@ pub struct StateManager {
     state: Mutex<State>,
     notify: tokio::sync::Notify,
     datasets_index: Mutex<Option<DatasetsIndex>>,
-    latest_assignment_id: Mutex<Option<String>>,
     concurrent_downloads: usize,
 }
 
@@ -173,12 +172,8 @@ impl StateManager {
         true
     }
 
-    pub fn get_latest_assignment_id(&self) -> Option<String> {
-        self.latest_assignment_id.lock().clone()
-    }
-
-    pub fn stop_downloads(&self) {
-        match self.state.lock().stop_downloads() {
+    pub fn _stop_downloads(&self) {
+        match self.state.lock()._stop_downloads() {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
                 self.notify.notify_one();

@@ -2,8 +2,6 @@ use anyhow::Result;
 use sqd_messages::{ProstMsg, QueryExecuted};
 use tokio_rusqlite::{named_params, Connection};
 
-pub const LOGS_PER_PAGE: usize = 256;
-
 pub struct LogsStorage {
     db: Connection,
 }

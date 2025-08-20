@@ -5,7 +5,6 @@ use std::sync::{
 
 use sqd_assignments::Assignment;
 use sqd_query::ParquetChunk;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use sqd_network_transport::{Keypair, PeerId};
@@ -27,24 +26,14 @@ pub struct Worker {
     state_manager: Arc<StateManager>,
     queries_running: AtomicUsize,
     max_parallel_queries: usize,
-    pub peer_id: PeerId,
-}
-
-pub struct QueryTask {
-    pub dataset: Dataset,
-    pub query_str: String,
-    pub block_range: Option<(u64, u64)>,
-    pub client_id: Option<PeerId>,
-    pub response_sender: oneshot::Sender<QueryResult>,
 }
 
 impl Worker {
-    pub fn new(state_manager: StateManager, parallel_queries: usize, peer_id: PeerId) -> Self {
+    pub fn new(state_manager: StateManager, parallel_queries: usize) -> Self {
         Self {
             state_manager: Arc::new(state_manager),
             queries_running: 0.into(),
             max_parallel_queries: parallel_queries,
-            peer_id,
         }
     }
 
@@ -57,12 +46,8 @@ impl Worker {
         self.state_manager.set_assignment(assignment, id, key)
     }
 
-    pub fn get_assignment_id(&self) -> Option<String> {
-        self.state_manager.get_latest_assignment_id()
-    }
-
-    pub fn stop_downloads(&self) {
-        self.state_manager.stop_downloads();
+    pub fn _stop_downloads(&self) {
+        self.state_manager._stop_downloads();
     }
 
     pub fn status(&self) -> manager::Status {
