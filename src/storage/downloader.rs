@@ -83,7 +83,10 @@ impl ChunkDownloader {
         self.futures.push(tokio::spawn(async move {
             if current_delay > Duration::ZERO {
                 tracing::debug!("Waiting for {:?} before the next download", current_delay);
-                tokio::time::sleep(current_delay).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(current_delay) => {},
+                    _ = cancel_token.cancelled() => {},
+                }
             }
             tokio::select! {
                 result = download_dir(files, dst, &client, &headers) => {

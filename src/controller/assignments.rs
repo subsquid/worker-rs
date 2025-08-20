@@ -40,6 +40,8 @@ pub fn new_assignments_stream(
                         current_delay += jitter;
                         tracing::warn!(error = %e, "Failed to update assignment, retrying in {:?}", current_delay);
                         tokio::time::sleep(current_delay).await;
+                        current_delay *= 2;
+                        // Intentionally allow the delay to grow indefinitely
                     }
                 }
             }
