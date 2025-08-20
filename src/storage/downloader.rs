@@ -2,12 +2,11 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
-use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
 use rand::Rng;
 use reqwest::Url;
 use sqd_contract_client::PeerId;
-use tokio::io::AsyncWriteExt;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{io::StreamReader, sync::CancellationToken};
 use tracing::instrument;
 
 use crate::types::state::ChunkRef;
@@ -179,10 +178,9 @@ pub async fn download_one(
         .send()
         .await?
         .error_for_status()?;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        writer.write_all(&chunk).await?;
-    }
+    let stream = response.bytes_stream();
+    let mut reader =
+        StreamReader::new(stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+    tokio::io::copy(&mut reader, &mut writer).await?;
     Ok(())
 }
