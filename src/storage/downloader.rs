@@ -44,6 +44,7 @@ impl ChunkDownloader {
             .user_agent(format!("SQD Worker {peer_id}"))
             .timeout(*S3_TIMEOUT)
             .read_timeout(*S3_READ_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Can't create HTTP client");
         Self {
