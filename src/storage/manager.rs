@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use parking_lot::Mutex;
+use sqd_contract_client::PeerId;
 use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
@@ -24,13 +25,13 @@ use super::{
     Filesystem,
 };
 
-#[derive(Default)]
 pub struct StateManager {
     fs: LocalFs,
     state: Mutex<State>,
     notify: tokio::sync::Notify,
     datasets_index: Mutex<Option<DatasetsIndex>>,
     concurrent_downloads: usize,
+    worker_id: PeerId,
 }
 
 pub struct Status {
@@ -40,7 +41,11 @@ pub struct Status {
 }
 
 impl StateManager {
-    pub async fn new(workdir: PathBuf, concurrent_downloads: usize) -> Result<Self> {
+    pub async fn new(
+        workdir: PathBuf,
+        concurrent_downloads: usize,
+        worker_id: PeerId,
+    ) -> Result<Self> {
         let fs = LocalFs::new(workdir);
         remove_temps(&fs)?;
         let existing_chunks = load_state(&fs).await?;
@@ -50,12 +55,14 @@ impl StateManager {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
             concurrent_downloads,
-            ..Default::default()
+            worker_id,
+            notify: tokio::sync::Notify::new(),
+            datasets_index: Mutex::new(None),
         })
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        let mut downloader = ChunkDownloader::default();
+        let mut downloader = ChunkDownloader::new(self.worker_id);
         loop {
             self.state.lock().report_status();
             let stored_bytes = get_directory_size(&self.fs.root);

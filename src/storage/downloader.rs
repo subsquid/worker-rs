@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use reqwest::Url;
+use sqd_contract_client::PeerId;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -29,10 +30,26 @@ lazy_static::lazy_static! {
         .unwrap_or_else(|| std::time::Duration::from_secs(3));
 }
 
-#[derive(Default)]
 pub struct ChunkDownloader {
     futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
     cancel_tokens: HashMap<ChunkRef, CancellationToken>,
+    reqwest_client: reqwest::Client,
+}
+
+impl ChunkDownloader {
+    pub fn new(peer_id: PeerId) -> Self {
+        let client = reqwest::ClientBuilder::new()
+            .user_agent(format!("SQD Worker {peer_id}"))
+            .timeout(*S3_TIMEOUT)
+            .read_timeout(*S3_READ_TIMEOUT)
+            .build()
+            .expect("Can't create HTTP client");
+        Self {
+            futures: FuturesUnordered::default(),
+            cancel_tokens: HashMap::default(),
+            reqwest_client: client,
+        }
+    }
 }
 
 impl ChunkDownloader {
@@ -57,16 +74,11 @@ impl ChunkDownloader {
                 panic!("Dataset {} not found", chunk.dataset);
             });
         let num_files = files.len();
-        let headers = datasets_index.get_headers();
-        let client = reqwest::ClientBuilder::new()
-            .default_headers(headers.clone())
-            .timeout(*S3_TIMEOUT)
-            .read_timeout(*S3_READ_TIMEOUT)
-            .build()
-            .expect("Can't create HTTP client");
+        let headers = datasets_index.get_headers().clone();
+        let client = self.reqwest_client.clone();
         self.futures.push(tokio::spawn(async move {
             tokio::select! {
-                result = download_dir(files, dst, &client) => {
+                result = download_dir(files, dst, &client, &headers) => {
                     (chunk, result)
                 }
                 _ = tokio::time::sleep(*S3_TIMEOUT * num_files as u32) => {
@@ -116,12 +128,13 @@ async fn download_dir(
     files: Vec<RemoteFile>,
     dst_dir: PathBuf,
     client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
 ) -> Result<()> {
     let tmp = &add_temp_prefix(&dst_dir)?;
     let mut guard = FsGuard::new(tmp)?;
     futures::future::try_join_all(files.into_iter().map(|file| async move {
         let dst_file = tmp.join(file.name.parse::<PathBuf>()?);
-        download_one(file.url, &dst_file, client).await
+        download_one(file.url, &dst_file, client, headers.clone()).await
     }))
     .await?;
     guard.persist(dst_dir)?;
@@ -129,11 +142,21 @@ async fn download_dir(
 }
 
 #[instrument(skip_all)]
-pub async fn download_one(url: Url, dst_path: &Path, client: &reqwest::Client) -> Result<()> {
+pub async fn download_one(
+    url: Url,
+    dst_path: &Path,
+    client: &reqwest::Client,
+    headers: reqwest::header::HeaderMap,
+) -> Result<()> {
     let mut writer = tokio::fs::File::create(dst_path)
         .await
         .with_context(|| format!("Couldn't create file '{dst_path}'"))?;
-    let response = client.get(url).send().await?.error_for_status()?;
+    let response = client
+        .get(url)
+        .headers(headers)
+        .send()
+        .await?
+        .error_for_status()?;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;

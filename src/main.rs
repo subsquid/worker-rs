@@ -121,9 +121,6 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     args.fill_defaults(); // tracing should be initialized at this point
     let args_clone = args.clone();
 
-    let state_manager =
-        StateManager::new(args.data_dir.join("worker"), args.concurrent_downloads).await?;
-
     let agent_info = get_agent_info!();
     let transport_builder = P2PTransportBuilder::from_cli(args.transport, agent_info).await?;
     let peer_id = transport_builder.local_peer_id();
@@ -136,6 +133,13 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     );
     sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
     metrics::register_metrics(&mut metrics_registry, info);
+
+    let state_manager = StateManager::new(
+        args.data_dir.join("worker"),
+        args.concurrent_downloads,
+        peer_id,
+    )
+    .await?;
 
     let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
 
