@@ -46,7 +46,7 @@ pub struct Args {
     #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
     pub assignment_check_interval: Duration,
 
-    #[clap(env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "90")]
+    #[clap(env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "1200")]
     pub assignment_fetch_timeout: Duration,
 
     #[clap(long, env, hide(true), default_value_t = false)]
