@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use rand::Rng;
 use reqwest::Url;
 use sqd_contract_client::PeerId;
 use tokio::io::AsyncWriteExt;
@@ -18,22 +19,23 @@ use super::{
 };
 
 lazy_static::lazy_static! {
-    static ref S3_TIMEOUT: std::time::Duration = std::env::var("S3_TIMEOUT")
+    static ref S3_TIMEOUT: Duration = std::env::var("S3_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| std::time::Duration::from_secs(60));
-    static ref S3_READ_TIMEOUT: std::time::Duration = std::env::var("S3_READ_TIMEOUT")
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(60));
+    static ref S3_READ_TIMEOUT: Duration = std::env::var("S3_READ_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| std::time::Duration::from_secs(3));
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(3));
 }
 
 pub struct ChunkDownloader {
     futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
     cancel_tokens: HashMap<ChunkRef, CancellationToken>,
     reqwest_client: reqwest::Client,
+    current_delay: Duration,
 }
 
 impl ChunkDownloader {
@@ -48,6 +50,7 @@ impl ChunkDownloader {
             futures: FuturesUnordered::default(),
             cancel_tokens: HashMap::default(),
             reqwest_client: client,
+            current_delay: Duration::ZERO,
         }
     }
 }
@@ -76,7 +79,12 @@ impl ChunkDownloader {
         let num_files = files.len();
         let headers = datasets_index.get_headers().clone();
         let client = self.reqwest_client.clone();
+        let current_delay = self.current_delay;
         self.futures.push(tokio::spawn(async move {
+            if current_delay > Duration::ZERO {
+                tracing::debug!("Waiting for {:?} before the next download", current_delay);
+                tokio::time::sleep(current_delay).await;
+            }
             tokio::select! {
                 result = download_dir(files, dst, &client, &headers) => {
                     (chunk, result)
@@ -100,6 +108,19 @@ impl ChunkDownloader {
                 .map(|result| {
                     let (chunk, result) = result.expect("Download task panicked");
                     self.cancel_tokens.remove(&chunk);
+                    match result {
+                        Ok(()) => {
+                            self.current_delay = Duration::from_secs(0);
+                        }
+                        Err(_) => {
+                            self.current_delay *= 2;
+                            let jitter = Duration::from_millis(rand::rng().random_range(50..150));
+                            self.current_delay = std::cmp::min(
+                                self.current_delay + jitter,
+                                Duration::from_secs(600),
+                            );
+                        }
+                    }
                     (chunk, result)
                 })
                 .fuse()
