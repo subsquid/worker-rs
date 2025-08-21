@@ -196,6 +196,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             assignment_check_interval,
             self.assignment_fetch_timeout,
             self.assignment_fetch_max_delay,
+            self.worker_id,
         )
         .take_until(cancellation_token.cancelled_owned())
         .for_each(|update| async move {

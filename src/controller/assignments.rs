@@ -3,6 +3,7 @@ use std::{io::ErrorKind, time::Duration};
 use async_stream::stream;
 use futures::Stream;
 use rand::Rng;
+use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
 
 pub struct AssignmentUpdate {
@@ -16,11 +17,17 @@ pub fn new_assignments_stream(
     frequency: Duration,
     timeout: Duration,
     max_delay: Duration,
+    peer_id: PeerId,
 ) -> impl Stream<Item = AssignmentUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    let reqwest_client = reqwest::Client::builder().timeout(timeout).build().unwrap();
+    let reqwest_client = reqwest::Client::builder()
+        .user_agent(format!("SQD Worker {peer_id}"))
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
 
     let mut last_id = None;
 
