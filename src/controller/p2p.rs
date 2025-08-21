@@ -49,6 +49,7 @@ pub struct P2PController<EventStream> {
     worker_status: RwLock<WorkerStatus>,
     assignment_check_interval: Duration,
     assignment_fetch_timeout: Duration,
+    assignment_fetch_max_delay: Duration,
     raw_event_stream: UseOnce<EventStream>,
     transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
@@ -97,6 +98,7 @@ pub async fn create_p2p_controller(
         worker_status: RwLock::new(worker_status),
         assignment_check_interval: args.assignment_check_interval,
         assignment_fetch_timeout: args.assignment_fetch_timeout,
+        assignment_fetch_max_delay: args.assignment_fetch_max_delay,
         raw_event_stream: UseOnce::new(event_stream),
         transport_handle,
         logs_storage: LogsStorage::new(args.data_dir.join("logs.db").as_str()).await?,
@@ -193,6 +195,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             self.assignment_url.clone(),
             assignment_check_interval,
             self.assignment_fetch_timeout,
+            self.assignment_fetch_max_delay,
         )
         .take_until(cancellation_token.cancelled_owned())
         .for_each(|update| async move {

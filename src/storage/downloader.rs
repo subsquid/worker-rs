@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
-use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
+use rand::Rng;
 use reqwest::Url;
-use tokio::io::AsyncWriteExt;
-use tokio_util::sync::CancellationToken;
+use sqd_contract_client::PeerId;
+use tokio_util::{io::StreamReader, sync::CancellationToken};
 use tracing::instrument;
 
-use crate::types::state::ChunkRef;
+use crate::{cli, types::state::ChunkRef};
 
 use super::{
     datasets_index::{DatasetsIndex, RemoteFile},
@@ -16,23 +17,33 @@ use super::{
     local_fs::add_temp_prefix,
 };
 
-lazy_static::lazy_static! {
-    static ref S3_TIMEOUT: std::time::Duration = std::env::var("S3_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| std::time::Duration::from_secs(60));
-    static ref S3_READ_TIMEOUT: std::time::Duration = std::env::var("S3_READ_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| std::time::Duration::from_secs(3));
-}
+const START_DELAY: Duration = Duration::from_millis(100);
 
-#[derive(Default)]
 pub struct ChunkDownloader {
     futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
     cancel_tokens: HashMap<ChunkRef, CancellationToken>,
+    reqwest_client: reqwest::Client,
+    current_delay: Duration,
+    args: cli::Args,
+}
+
+impl ChunkDownloader {
+    pub fn new(peer_id: PeerId, args: cli::Args) -> Self {
+        let client = reqwest::ClientBuilder::new()
+            .user_agent(format!("SQD Worker {peer_id}"))
+            .timeout(args.s3_timeout)
+            .read_timeout(args.s3_read_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Can't create HTTP client");
+        Self {
+            futures: FuturesUnordered::default(),
+            cancel_tokens: HashMap::default(),
+            reqwest_client: client,
+            current_delay: Duration::ZERO,
+            args,
+        }
+    }
 }
 
 impl ChunkDownloader {
@@ -57,19 +68,24 @@ impl ChunkDownloader {
                 panic!("Dataset {} not found", chunk.dataset);
             });
         let num_files = files.len();
-        let headers = datasets_index.get_headers();
-        let client = reqwest::ClientBuilder::new()
-            .default_headers(headers.clone())
-            .timeout(*S3_TIMEOUT)
-            .read_timeout(*S3_READ_TIMEOUT)
-            .build()
-            .expect("Can't create HTTP client");
+        let headers = datasets_index.get_headers().clone();
+        let client = self.reqwest_client.clone();
+        let current_delay = self.current_delay;
+        let s3_timeout = self.args.s3_timeout;
         self.futures.push(tokio::spawn(async move {
+            if current_delay > Duration::ZERO {
+                let sleep = rand::rng().random_range((current_delay / 2)..current_delay);
+                tracing::debug!("Waiting for {:?} before the next download", sleep);
+                tokio::select! {
+                    _ = tokio::time::sleep(sleep) => {},
+                    _ = cancel_token.cancelled() => {},
+                }
+            }
             tokio::select! {
-                result = download_dir(files, dst, &client) => {
+                result = download_dir(files, dst, &client, &headers) => {
                     (chunk, result)
                 }
-                _ = tokio::time::sleep(*S3_TIMEOUT * num_files as u32) => {
+                _ = tokio::time::sleep(s3_timeout * num_files as u32) => {
                     (chunk, Err(anyhow!("Download timed out")))
                 }
                 _ = cancel_token.cancelled_owned() => {
@@ -88,6 +104,21 @@ impl ChunkDownloader {
                 .map(|result| {
                     let (chunk, result) = result.expect("Download task panicked");
                     self.cancel_tokens.remove(&chunk);
+                    match result {
+                        Ok(()) => {
+                            self.current_delay = Duration::from_secs(0);
+                        }
+                        Err(_) => {
+                            if self.current_delay == Duration::ZERO {
+                                self.current_delay = START_DELAY;
+                            } else {
+                                self.current_delay = std::cmp::min(
+                                    self.current_delay * 2,
+                                    self.args.downloads_max_delay,
+                                );
+                            }
+                        }
+                    }
                     (chunk, result)
                 })
                 .fuse()
@@ -116,12 +147,13 @@ async fn download_dir(
     files: Vec<RemoteFile>,
     dst_dir: PathBuf,
     client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
 ) -> Result<()> {
     let tmp = &add_temp_prefix(&dst_dir)?;
     let mut guard = FsGuard::new(tmp)?;
     futures::future::try_join_all(files.into_iter().map(|file| async move {
         let dst_file = tmp.join(file.name.parse::<PathBuf>()?);
-        download_one(file.url, &dst_file, client).await
+        download_one(file.url, &dst_file, client, headers.clone()).await
     }))
     .await?;
     guard.persist(dst_dir)?;
@@ -129,15 +161,24 @@ async fn download_dir(
 }
 
 #[instrument(skip_all)]
-pub async fn download_one(url: Url, dst_path: &Path, client: &reqwest::Client) -> Result<()> {
+pub async fn download_one(
+    url: Url,
+    dst_path: &Path,
+    client: &reqwest::Client,
+    headers: reqwest::header::HeaderMap,
+) -> Result<()> {
     let mut writer = tokio::fs::File::create(dst_path)
         .await
         .with_context(|| format!("Couldn't create file '{dst_path}'"))?;
-    let response = client.get(url).send().await?.error_for_status()?;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        writer.write_all(&chunk).await?;
-    }
+    let response = client
+        .get(url)
+        .headers(headers)
+        .send()
+        .await?
+        .error_for_status()?;
+    let stream = response.bytes_stream();
+    let mut reader =
+        StreamReader::new(stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+    tokio::io::copy(&mut reader, &mut writer).await?;
     Ok(())
 }

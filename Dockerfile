@@ -24,7 +24,7 @@ RUN --mount=type=ssh cargo build --release
 
 FROM chef AS worker
 RUN apt-get update && apt-get install -y net-tools libsqlite3-dev
-COPY --from=builder /app/target/release/worker /app/worker
+COPY --from=builder /app/target/release/sqd-worker /app/worker
 
 ENV LISTEN_PORT="12345"
 RUN echo "netstat -an | grep \$LISTEN_PORT > /dev/null" > ./healthcheck.sh && \
