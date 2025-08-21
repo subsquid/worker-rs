@@ -15,6 +15,7 @@ pub fn new_assignments_stream(
     url: String,
     frequency: Duration,
     timeout: Duration,
+    max_delay: Duration,
 ) -> impl Stream<Item = AssignmentUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -36,12 +37,10 @@ pub fn new_assignments_stream(
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        let jitter = Duration::from_millis(rand::rng().random_range(0..=200));
-                        current_delay += jitter;
                         tracing::warn!(error = %e, "Failed to update assignment, retrying in {:?}", current_delay);
-                        tokio::time::sleep(current_delay).await;
-                        current_delay *= 2;
-                        // Intentionally allow the delay to grow indefinitely
+                        let duration = rand::rng().random_range((current_delay / 2)..current_delay);
+                        tokio::time::sleep(duration).await;
+                        current_delay = std::cmp::min(current_delay * 2, max_delay);
                     }
                 }
             }

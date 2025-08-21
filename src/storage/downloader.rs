@@ -9,7 +9,7 @@ use sqd_contract_client::PeerId;
 use tokio_util::{io::StreamReader, sync::CancellationToken};
 use tracing::instrument;
 
-use crate::types::state::ChunkRef;
+use crate::{cli, types::state::ChunkRef};
 
 use super::{
     datasets_index::{DatasetsIndex, RemoteFile},
@@ -17,32 +17,22 @@ use super::{
     local_fs::add_temp_prefix,
 };
 
-lazy_static::lazy_static! {
-    static ref S3_TIMEOUT: Duration = std::env::var("S3_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(60));
-    static ref S3_READ_TIMEOUT: Duration = std::env::var("S3_READ_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(3));
-}
+const START_DELAY: Duration = Duration::from_millis(100);
 
 pub struct ChunkDownloader {
     futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
     cancel_tokens: HashMap<ChunkRef, CancellationToken>,
     reqwest_client: reqwest::Client,
     current_delay: Duration,
+    args: cli::Args,
 }
 
 impl ChunkDownloader {
-    pub fn new(peer_id: PeerId) -> Self {
+    pub fn new(peer_id: PeerId, args: cli::Args) -> Self {
         let client = reqwest::ClientBuilder::new()
             .user_agent(format!("SQD Worker {peer_id}"))
-            .timeout(*S3_TIMEOUT)
-            .read_timeout(*S3_READ_TIMEOUT)
+            .timeout(args.s3_timeout)
+            .read_timeout(args.s3_read_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Can't create HTTP client");
@@ -51,6 +41,7 @@ impl ChunkDownloader {
             cancel_tokens: HashMap::default(),
             reqwest_client: client,
             current_delay: Duration::ZERO,
+            args,
         }
     }
 }
@@ -80,11 +71,13 @@ impl ChunkDownloader {
         let headers = datasets_index.get_headers().clone();
         let client = self.reqwest_client.clone();
         let current_delay = self.current_delay;
+        let s3_timeout = self.args.s3_timeout;
         self.futures.push(tokio::spawn(async move {
             if current_delay > Duration::ZERO {
-                tracing::debug!("Waiting for {:?} before the next download", current_delay);
+                let sleep = rand::rng().random_range((current_delay / 2)..current_delay);
+                tracing::debug!("Waiting for {:?} before the next download", sleep);
                 tokio::select! {
-                    _ = tokio::time::sleep(current_delay) => {},
+                    _ = tokio::time::sleep(sleep) => {},
                     _ = cancel_token.cancelled() => {},
                 }
             }
@@ -92,7 +85,7 @@ impl ChunkDownloader {
                 result = download_dir(files, dst, &client, &headers) => {
                     (chunk, result)
                 }
-                _ = tokio::time::sleep(*S3_TIMEOUT * num_files as u32) => {
+                _ = tokio::time::sleep(s3_timeout * num_files as u32) => {
                     (chunk, Err(anyhow!("Download timed out")))
                 }
                 _ = cancel_token.cancelled_owned() => {
@@ -116,12 +109,14 @@ impl ChunkDownloader {
                             self.current_delay = Duration::from_secs(0);
                         }
                         Err(_) => {
-                            self.current_delay *= 2;
-                            let jitter = Duration::from_millis(rand::rng().random_range(50..150));
-                            self.current_delay = std::cmp::min(
-                                self.current_delay + jitter,
-                                Duration::from_secs(600),
-                            );
+                            if self.current_delay == Duration::ZERO {
+                                self.current_delay = START_DELAY;
+                            } else {
+                                self.current_delay = std::cmp::min(
+                                    self.current_delay * 2,
+                                    self.args.downloads_max_delay,
+                                );
+                            }
                         }
                     }
                     (chunk, result)

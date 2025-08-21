@@ -138,6 +138,7 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
         args.data_dir.join("worker"),
         args.concurrent_downloads,
         peer_id,
+        args_clone.clone(),
     )
     .await?;
 

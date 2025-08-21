@@ -30,6 +30,15 @@ pub struct Args {
     #[clap(long, env, default_value_t = 3)]
     pub concurrent_downloads: usize,
 
+    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "60")]
+    pub s3_timeout: Duration,
+
+    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "3")]
+    pub s3_read_timeout: Duration,
+
+    #[clap(env = "DOWNLOADS_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
+    pub downloads_max_delay: Duration,
+
     #[clap(long, env)]
     pub query_threads: Option<usize>,
 
@@ -42,6 +51,9 @@ pub struct Args {
 
     #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
     pub assignment_check_interval: Duration,
+
+    #[clap(env = "ASSIGNMENT_CHECK_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "14400")]
+    pub assignment_fetch_max_delay: Duration,
 
     #[clap(env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
     pub assignment_fetch_timeout: Duration,

@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
+    cli::Args,
     metrics,
     types::{
         dataset::{self, Dataset},
@@ -32,6 +33,7 @@ pub struct StateManager {
     datasets_index: Mutex<Option<DatasetsIndex>>,
     concurrent_downloads: usize,
     worker_id: PeerId,
+    args: Args,
 }
 
 pub struct Status {
@@ -45,6 +47,7 @@ impl StateManager {
         workdir: PathBuf,
         concurrent_downloads: usize,
         worker_id: PeerId,
+        args: Args,
     ) -> Result<Self> {
         let fs = LocalFs::new(workdir);
         remove_temps(&fs)?;
@@ -58,11 +61,12 @@ impl StateManager {
             worker_id,
             notify: tokio::sync::Notify::new(),
             datasets_index: Mutex::new(None),
+            args,
         })
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        let mut downloader = ChunkDownloader::new(self.worker_id);
+        let mut downloader = ChunkDownloader::new(self.worker_id, self.args.clone());
         loop {
             self.state.lock().report_status();
             let stored_bytes = get_directory_size(&self.fs.root);
