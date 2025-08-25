@@ -22,8 +22,9 @@ pub fn new_assignments_stream(
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+    let version = env!("CARGO_PKG_VERSION");
     let reqwest_client = reqwest::Client::builder()
-        .user_agent(format!("SQD Worker {peer_id}"))
+        .user_agent(format!("SQD Worker/{version} {peer_id}"))
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
