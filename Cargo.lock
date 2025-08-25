@@ -3802,7 +3802,6 @@ checksum = "2ce58c64292e87af624fcb86465e7dd8342e46a388d71e8fec0ab37ee789630a"
 dependencies = [
  "futures",
  "libp2p-core",
- "libp2p-gossipsub",
  "libp2p-identify",
  "libp2p-identity",
  "libp2p-kad",
@@ -6955,7 +6954,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.0.1"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=08363c2#08363c2b3e5e257657a0a78e830c006f029b714a"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=f610692#f61069223fccb51096830a831e017ce7a967212f"
 dependencies = [
  "anyhow",
  "crypto_box",
@@ -6978,7 +6977,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.2.1"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=08363c2#08363c2b3e5e257657a0a78e830c006f029b714a"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=f610692#f61069223fccb51096830a831e017ce7a967212f"
 dependencies = [
  "async-trait",
  "clap",
@@ -6997,7 +6996,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.0.2"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=08363c2#08363c2b3e5e257657a0a78e830c006f029b714a"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=f610692#f61069223fccb51096830a831e017ce7a967212f"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -7021,7 +7020,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=08363c2#08363c2b3e5e257657a0a78e830c006f029b714a"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=f610692#f61069223fccb51096830a831e017ce7a967212f"
 dependencies = [
  "anyhow",
  "async-trait",
