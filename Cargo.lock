@@ -591,9 +591,9 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
 name = "axum"
-version = "0.7.7"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "504e3947307ac8326a5437504c517c4b56716c9d98fac0028c2acc7ca47d70ae"
+checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
@@ -826,9 +826,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.8.0"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ac0150caa2ae65ca5bd83f25c7de183dea78d4d366469f148435e2acfbad0da"
+checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 dependencies = [
  "serde",
 ]
@@ -2173,6 +2173,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95765f67b4b18863968b4a1bd5bb576f732b29a4a28c7cd84c09fa3e2875f33c"
 
 [[package]]
+name = "faster-hex"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7223ae2d2f179b803433d9c830478527e92b8117eab39460edae7f1614d9fb73"
+dependencies = [
+ "heapless",
+ "serde",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2609,6 +2619,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2653,6 +2672,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
 dependencies = [
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -6969,7 +6998,7 @@ dependencies = [
 [[package]]
 name = "sqd-bloom-filter"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=64493e4#64493e427406c3a59668f7d6ac733d3e02fb5ad7"
+source = "git+https://github.com/subsquid/data.git?rev=a996d10#a996d105c87c84212715e9c09e2652505a1aff47"
 dependencies = [
  "xxhash-rust",
 ]
@@ -7052,7 +7081,7 @@ dependencies = [
 [[package]]
 name = "sqd-polars"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=64493e4#64493e427406c3a59668f7d6ac733d3e02fb5ad7"
+source = "git+https://github.com/subsquid/data.git?rev=a996d10#a996d105c87c84212715e9c09e2652505a1aff47"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7064,18 +7093,19 @@ dependencies = [
 [[package]]
 name = "sqd-primitives"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=64493e4#64493e427406c3a59668f7d6ac733d3e02fb5ad7"
+source = "git+https://github.com/subsquid/data.git?rev=a996d10#a996d105c87c84212715e9c09e2652505a1aff47"
 
 [[package]]
 name = "sqd-query"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=64493e4#64493e427406c3a59668f7d6ac733d3e02fb5ad7"
+source = "git+https://github.com/subsquid/data.git?rev=a996d10#a996d105c87c84212715e9c09e2652505a1aff47"
 dependencies = [
  "anyhow",
  "arrow",
  "bytes",
  "convert_case",
  "dashmap",
+ "faster-hex",
  "identconv",
  "lexical-core",
  "memmap2 0.9.5",
@@ -7091,7 +7121,7 @@ dependencies = [
 
 [[package]]
 name = "sqd-worker"
-version = "2.4.6"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-compression",
