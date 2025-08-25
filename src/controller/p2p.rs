@@ -15,7 +15,7 @@ use sqd_network_transport::{
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     cli::Args,
@@ -200,40 +200,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         )
         .take_until(cancellation_token.cancelled_owned())
         .for_each(|update| async move {
-            let status = match update.assignment.get_worker(self.worker_id) {
-                Some(worker) => worker.status(),
-                None => {
-                    error!("No assignment found for this worker, waiting for the next epoch");
-                    metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                    return;
-                }
-            };
-
-            if !self
-                .worker
-                .register_assignment(update.assignment, update.id, &self.keypair)
-            {
-                return;
-            }
-
-            match status {
-                sqd_assignments::WorkerStatus::Ok => {
-                    info!("New assignment applied");
-                    metrics::set_status(metrics::WorkerStatus::Active);
-                }
-                sqd_assignments::WorkerStatus::Unreliable => {
-                    warn!("Worker is considered unreliable");
-                    metrics::set_status(metrics::WorkerStatus::Unreliable);
-                }
-                sqd_assignments::WorkerStatus::DeprecatedVersion => {
-                    warn!("Worker should be updated");
-                    metrics::set_status(metrics::WorkerStatus::DeprecatedVersion);
-                }
-                sqd_assignments::WorkerStatus::UnsupportedVersion => {
-                    warn!("Worker version is unsupported");
-                    metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
-                }
-            }
+            let worker = self.worker.clone();
+            let keypair = self.keypair.clone();
+            tokio::task::spawn_blocking(move || {
+                worker.register_assignment(update.assignment, update.id, &keypair);
+            })
+            .await
+            .expect("register_assignment shouldn't panic");
         })
         .await;
         info!("Assignment processing task finished");

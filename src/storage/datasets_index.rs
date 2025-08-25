@@ -15,6 +15,7 @@ pub struct DatasetsIndex {
     assignment: sqd_assignments::Assignment,
     assignment_id: String,
     peer_id: PeerId,
+    status: sqd_assignments::WorkerStatus,
     http_headers: reqwest::header::HeaderMap,
 }
 
@@ -63,8 +64,8 @@ impl DatasetsIndex {
         key: &Keypair,
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
-        let Some(worker) = assignment.get_worker(peer_id) else {
-            anyhow::bail!("No assignment for this worker");
+        let Some(worker) = assignment.get_worker(&peer_id) else {
+            anyhow::bail!("no assignment for this worker");
         };
         let headers = worker.decrypt_headers(key)?;
         let http_headers = headers
@@ -81,6 +82,7 @@ impl DatasetsIndex {
             .collect();
 
         Ok(Self {
+            status: worker.status(),
             assignment,
             assignment_id: id.into(),
             peer_id,
@@ -90,11 +92,11 @@ impl DatasetsIndex {
 
     pub fn create_chunks_set(&self) -> ChunkSet {
         let mut chunk_set = ChunkSet::new();
-        let Some(worker) = self.assignment.get_worker(self.peer_id) else {
+        let Some(worker) = self.assignment.get_worker(&self.peer_id) else {
             return chunk_set;
         };
         let mut pool = StringPool::default();
-        for chunk in worker.chunks() {
+        for chunk in worker.iter_chunks() {
             match DataChunk::from_str(chunk.id()) {
                 Ok(id) => {
                     let chunk = ChunkRef {
@@ -113,6 +115,10 @@ impl DatasetsIndex {
             }
         }
         chunk_set
+    }
+
+    pub fn status(&self) -> sqd_assignments::WorkerStatus {
+        self.status
     }
 
     pub fn get_headers(&self) -> &reqwest::header::HeaderMap {

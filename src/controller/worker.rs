@@ -42,8 +42,8 @@ impl Worker {
         assignment: Assignment,
         id: impl Into<String>,
         key: &Keypair,
-    ) -> bool {
-        self.state_manager.set_assignment(assignment, id, key)
+    ) {
+        self.state_manager.set_assignment(assignment, id, key);
     }
 
     pub fn _stop_downloads(&self) {

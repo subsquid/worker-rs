@@ -72,8 +72,8 @@ async fn update_assignment(
     let assignment = fetch_assignment(
         &network_state
             .assignment
-            .fb_url
-            .ok_or(anyhow::anyhow!("Missing fb_url"))?,
+            .fb_url_v1
+            .ok_or(anyhow::anyhow!("Missing fb_url_v1"))?,
         &reqwest_client,
     )
     .await?;

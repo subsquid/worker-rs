@@ -169,18 +169,37 @@ impl StateManager {
         assignment: sqd_assignments::Assignment,
         id: impl Into<String>,
         key: &Keypair,
-    ) -> bool {
+    ) {
         let datasets_index = match DatasetsIndex::new(assignment, id, key) {
             Ok(result) => result,
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
                 error!("Can not get assigned chunks: {e}");
-                return false;
+                return;
             }
         };
+        let status = datasets_index.status();
         let chunks = datasets_index.create_chunks_set();
         self.set_desired_chunks(chunks, datasets_index);
-        true
+
+        match status {
+            sqd_assignments::WorkerStatus::Ok => {
+                info!("New assignment applied");
+                metrics::set_status(metrics::WorkerStatus::Active);
+            }
+            sqd_assignments::WorkerStatus::Unreliable => {
+                warn!("Worker is considered unreliable");
+                metrics::set_status(metrics::WorkerStatus::Unreliable);
+            }
+            sqd_assignments::WorkerStatus::DeprecatedVersion => {
+                warn!("Worker should be updated");
+                metrics::set_status(metrics::WorkerStatus::DeprecatedVersion);
+            }
+            sqd_assignments::WorkerStatus::UnsupportedVersion => {
+                warn!("Worker version is unsupported");
+                metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
+            }
+        }
     }
 
     pub fn _stop_downloads(&self) {
