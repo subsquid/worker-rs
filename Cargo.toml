@@ -55,8 +55,8 @@ sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "
 sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", version = "1.2.1" }
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", version = "2.0.2", features = ["bitstring"] }
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", version = "3.0.0", features = ["worker", "metrics"] }
-sqd-query = { git = "https://github.com/subsquid/data.git", rev = "a996d10", features = ["parquet"] }
-sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "a996d10" }
+sqd-query = { git = "https://github.com/subsquid/data.git", rev = "ca1dd1b", features = ["parquet"] }
+sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "ca1dd1b" }
 
 [profile.release]
 debug = true
