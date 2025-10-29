@@ -92,7 +92,7 @@ async fn update_assignment(
 async fn fetch_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
-) -> anyhow::Result<sqd_messages::assignments::NetworkState> {
+) -> anyhow::Result<sqd_assignments::NetworkState> {
     let response = reqwest_client.get(url).send().await?.error_for_status()?;
     let network_state = response.json().await?;
     Ok(network_state)

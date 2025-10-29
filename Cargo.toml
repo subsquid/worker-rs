@@ -26,7 +26,7 @@ itertools = "0.12.0"
 lazy_static = "1.4.0"
 mimalloc = "0.1.43"
 parking_lot = "0.12.1"
-prometheus-client = "0.22.2"
+prometheus-client = "0.23"
 prost = "0.12.3"
 rand = "0.9.2"
 regex = "1.10.2"
@@ -51,10 +51,10 @@ tracing-opentelemetry = "0.22.0"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 url = "2.5.2"
 walkdir = "2.5.0"
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "ef91736", features = ["reader"] }
-sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "ef91736", version = "1.2.1" }
-sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "ef91736", version = "2.0.2", features = ["bitstring", "assignment_reader"] }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "ef91736", version = "3.0.0", features = ["worker", "metrics"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", features = ["reader"] }
+sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", version = "1.2.1" }
+sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", version = "2.0.2", features = ["bitstring"] }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "b34dce5", version = "3.0.0", features = ["worker", "metrics"] }
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "a996d10", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "a996d10" }
 
