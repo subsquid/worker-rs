@@ -4818,7 +4818,7 @@ dependencies = [
  "snap",
  "thrift",
  "twox-hash",
- "zstd 0.13.2",
+ "zstd 0.13.3",
  "zstd-sys",
 ]
 
@@ -5130,7 +5130,7 @@ dependencies = [
  "streaming-iterator",
  "strength_reduce",
  "version_check",
- "zstd 0.13.2",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -5690,7 +5690,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -6977,7 +6977,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=0e34b5a#0e34b5a74a12e3f137cf81ed78988a0e4799e5f1"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=cd61b90#cd61b909a69fe3985c58ed7c0d8a7470c45fbab7"
 dependencies = [
  "anyhow",
  "crypto_box",
@@ -7001,7 +7001,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.2.1"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=0e34b5a#0e34b5a74a12e3f137cf81ed78988a0e4799e5f1"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=cd61b90#cd61b909a69fe3985c58ed7c0d8a7470c45fbab7"
 dependencies = [
  "async-trait",
  "clap",
@@ -7020,7 +7020,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=0e34b5a#0e34b5a74a12e3f137cf81ed78988a0e4799e5f1"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=cd61b90#cd61b909a69fe3985c58ed7c0d8a7470c45fbab7"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7036,7 +7036,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=0e34b5a#0e34b5a74a12e3f137cf81ed78988a0e4799e5f1"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=cd61b90#cd61b909a69fe3985c58ed7c0d8a7470c45fbab7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7108,7 +7108,7 @@ dependencies = [
 
 [[package]]
 name = "sqd-worker"
-version = "2.5.2"
+version = "2.6.0-rc1"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -7162,6 +7162,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "walkdir",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -8936,9 +8937,9 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.2"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcf2b778a664581e31e389454a7072dab1647606d44f7feea22cd5abb9c9f3f9"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
  "zstd-safe 7.2.1",
 ]

@@ -29,12 +29,22 @@ impl QueryOk {
         }
     }
 
-    pub fn compressed_data(&self) -> Vec<u8> {
+    pub fn data_gzip(&self) -> Vec<u8> {
         use flate2::write::GzEncoder;
         use std::io::Write;
         let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder.write_all(&self.data).expect("Couldn't gzip data");
         encoder.finish().expect("Couldn't finish gzipping data")
+    }
+
+    pub fn data_zstd(&self) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = zstd::Encoder::new(Vec::new(), zstd::DEFAULT_COMPRESSION_LEVEL)
+            .expect("Couldn't create zstd encoder");
+        encoder
+            .write_all(&self.data)
+            .expect("Couldn't zstd compress data");
+        encoder.finish().expect("Couldn't finish zstd compression")
     }
 
     pub fn sha3_256(&self) -> Vec<u8> {

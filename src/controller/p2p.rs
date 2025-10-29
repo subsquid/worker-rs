@@ -348,6 +348,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         resp_chan: ResponseChannel<sqd_messages::QueryResult>,
     ) {
         let query_id = query.query_id.clone();
+        let compression = query.compression();
 
         let (result, retry_after) = self.process_query(peer_id, &query).await;
         if let Err(e) = &result {
@@ -357,7 +358,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         metrics::query_executed(&result);
         let log = self.generate_log(&result, query, peer_id);
 
-        if let Err(e) = self.send_query_result(query_id, result, resp_chan, retry_after) {
+        if let Err(e) =
+            self.send_query_result(query_id, result, resp_chan, retry_after, compression)
+        {
             tracing::error!("Couldn't send query result: {e:?}, query log: {log:?}");
         }
 
@@ -414,10 +417,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         result: QueryResult,
         resp_chan: ResponseChannel<sqd_messages::QueryResult>,
         retry_after: Option<Duration>,
+        compression: sqd_messages::Compression,
     ) -> Result<()> {
         let query_result = match result {
             Ok(result) => {
-                let data = result.compressed_data();
+                let data = match compression {
+                    sqd_messages::Compression::None => result.data,
+                    sqd_messages::Compression::Gzip => result.data_gzip(),
+                    sqd_messages::Compression::Zstd => result.data_zstd(),
+                };
                 sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
                     data,
                     last_block: result.last_block,
