@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use prometheus_client::encoding::{EncodeLabelSet, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::{family::Family, gauge::Gauge, histogram::Histogram, info::Info};
+use prometheus_client::metrics::{family::Family, gauge::Gauge, histogram::Histogram};
 use prometheus_client::registry::{Registry, Unit};
 
 use crate::query::result::{QueryError, QueryResult};
@@ -26,6 +26,11 @@ pub enum QueryStatus {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct WorkerInfoLabels {
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct StatusLabels {
     worker_status: WorkerStatus,
 }
@@ -36,6 +41,9 @@ struct QueryExecutedLabels {
 }
 
 lazy_static::lazy_static! {
+    // Worker info metric (kept as worker_info_info for backward compatibility)
+    pub static ref WORKER_INFO: Family<WorkerInfoLabels, Gauge> = Default::default();
+
     static ref STATUS: Family<StatusLabels, Gauge> = Default::default();
     pub static ref CHUNKS_AVAILABLE: Gauge = Default::default();
     pub static ref CHUNKS_DOWNLOADING: Gauge = Default::default();
@@ -78,8 +86,13 @@ pub fn query_executed(result: &QueryResult) {
     }
 }
 
-pub fn register_metrics(registry: &mut Registry, info: Info<Vec<(String, String)>>) {
-    registry.register("worker_info", "Worker info", info);
+pub fn register_metrics(registry: &mut Registry, version: String) {
+    WORKER_INFO.get_or_create(&WorkerInfoLabels { version }).set(1);
+    registry.register(
+        "worker_info_info",  // Keep the _info suffix for backward compatibility
+        "Worker information with version",
+        WORKER_INFO.clone(),
+    );
     registry.register(
         "chunks_available",
         "Number of available chunks",

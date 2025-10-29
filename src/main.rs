@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use prometheus_client::metrics::info::Info;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
@@ -124,15 +123,12 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     let agent_info = get_agent_info!();
     let transport_builder = P2PTransportBuilder::from_cli(args.transport, agent_info).await?;
     let peer_id = transport_builder.local_peer_id();
-    let info = Info::new(vec![(
-        "version".to_owned(),
-        env!("CARGO_PKG_VERSION").to_owned(),
-    )]);
+    let worker_version = env!("CARGO_PKG_VERSION").to_owned();
     let mut metrics_registry = prometheus_client::registry::Registry::with_labels(
         [(Cow::Borrowed("worker_id"), Cow::Owned(peer_id.to_string()))].into_iter(),
     );
     sqd_network_transport::metrics::register_metrics(&mut metrics_registry);
-    metrics::register_metrics(&mut metrics_registry, info);
+    metrics::register_metrics(&mut metrics_registry, worker_version);
 
     let state_manager = StateManager::new(
         args.data_dir.join("worker"),
