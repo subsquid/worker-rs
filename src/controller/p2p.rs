@@ -15,7 +15,7 @@ use sqd_network_transport::{
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::{
     cli::Args,
@@ -321,6 +321,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Transport event loop finished");
     }
 
+    #[instrument(skip_all)]
     fn validate_query(&self, query: &Query, peer_id: PeerId) -> bool {
         if !query.verify_signature(peer_id, self.worker_id) {
             tracing::warn!("Rejected query with invalid signature from {}", peer_id);
@@ -341,6 +342,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         true
     }
 
+    #[instrument(skip_all, fields(query_id = %query.query_id, peer_id = %peer_id, dataset = %query.dataset))]
     async fn handle_query(
         &self,
         peer_id: PeerId,
@@ -377,6 +379,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 
     /// Returns query result and the time to wait before sending the next query
+    #[instrument(skip_all)]
     async fn process_query(
         &self,
         peer_id: PeerId,
@@ -425,6 +428,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         (result, retry_after)
     }
 
+    #[instrument(skip_all)]
     fn send_query_result(
         &self,
         query_id: String,
@@ -453,13 +457,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
             signature: Default::default(),
         };
+        let _span = tracing::debug_span!("sign_query_result");
         msg.sign(&self.keypair).map_err(|e| anyhow!(e))?;
+        drop(_span);
 
         let result_size = msg.encoded_len() as u64;
         if result_size > protocol::MAX_QUERY_RESULT_SIZE {
             anyhow::bail!("query result size too large: {result_size}");
         }
 
+        tracing::trace!("Sending query result");
         // TODO: propagate backpressure from the transport lib
         self.transport_handle
             .send_query_result(msg, resp_chan)
@@ -468,6 +475,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn generate_log(
         &self,
         query_result: &QueryResult,

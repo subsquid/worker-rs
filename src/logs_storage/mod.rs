@@ -1,6 +1,7 @@
 use anyhow::Result;
 use sqd_messages::{ProstMsg, QueryExecuted};
 use tokio_rusqlite::{named_params, Connection};
+use tracing::instrument;
 
 pub struct LogsStorage {
     db: Connection,
@@ -25,6 +26,7 @@ impl LogsStorage {
         Ok(Self { db })
     }
 
+    #[instrument(skip_all)]
     pub async fn save_log(&self, log: QueryExecuted) -> Result<()> {
         let query = log.query.as_ref().expect("Log should be well formed");
         let timestamp = log.timestamp_ms;
@@ -50,6 +52,7 @@ impl LogsStorage {
     //
     // Note that logs are not always added in the order of their timestamps,
     // so only the logs in the distant past should be fetched with this method.
+    #[instrument(skip_all)]
     pub async fn get_logs(
         &self,
         from_timestamp_ms: u64,

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use axum::{http::StatusCode, response::IntoResponse};
+use tracing::instrument;
 
 use crate::util::hash::sha3_256;
 
@@ -29,6 +30,7 @@ impl QueryOk {
         }
     }
 
+    #[instrument(skip_all)]
     pub fn data_gzip(&self) -> Vec<u8> {
         use flate2::write::GzEncoder;
         use std::io::Write;
@@ -37,6 +39,7 @@ impl QueryOk {
         encoder.finish().expect("Couldn't finish gzipping data")
     }
 
+    #[instrument(skip_all)]
     pub fn data_zstd(&self) -> Vec<u8> {
         use std::io::Write;
         let mut encoder = zstd::Encoder::new(Vec::new(), zstd::DEFAULT_COMPRESSION_LEVEL)

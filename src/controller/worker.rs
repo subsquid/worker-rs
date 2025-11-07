@@ -8,6 +8,7 @@ use sqd_query::ParquetChunk;
 use tokio_util::sync::CancellationToken;
 
 use sqd_network_transport::{Keypair, PeerId};
+use tracing::instrument;
 
 use crate::{
     metrics,
@@ -86,6 +87,7 @@ impl Worker {
         self.state_manager.run(cancellation_token).await
     }
 
+    #[instrument(skip_all)]
     async fn execute_query(
         &self,
         query_str: &str,
