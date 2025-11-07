@@ -55,7 +55,7 @@ impl QueryOk {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum QueryError {
     #[error("This worker doesn't have any chunks in requested range")]
     NotFound,
@@ -66,12 +66,18 @@ pub enum QueryError {
     #[error("Service overloaded")]
     ServiceOverloaded,
     #[error("Internal error")]
-    Other(#[from] anyhow::Error),
+    Other(String),
 }
 
 impl From<std::io::Error> for QueryError {
     fn from(value: std::io::Error) -> Self {
-        Self::Other(anyhow::Error::from(value))
+        Self::Other(value.to_string())
+    }
+}
+
+impl From<anyhow::Error> for QueryError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Other(value.to_string())
     }
 }
 

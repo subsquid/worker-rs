@@ -358,15 +358,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         }
 
         metrics::query_executed(&result);
-        let log = self.generate_log(&result, query, peer_id);
 
+        // Cloning is much cheaper than hash computation and we need to keep the result for logging
         if let Err(e) =
-            self.send_query_result(query_id, result, resp_chan, retry_after, compression)
+            self.send_query_result(query_id, result.clone(), resp_chan, retry_after, compression)
         {
-            tracing::error!("Couldn't send query result: {e:?}, query log: {log:?}");
+            tracing::error!("Couldn't send query result: {e:?}");
         }
 
-        if let Some(log) = log {
+        if let Some(log) = self.generate_log(&result, query, peer_id) {
             if log.encoded_len() > MAX_LOGS_SIZE {
                 warn!("Query log is too big: {log:?}");
                 return;

@@ -134,7 +134,7 @@ impl Worker {
                 let bytes = writer.finish()?;
 
                 if bytes.len() > RESPONSE_LIMIT {
-                    return Err(QueryError::Other(anyhow::anyhow!("Response too large")));
+                    return Err(QueryError::from(anyhow::anyhow!("Response too large")));
                 }
 
                 Ok(QueryOk::new(bytes, 1, last_block, start_time.elapsed()))
@@ -144,7 +144,7 @@ impl Worker {
             })
         });
         rx.await.unwrap_or_else(|_| {
-            Err(QueryError::Other(anyhow::anyhow!(
+            Err(QueryError::from(anyhow::anyhow!(
                 "Query processor didn't produce a result"
             )))
         })
