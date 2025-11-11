@@ -2,7 +2,7 @@ use std::{env, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::RwLock;
 use sqd_messages::{
     query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
@@ -172,16 +172,17 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         );
     }
 
-    async fn run_queries_loop(&self, cancellation_token: CancellationToken) {
+    async fn run_queries_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
         let queries_rx = self.queries_rx.take().unwrap();
         ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(
-                CONCURRENT_QUERY_MESSAGES,
-                |(peer_id, query, resp_chan)| async move {
-                    self.handle_query(peer_id, query, resp_chan).await;
-                },
-            )
+            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.handle_query(peer_id, query, resp_chan).await;
+                })
+                .map(|r| r.unwrap())
+            })
             .await;
         info!("Query processing task finished");
     }
