@@ -382,6 +382,20 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         peer_id: PeerId,
         query: &Query,
     ) -> (QueryResult, Option<Duration>) {
+        match query.compression {
+            c if c == sqd_messages::Compression::Gzip as i32
+                || c == sqd_messages::Compression::Zstd as i32
+                || c == sqd_messages::Compression::None as i32 => {}
+            _ => {
+                return (
+                    Err(QueryError::BadRequest(
+                        "Unsupported compression type".to_owned(),
+                    )),
+                    None,
+                );
+            }
+        }
+
         let status = match self.allocations_checker.try_spend(peer_id) {
             compute_units::RateLimitStatus::NoAllocation => {
                 return (Err(QueryError::NoAllocation), None)
