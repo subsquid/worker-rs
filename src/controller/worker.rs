@@ -51,8 +51,8 @@ impl Worker {
         self.state_manager._stop_downloads();
     }
 
-    pub fn status(&self) -> manager::Status {
-        self.state_manager.current_status()
+    pub async fn status(&self) -> manager::Status {
+        self.state_manager.current_status().await
     }
 
     pub async fn run_query(

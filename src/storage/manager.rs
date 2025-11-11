@@ -122,9 +122,14 @@ impl StateManager {
     }
 
     #[instrument(skip_all)]
-    pub fn current_status(&self) -> Status {
+    pub async fn current_status(&self) -> Status {
         let status = self.state.lock().status();
-        let stored_bytes = get_directory_size(&self.fs.root);
+        let stored_bytes = tokio::task::spawn_blocking({
+            let root = self.fs.root.clone();
+            move || get_directory_size(&root)
+        })
+        .await
+        .unwrap();
         let Some(assignment_id) = self
             .datasets_index
             .lock()
@@ -138,10 +143,17 @@ impl StateManager {
                 assignment_id: None,
             };
         };
-        let mut unavailability_map = Vec::with_capacity(status.desired.len());
-        for chunk_ref in &status.desired {
-            unavailability_map.push(!status.available.contains(chunk_ref));
-        }
+
+        let unavailability_map = tokio::task::spawn_blocking(move || {
+            let mut unavailability_map = Vec::with_capacity(status.desired.len());
+            for chunk_ref in &status.desired {
+                unavailability_map.push(!status.available.contains(chunk_ref));
+            }
+            unavailability_map
+        })
+        .await
+        .unwrap();
+
         Status {
             unavailability_map,
             stored_bytes,

@@ -15,7 +15,7 @@ use sqd_network_transport::{
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument, warn, Instrument};
 
 use crate::{
     cli::Args,
@@ -74,7 +74,7 @@ pub async fn create_p2p_controller(
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, args.data_dir.join("peer_id"));
 
-    let worker_status = get_worker_status(&worker);
+    let worker_status = get_worker_status(&worker).await;
 
     let allocations_checker = allocations_checker::AllocationsChecker::new(
         transport_builder.contract_client(),
@@ -202,9 +202,11 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         .for_each(|update| async move {
             let worker = self.worker.clone();
             let keypair = self.keypair.clone();
+            let id = update.id.clone();
             tokio::task::spawn_blocking(move || {
                 worker.register_assignment(update.assignment, update.id, &keypair);
             })
+            .instrument(tracing::info_span!("set_assignment", id))
             .await
             .expect("register_assignment shouldn't panic");
         })
@@ -235,7 +237,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         IntervalStream::new(timer)
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
-                let status = get_worker_status(&self.worker);
+                let status = get_worker_status(&self.worker).await;
                 *self.worker_status.write() = status;
             })
             .await;
@@ -360,13 +362,20 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         metrics::query_executed(&result);
 
         // Cloning is much cheaper than hash computation and we need to keep the result for logging
-        if let Err(e) =
-            self.send_query_result(query_id, result.clone(), resp_chan, retry_after, compression)
+        if let Err(e) = self
+            .send_query_result(
+                query_id,
+                result.clone(),
+                resp_chan,
+                retry_after,
+                compression,
+            )
+            .await
         {
             tracing::error!("Couldn't send query result: {e:?}");
         }
 
-        if let Some(log) = self.generate_log(&result, query, peer_id) {
+        if let Some(log) = self.generate_log(&result, query, peer_id).await {
             if log.encoded_len() > MAX_LOGS_SIZE {
                 warn!("Query log is too big: {log:?}");
                 return;
@@ -429,7 +438,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 
     #[instrument(skip_all)]
-    fn send_query_result(
+    async fn send_query_result(
         &self,
         query_id: String,
         result: QueryResult,
@@ -441,8 +450,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             Ok(result) => {
                 let data = match compression {
                     sqd_messages::Compression::None => result.data,
-                    sqd_messages::Compression::Gzip => result.data_gzip(),
-                    sqd_messages::Compression::Zstd => result.data_zstd(),
+                    sqd_messages::Compression::Gzip => result.data_gzip().await,
+                    sqd_messages::Compression::Zstd => result.data_zstd().await,
                 };
                 sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
                     data,
@@ -458,7 +467,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             signature: Default::default(),
         };
         let _span = tracing::debug_span!("sign_query_result");
-        msg.sign(&self.keypair).map_err(|e| anyhow!(e))?;
+        tokio::task::block_in_place(|| msg.sign(&self.keypair).map_err(|e| anyhow!(e)))?;
         drop(_span);
 
         let result_size = msg.encoded_len() as u64;
@@ -476,7 +485,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 
     #[instrument(skip_all)]
-    fn generate_log(
+    async fn generate_log(
         &self,
         query_result: &QueryResult,
         query: Query,
@@ -487,7 +496,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let result = match query_result {
             Ok(result) => Result::Ok(sqd_messages::QueryOkSummary {
                 uncompressed_data_size: result.data.len() as u64,
-                data_hash: result.sha3_256(),
+                data_hash: result.sha3_256().await,
                 last_block: result.last_block,
             }),
             Err(QueryError::NoAllocation) => return None,
@@ -533,8 +542,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 }
 
 #[tracing::instrument(skip_all)]
-fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
-    let status = worker.status();
+async fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
+    let status = worker.status().await;
     let assignment_id = match status.assignment_id {
         Some(assignment_id) => assignment_id,
         None => String::new(),
