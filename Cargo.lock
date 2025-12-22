@@ -5917,6 +5917,7 @@ dependencies = [
 [[package]]
 name = "qplan"
 version = "0.1.0"
+source = "git+https://github.com/subsquid/qplan.git?rev=354f265#354f265850a9a5f5b1c83710f0bf37e3d4f19884"
 dependencies = [
  "chrono",
  "futures",
