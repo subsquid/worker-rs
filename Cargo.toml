@@ -63,7 +63,7 @@ sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "2a7
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "2a7cb0e", version = "3.0.0", features = ["worker", "metrics"] }
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "4c089d8", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "4c089d8" }
-qplan = {git = "https://github.com/subsquid/qplan.git", rev = "354f265" }
+sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
 
 [profile.release]
 debug = true

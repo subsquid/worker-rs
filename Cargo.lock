@@ -5908,24 +5908,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qplan"
-version = "0.1.0"
-source = "git+https://github.com/subsquid/qplan.git?rev=354f265#354f265850a9a5f5b1c83710f0bf37e3d4f19884"
-dependencies = [
- "chrono",
- "futures",
- "prost 0.13.5",
- "serde",
- "serde_derive",
- "serde_json",
- "substrait",
- "thiserror 2.0.11",
- "tonic",
- "tracing",
- "uuid 1.19.0",
-]
-
-[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7394,7 +7376,6 @@ dependencies = [
  "polars-plan",
  "prometheus-client",
  "prost 0.13.5",
- "qplan",
  "rand 0.9.2",
  "regex",
  "reqwest 0.12.8",
@@ -7413,6 +7394,7 @@ dependencies = [
  "sqd-network-transport",
  "sqd-polars",
  "sqd-query",
+ "sql_query_plan",
  "substrait",
  "thiserror 1.0.65",
  "tokio",
@@ -7426,6 +7408,24 @@ dependencies = [
  "url",
  "walkdir",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "sql_query_plan"
+version = "0.1.0"
+source = "git+https://github.com/subsquid/qplan.git?rev=658f88f#658f88f9bdcf52915a2e1ca315853a698d1a60b0"
+dependencies = [
+ "chrono",
+ "futures",
+ "prost 0.13.5",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "substrait",
+ "thiserror 2.0.11",
+ "tonic",
+ "tracing",
+ "uuid 1.19.0",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ use substrait::proto::{
     expression, expression::field_reference, expression::literal::LiteralType, Expression, Rel,
 };
 
-use qplan::plan::*;
+use sql_query_plan::plan::*;
 
 /// Errors that can occur when creating this specific target plan.
 #[derive(Debug, thiserror::Error)]
