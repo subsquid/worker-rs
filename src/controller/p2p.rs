@@ -26,7 +26,7 @@ use crate::{
     controller::worker::QueryType,
     logs_storage::LogsStorage,
     metrics,
-    query::result::{QueryError, QueryOk, QueryResult},
+    query::result::{QueryError, QueryResult},
     run_all,
     util::{timestamp_now_ms, UseOnce},
 };

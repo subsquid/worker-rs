@@ -1,5 +1,6 @@
 //! Convert a query plan to a polars target plan.
 //! This is the implementation of Target Plans for Workers.
+//! Code originated from https://github.com/subsquid/sql4sqd-prototype/blob/fe6516e65ae973519870826cb48416863b124256/crates/worker/src/polars_target.rs
 use std::ops::{Add, Div, Mul, Sub};
 
 use polars::error::PolarsError;
