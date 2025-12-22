@@ -18,10 +18,17 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn, Instrument};
 
 use crate::{
-    cli::Args, compute_units::{
+    cli::Args,
+    compute_units::{
         self,
         allocations_checker::{self, AllocationsChecker},
-    }, controller::worker::QueryType, logs_storage::LogsStorage, metrics, query::result::{QueryError, QueryOk, QueryResult}, run_all, util::{UseOnce, timestamp_now_ms}
+    },
+    controller::worker::QueryType,
+    logs_storage::LogsStorage,
+    metrics,
+    query::result::{QueryError, QueryOk, QueryResult},
+    run_all,
+    util::{timestamp_now_ms, UseOnce},
 };
 
 use super::worker::Worker;
@@ -184,7 +191,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
                 let this = self.clone();
                 tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan, QueryType::PlainQuery).await;
+                    this.handle_query(peer_id, query, resp_chan, QueryType::PlainQuery)
+                        .await;
                 })
                 .map(|r| r.unwrap())
             })
@@ -199,7 +207,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
                 let this = self.clone();
                 tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan, QueryType::SQLQuery).await;
+                    this.handle_query(peer_id, query, resp_chan, QueryType::SqlQuery)
+                        .await;
                 })
                 .map(|r| r.unwrap())
             })
@@ -318,7 +327,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                         }
                     }
                 }
-                WorkerEvent::SQLQuery {
+                WorkerEvent::SqlQuery {
                     peer_id,
                     query,
                     resp_chan,
@@ -433,7 +442,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         &self,
         peer_id: PeerId,
         query: &Query,
-        query_type: QueryType
+        query_type: QueryType,
     ) -> (QueryResult, Option<Duration>) {
         match query.compression {
             c if c == sqd_messages::Compression::Gzip as i32

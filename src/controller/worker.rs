@@ -3,23 +3,30 @@ use std::sync::{
     Arc,
 };
 
-use polars::{io::SerWriter, prelude::{JsonFormat, JsonWriter}};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
+use polars::{
+    io::SerWriter,
+    prelude::{JsonFormat, JsonWriter},
+};
 use prost::Message;
 use qplan::plan;
 use sqd_assignments::Assignment;
 use sqd_query::ParquetChunk;
 use substrait::proto::Plan;
 use tokio_util::sync::CancellationToken;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 
 use sqd_network_transport::{Keypair, PeerId};
 use tracing::instrument;
 
 use crate::{
-    controller::{polars_target, sql_request::WorkerChunkStore}, metrics, query::result::{QueryError, QueryOk, QueryResult}, storage::{
+    controller::{polars_target, sql_request::WorkerChunkStore},
+    metrics,
+    query::result::{QueryError, QueryOk, QueryResult},
+    storage::{
         layout::DataChunk,
         manager::{self, StateManager},
-    }, types::dataset::Dataset
+    },
+    types::dataset::Dataset,
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -27,7 +34,7 @@ const RESPONSE_LIMIT: usize = sqd_network_transport::protocol::MAX_QUERY_RESULT_
 
 pub enum QueryType {
     PlainQuery,
-    SQLQuery,
+    SqlQuery,
 }
 
 pub struct Worker {
@@ -90,8 +97,11 @@ impl Worker {
         // self.execute_query(query_str, dataset, block_range, chunk_id)
         //     .await
         match query_type {
-            QueryType::PlainQuery => self.execute_query(query_str, dataset, block_range, chunk_id).await,
-            QueryType::SQLQuery => self.execute_sql_query(query_str, dataset, chunk_id).await,
+            QueryType::PlainQuery => {
+                self.execute_query(query_str, dataset, block_range, chunk_id)
+                    .await
+            }
+            QueryType::SqlQuery => self.execute_sql_query(query_str, dataset, chunk_id).await,
         }
     }
 
@@ -185,7 +195,11 @@ impl Worker {
             )));
         };
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset.clone(), chunk.clone()) else {
+        let Some(chunk_guard) = self
+            .state_manager
+            .clone()
+            .get_chunk(dataset.clone(), chunk.clone())
+        else {
             return Err(QueryError::NotFound);
         };
 
@@ -195,20 +209,31 @@ impl Worker {
             let result = (move || {
                 let start_time = std::time::Instant::now();
                 let data_source = WorkerChunkStore {
-                    path: chunk_guard.as_str().to_owned()
+                    path: chunk_guard.as_str().to_owned(),
                 };
-                let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan).map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
-                let lf = target.compile(&context, &dataset, &[local_chunk_id], &data_source).map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
+                let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
+                    .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
+                let lf = target
+                    .compile(&context, &dataset, &[local_chunk_id], &data_source)
+                    .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
                 let mut df = match lf {
                     Some(lf) => {
                         tracing::debug!("LF Plan: {:?}", lf.describe_plan());
-                        lf.collect().map_err(|err| anyhow::anyhow!("Planning error: {:?}", err))?
-                    },
-                    None => return Err(QueryError::from(anyhow::anyhow!("Planning error: No data"))),
+                        lf.collect()
+                            .map_err(|err| anyhow::anyhow!("Planning error: {:?}", err))?
+                    }
+                    None => {
+                        return Err(QueryError::from(anyhow::anyhow!("Planning error: No data")))
+                    }
                 };
                 let mut buf = std::io::BufWriter::new(Vec::new());
-                JsonWriter::new(&mut buf).with_json_format(JsonFormat::JsonLines).finish(&mut df).map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
-                let bytes = buf.into_inner().map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+                JsonWriter::new(&mut buf)
+                    .with_json_format(JsonFormat::JsonLines)
+                    .finish(&mut df)
+                    .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+                let bytes = buf
+                    .into_inner()
+                    .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
 
                 if bytes.len() > RESPONSE_LIMIT {
                     return Err(QueryError::from(anyhow::anyhow!("Response too large")));

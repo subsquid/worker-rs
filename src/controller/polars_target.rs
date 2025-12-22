@@ -7,7 +7,7 @@ use polars::lazy::prelude::*;
 use polars::prelude::*;
 
 use substrait::proto::{
-    Expression, Rel, expression, expression::field_reference, expression::literal::LiteralType,
+    expression, expression::field_reference, expression::literal::LiteralType, Expression, Rel,
 };
 
 use qplan::plan::*;
