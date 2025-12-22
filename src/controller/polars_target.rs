@@ -5,7 +5,7 @@ use std::ops::{Add, Div, Mul, Sub};
 use polars::error::PolarsError;
 use polars::lazy::prelude::*;
 use polars::prelude::*;
-use polars_plan::prelude::DynLiteralValue;
+
 use substrait::proto::{
     Expression, Rel, expression, expression::field_reference, expression::literal::LiteralType,
 };
@@ -233,8 +233,8 @@ impl PolarsExprTransformer {
         tctx: &TraversalContext,
     ) -> PolarsTargetResult<Series> {
         let t = match self.transform_expr(&es[0], s, tctx)? {
-            Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(_))) => Ok(LitType::LiteralInt),
-            Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Str(_))) => Ok(LitType::LiteralStr),
+            Expr::Literal(LiteralValue::Int(_)) => Ok(LitType::LiteralInt),
+            Expr::Literal(LiteralValue::String(_)) => Ok(LitType::LiteralStr),
             _ => polars_err("unexpected literal".to_string()),
         }?;
 
@@ -258,7 +258,7 @@ impl PolarsExprTransformer {
 
     fn expr_to_int(e: &Expr) -> PolarsTargetResult<i128> {
         match e {
-            Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(i))) => Ok(*i),
+            Expr::Literal(LiteralValue::Int(i)) => Ok(*i),
             _ => polars_err("unexpected literal".to_string()),
         }
     }
@@ -266,7 +266,7 @@ impl PolarsExprTransformer {
     // TODO: string or timestamp
     fn expr_to_str(e: &Expr) -> PolarsTargetResult<String> {
         match e {
-            Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Str(s))) => Ok(s.to_string()),
+            Expr::Literal(LiteralValue::String(s)) => Ok(s.to_string()),
             _ => polars_err("unexpected literal".to_string()),
         }
     }
@@ -350,7 +350,7 @@ impl ExprTransformer<Expr, PolarsTargetErr> for PolarsExprTransformer {
 
         let values = self.literal_list_to_series(&l.options, source, tctx)?;
 
-        Ok(field.is_in(lit(values).implode(), false))
+        Ok(field.is_in(lit(values).implode()))
     }
 }
 
