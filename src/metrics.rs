@@ -87,9 +87,11 @@ pub fn query_executed(result: &QueryResult) {
 }
 
 pub fn register_metrics(registry: &mut Registry, version: String) {
-    WORKER_INFO.get_or_create(&WorkerInfoLabels { version }).set(1);
+    WORKER_INFO
+        .get_or_create(&WorkerInfoLabels { version })
+        .set(1);
     registry.register(
-        "worker_info_info",  // Keep the _info suffix for backward compatibility
+        "worker_info_info", // Keep the _info suffix for backward compatibility
         "Worker information with version",
         WORKER_INFO.clone(),
     );

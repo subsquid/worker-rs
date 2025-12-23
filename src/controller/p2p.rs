@@ -23,6 +23,7 @@ use crate::{
         self,
         allocations_checker::{self, AllocationsChecker},
     },
+    controller::worker::QueryType,
     logs_storage::LogsStorage,
     metrics,
     query::result::{QueryError, QueryResult},
@@ -60,6 +61,9 @@ pub struct P2PController<EventStream> {
     queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
     queries_rx:
         UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
+    sql_queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
+    sql_queries_rx:
+        UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
     log_requests_tx: mpsc::Sender<(LogsRequest, ResponseChannel<QueryLogs>)>,
     log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseChannel<QueryLogs>)>>,
 }
@@ -91,6 +95,7 @@ pub async fn create_p2p_controller(
     let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
+    let (sql_queries_tx, sql_queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
     Ok(P2PController {
@@ -108,6 +113,8 @@ pub async fn create_p2p_controller(
         assignment_url: args.assignment_url,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
+        sql_queries_tx,
+        sql_queries_rx: UseOnce::new(sql_queries_rx),
         log_requests_tx,
         log_requests_rx: UseOnce::new(log_requests_rx),
     })
@@ -122,6 +129,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let this = self.clone();
         let token = cancellation_token.child_token();
         let queries_task = tokio::spawn(async move { this.run_queries_loop(token).await });
+
+        let this = self.clone();
+        let token = cancellation_token.child_token();
+        let sql_queries_task = tokio::spawn(async move { this.run_sql_queries_loop(token).await });
 
         let this = self.clone();
         let token = cancellation_token.child_token();
@@ -163,6 +174,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             cancellation_token,
             event_task,
             queries_task,
+            sql_queries_task,
             assignments_task,
             logs_task,
             logs_cleanup_task,
@@ -179,12 +191,29 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
                 let this = self.clone();
                 tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan).await;
+                    this.handle_query(peer_id, query, resp_chan, QueryType::PlainQuery)
+                        .await;
                 })
                 .map(|r| r.unwrap())
             })
             .await;
         info!("Query processing task finished");
+    }
+
+    async fn run_sql_queries_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
+        let sql_queries_rx = self.sql_queries_rx.take().unwrap();
+        ReceiverStream::new(sql_queries_rx)
+            .take_until(cancellation_token.cancelled_owned())
+            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.handle_query(peer_id, query, resp_chan, QueryType::SqlQuery)
+                        .await;
+                })
+                .map(|r| r.unwrap())
+            })
+            .await;
+        info!("SQL Query processing task finished");
     }
 
     async fn run_assignments_loop(
@@ -298,6 +327,24 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                         }
                     }
                 }
+                WorkerEvent::SqlQuery {
+                    peer_id,
+                    query,
+                    resp_chan,
+                } => {
+                    if !self.validate_query(&query, peer_id) {
+                        continue;
+                    }
+                    match self.sql_queries_tx.try_send((peer_id, query, resp_chan)) {
+                        Ok(_) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!("SQL Queries queue is full. Dropping query from {peer_id}");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            break;
+                        }
+                    }
+                }
                 WorkerEvent::LogsRequest { request, resp_chan } => {
                     match self.log_requests_tx.try_send((request, resp_chan)) {
                         Ok(_) => {}
@@ -351,11 +398,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         peer_id: PeerId,
         query: Query,
         resp_chan: ResponseChannel<sqd_messages::QueryResult>,
+        query_type: QueryType,
     ) {
         let query_id = query.query_id.clone();
         let compression = query.compression();
 
-        let (result, retry_after) = self.process_query(peer_id, &query).await;
+        let (result, retry_after) = self.process_query(peer_id, &query, query_type).await;
         if let Err(e) = &result {
             warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
         }
@@ -394,6 +442,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         &self,
         peer_id: PeerId,
         query: &Query,
+        query_type: QueryType,
     ) -> (QueryResult, Option<Duration>) {
         match query.compression {
             c if c == sqd_messages::Compression::Gzip as i32
@@ -428,6 +477,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 block_range,
                 &query.chunk_id,
                 Some(peer_id),
+                query_type,
             )
             .await;
 
