@@ -1,7 +1,7 @@
 [package]
 name = "sqd-worker"
 license = "AGPL-3.0-or-later"
-version = "2.7.0"
+version = "2.8.0"
 edition = "2021"
 
 [dependencies]
@@ -61,8 +61,8 @@ sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "
 sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "2a7cb0e", version = "1.2.1" }
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "2a7cb0e", version = "2.0.2", features = ["bitstring"] }
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "2a7cb0e", version = "3.0.0", features = ["worker", "metrics"] }
-sqd-query = { git = "https://github.com/subsquid/data.git", rev = "4c089d8", features = ["parquet"] }
-sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "4c089d8" }
+sqd-query = { git = "https://github.com/subsquid/data.git", rev = "bef666b", features = ["parquet"] }
+sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "bef666b" }
 sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
 
 [profile.release]
