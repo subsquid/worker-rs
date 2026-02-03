@@ -61,7 +61,7 @@ async fn update_assignment(
     reqwest_client: &reqwest::Client,
     last_id: &mut Option<String>,
 ) -> anyhow::Result<Option<AssignmentUpdate>> {
-    tracing::debug!("Checking for new assignment");
+    tracing::debug!("Checking for new assignment: {url}");
     let network_state = fetch_network_state(&url, &reqwest_client).await?;
     let assignment_id = network_state.assignment.id;
     if last_id.as_ref() == Some(&assignment_id) {
