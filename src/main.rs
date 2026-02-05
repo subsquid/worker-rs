@@ -138,7 +138,9 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
-    let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
+    if args_clone.sentry_is_enabled {
+        let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
+    }
 
     let worker = Arc::new(Worker::new(state_manager, args.parallel_queries));
 
