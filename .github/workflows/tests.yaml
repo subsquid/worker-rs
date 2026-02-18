@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/protoc
-          key: protoc-26.1-linux-x86_64
+          key: protoc-${PROTOC_VERSION}-${ARCH}
 
       - name: Install protoc (if not cached)
         if: steps.cache-protoc.outputs.cache-hit != 'true'
@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/protoc
-          key: protoc-26.1-linux-x86_64
+          key: protoc-${PROTOC_VERSION}-${ARCH}
 
       - name: Install protoc (if not cached)
         if: steps.cache-protoc.outputs.cache-hit != 'true'
@@ -82,8 +82,10 @@ jobs:
 
       - name: Add protoc to PATH
         run: echo "$HOME/.local/protoc/bin" >> "$GITHUB_PATH"
-      
+
       - uses: actions/checkout@v4
+      - name: Fetch LFS files
+        run: git lfs fetch --all && git lfs checkout
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious
