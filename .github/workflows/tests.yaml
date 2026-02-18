@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/protoc
-          key: protoc-${PROTOC_VERSION}-${ARCH}
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.arch }}
 
       - name: Install protoc (if not cached)
         if: steps.cache-protoc.outputs.cache-hit != 'true'
@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/protoc
-          key: protoc-${PROTOC_VERSION}-${ARCH}
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.arch }}
 
       - name: Install protoc (if not cached)
         if: steps.cache-protoc.outputs.cache-hit != 'true'
