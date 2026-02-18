@@ -595,7 +595,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 #[tracing::instrument(skip_all)]
 async fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
     let status = worker.status().await;
-    let assignment_id =  status.assignment_id.unwrap_or_default();
+    let assignment_id = status.assignment_id.unwrap_or_default();
     sqd_messages::WorkerStatus {
         assignment_id,
         missing_chunks: Some(BitString::new(&status.unavailability_map)),

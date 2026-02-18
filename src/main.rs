@@ -18,11 +18,9 @@
 #![warn(clippy::suspicious)]
 #![warn(clippy::perf)]
 #![warn(clippy::complexity)]
-
 #![allow(clippy::style)]
 #![allow(clippy::pedantic)]
 #![allow(clippy::nursery)]
-
 #![cfg_attr(test, allow(clippy::all))]
 
 use std::borrow::Cow;
