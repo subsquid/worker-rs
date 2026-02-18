@@ -345,7 +345,7 @@ impl ExprTransformer<Expr, PolarsTargetErr> for PolarsExprTransformer {
         l: &expression::SingularOrList,
     ) -> Result<Expr, PolarsTargetErr> {
         let field = match l.value {
-            Some(ref x) => self.transform_expr(&*x, source, tctx),
+            Some(ref x) => self.transform_expr(x, source, tctx),
             None => polars_err("no field in list expression".to_string()),
         }?;
 

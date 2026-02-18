@@ -71,7 +71,7 @@ pub struct Args {
     pub sentry_traces_sample_rate: f32,
 
     #[clap(env, hide(true), default_value_t = true)]
-    pub sentry_is_enabled: bool
+    pub sentry_is_enabled: bool,
 }
 
 fn parse_seconds(s: &str) -> Result<Duration> {
