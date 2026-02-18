@@ -9,9 +9,9 @@ use polars::{
     prelude::{JsonFormat, JsonWriter},
 };
 use prost::Message;
-use sql_query_plan::plan;
 use sqd_assignments::Assignment;
 use sqd_query::ParquetChunk;
+use sql_query_plan::plan;
 use substrait::proto::Plan;
 use tokio_util::sync::CancellationToken;
 

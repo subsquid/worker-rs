@@ -57,10 +57,11 @@ url = "2.5.2"
 walkdir = "2.5.0"
 zstd = "0.13"
  
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "32b959b", features = ["reader"] }
-sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "32b959b", version = "1.2.1" }
-sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "32b959b", version = "2.0.2", features = ["bitstring"] }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "32b959b", version = "3.0.0", features = ["worker", "metrics"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "020e5e9", features = ["reader"] }
+sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "020e5e9", version = "1.2.1" }
+sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "020e5e9", version = "2.0.2", features = ["bitstring"] }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "020e5e9", version = "3.0.0", features = ["worker", "metrics"] }
+
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "4c089d8", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "4c089d8" }
 sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
