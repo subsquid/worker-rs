@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  PROTOC_VERSION: 33.3
+  ARCH: linux-x86_64
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
@@ -19,13 +21,32 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || !github.event.pull_request.draft
     steps:
+      - name: Cache protoc
+        id: cache-protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/protoc
+          key: protoc-26.1-linux-x86_64
+
+      - name: Install protoc (if not cached)
+        if: steps.cache-protoc.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.local/protoc
+          curl -L -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${ARCH}.zip"
+          unzip -q /tmp/protoc.zip -d ~/.local/protoc
+
+      - name: Add protoc to PATH
+        run: echo "$HOME/.local/protoc/bin" >> "$GITHUB_PATH"
+      
       - uses: actions/checkout@v4
         with:
           lfs: true
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --all-features --verbose
+        run: cargo test --all-features
 
   fmt:
     name: Rustfmt
@@ -41,6 +62,25 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || !github.event.pull_request.draft
     steps:
+      - name: Cache protoc
+        id: cache-protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/protoc
+          key: protoc-26.1-linux-x86_64
+
+      - name: Install protoc (if not cached)
+        if: steps.cache-protoc.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.local/protoc
+          curl -L -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${ARCH}.zip"
+          unzip -q /tmp/protoc.zip -d ~/.local/protoc
+
+      - name: Add protoc to PATH
+        run: echo "$HOME/.local/protoc/bin" >> "$GITHUB_PATH"
+      
       - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
