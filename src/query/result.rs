@@ -7,12 +7,21 @@ use crate::util::hash::sha3_256;
 
 pub type QueryResult = std::result::Result<QueryOk, QueryError>;
 
+#[derive(Debug, Clone, Default)]
+pub struct WorkerTimeReport {
+    pub parsing_time: Duration,
+    pub execution_time: Duration,
+    pub serialization_time: Duration,
+    pub compression_time: Duration,
+    pub signing_time: Duration,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryOk {
     pub data: Vec<u8>,
     pub num_read_chunks: usize,
     pub last_block: u64,
-    pub exec_time: Duration,
+    pub time_report: WorkerTimeReport,
 }
 
 impl QueryOk {
@@ -20,12 +29,20 @@ impl QueryOk {
         data: Vec<u8>,
         num_read_chunks: usize,
         last_block: u64,
-        exec_time: Duration,
+        parsing_time: Duration,
+        execution_time: Duration,
+        serialization_time: Duration,
     ) -> Self {
         Self {
             data,
             num_read_chunks,
-            exec_time,
+            time_report: WorkerTimeReport {
+                parsing_time,
+                execution_time,
+                serialization_time,
+                compression_time: Duration::from_secs(0),
+                signing_time: Duration::from_secs(0),
+            },
             last_block,
         }
     }
