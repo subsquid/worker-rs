@@ -6,7 +6,7 @@ use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::RwLock;
 use sqd_messages::{
     query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
-    WorkerStatus,
+    TimeReport, WorkerStatus,
 };
 use sqd_network_transport::{
     protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig,
@@ -403,7 +403,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let query_id = query.query_id.clone();
         let compression = query.compression();
 
-        let (result, retry_after) = self.process_query(peer_id, &query, query_type).await;
+        let (mut result, retry_after) = self.process_query(peer_id, &query, query_type).await;
         if let Err(e) = &result {
             warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
         }
@@ -411,7 +411,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         metrics::query_executed(&result);
 
         // Cloning is much cheaper than hash computation and we need to keep the result for logging
-        if let Err(e) = self
+        match self
             .send_query_result(
                 query_id,
                 result.clone(),
@@ -421,7 +421,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             )
             .await
         {
-            tracing::error!("Couldn't send query result: {e:?}");
+            Ok((compression_duration, signing_duration)) => {
+                let _ = result.as_mut().map(|v| {
+                    v.time_report.compression_time = compression_duration;
+                    v.time_report.signing_time = signing_duration;
+                });
+            }
+            Err(e) => tracing::error!("Couldn't send query result: {e:?}"),
         }
 
         if let Some(log) = self.generate_log(&result, query, peer_id).await {
@@ -496,7 +502,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         resp_chan: ResponseChannel<sqd_messages::QueryResult>,
         retry_after: Option<Duration>,
         compression: sqd_messages::Compression,
-    ) -> Result<()> {
+    ) -> Result<(Duration, Duration)> {
+        let compression_timer = std::time::Instant::now();
         let query_result = match result {
             Ok(result) => {
                 let data = match compression {
@@ -511,15 +518,18 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
             Err(e) => query_error::Err::from(e).into(),
         };
+        let compression_duration = compression_timer.elapsed();
         let mut msg = sqd_messages::QueryResult {
             query_id,
             result: Some(query_result),
             retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
             signature: Default::default(),
         };
+        let signing_timer = std::time::Instant::now();
         let _span = tracing::debug_span!("sign_query_result");
         tokio::task::block_in_place(|| msg.sign(&self.keypair).map_err(|e| anyhow!(e)))?;
         drop(_span);
+        let signing_duration = signing_timer.elapsed();
 
         let result_size = msg.encoded_len() as u64;
         if result_size > protocol::MAX_QUERY_RESULT_SIZE {
@@ -532,7 +542,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .send_query_result(msg, resp_chan)
             .map_err(|_| anyhow!("queue full"))?;
 
-        Ok(())
+        Ok((compression_duration, signing_duration))
     }
 
     #[instrument(skip_all)]
@@ -553,15 +563,25 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             Err(QueryError::NoAllocation) => return None,
             Err(e) => query_error::Err::from(e).into(),
         };
-        let exec_time = match query_result {
-            Ok(result) => result.exec_time.as_micros() as u32,
-            Err(_) => 0, // TODO: always measure execution time
+
+        let exec_time_report = match query_result {
+            Ok(result) => Some(TimeReport {
+                parsing_time_micros: result.time_report.parsing_time.as_micros() as u32,
+                execution_time_micros: result.time_report.execution_time.as_micros() as u32,
+                compression_time_micros: result.time_report.compression_time.as_micros() as u32,
+                signing_time_micros: result.time_report.signing_time.as_micros() as u32,
+                serialization_time_micros: result.time_report.serialization_time.as_micros() as u32,
+            }),
+            Err(_) => None, // TODO: always measure execution time
         };
 
         Some(QueryExecuted {
             client_id: client_id.to_string(),
             query: Some(query),
-            exec_time_micros: exec_time,
+            exec_time_micros: exec_time_report
+                .as_ref()
+                .map_or(0, |report| report.execution_time_micros),
+            exec_time_report,
             timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
             result: Some(result),
             worker_version: WORKER_VERSION.to_string(),
