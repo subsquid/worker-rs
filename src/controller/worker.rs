@@ -94,8 +94,6 @@ impl Worker {
                 .map(|id| id.to_string())
                 .unwrap_or("{unknown}".to_string())
         );
-        // self.execute_query(query_str, dataset, block_range, chunk_id)
-        //     .await
         match query_type {
             QueryType::PlainQuery => {
                 self.execute_query(query_str, dataset, block_range, chunk_id)
@@ -136,13 +134,16 @@ impl Worker {
         let (tx, rx) = tokio::sync::oneshot::channel();
         sqd_polars::POOL.spawn(move || {
             let result = (move || {
-                let start_time = std::time::Instant::now();
-
                 let data_chunk = ParquetChunk::new(chunk_guard.as_str());
+                let parse_timer = std::time::Instant::now();
                 let plan = query.compile();
+                let parse_duration = parse_timer.elapsed();
+                let exec_timer = std::time::Instant::now();
                 let data = Vec::with_capacity(1024 * 1024);
                 let mut writer = sqd_query::JsonLinesWriter::new(data);
                 let blocks = plan.execute(&data_chunk)?;
+                let exec_duration = exec_timer.elapsed();
+                let serialization_timer = std::time::Instant::now();
                 let last_block = if let Some(mut blocks) = blocks {
                     writer.write_blocks(&mut blocks)?;
                     blocks.last_block()
@@ -154,12 +155,20 @@ impl Worker {
                     }
                 };
                 let bytes = writer.finish()?;
+                let serialization_duration = serialization_timer.elapsed();
 
                 if bytes.len() > RESPONSE_LIMIT {
                     return Err(QueryError::from(anyhow::anyhow!("Response too large")));
                 }
 
-                Ok(QueryOk::new(bytes, 1, last_block, start_time.elapsed()))
+                Ok(QueryOk::new(
+                    bytes,
+                    1,
+                    last_block,
+                    parse_duration,
+                    exec_duration,
+                    serialization_duration,
+                ))
             })();
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");
@@ -207,15 +216,17 @@ impl Worker {
         let local_chunk_id = chunk_id.to_owned().clone();
         sqd_polars::POOL.spawn(move || {
             let result = (move || {
-                let start_time = std::time::Instant::now();
                 let data_source = WorkerChunkStore {
                     path: chunk_guard.as_str().to_owned(),
                 };
+                let parse_timer = std::time::Instant::now();
                 let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
                     .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
                 let lf = target
                     .compile(&context, &dataset, &[local_chunk_id], &data_source)
                     .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
+                let parse_duration = parse_timer.elapsed();
+                let exec_timer = std::time::Instant::now();
                 let mut df = match lf {
                     Some(lf) => {
                         tracing::debug!("LF Plan: {:?}", lf.describe_plan());
@@ -226,6 +237,8 @@ impl Worker {
                         return Err(QueryError::from(anyhow::anyhow!("Planning error: No data")))
                     }
                 };
+                let exec_duration = exec_timer.elapsed();
+                let serialization_timer = std::time::Instant::now();
                 let mut buf = std::io::BufWriter::new(Vec::new());
                 JsonWriter::new(&mut buf)
                     .with_json_format(JsonFormat::JsonLines)
@@ -234,12 +247,20 @@ impl Worker {
                 let bytes = buf
                     .into_inner()
                     .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+                let serialization_duration = serialization_timer.elapsed();
 
                 if bytes.len() > RESPONSE_LIMIT {
                     return Err(QueryError::from(anyhow::anyhow!("Response too large")));
                 }
 
-                Ok(QueryOk::new(bytes, 1, 0, start_time.elapsed()))
+                Ok(QueryOk::new(
+                    bytes,
+                    1,
+                    0,
+                    parse_duration,
+                    exec_duration,
+                    serialization_duration,
+                ))
             })();
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");
