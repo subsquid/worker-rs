@@ -57,10 +57,10 @@ url = "2.5.2"
 walkdir = "2.5.0"
 zstd = "0.13"
  
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "7ac249a", features = ["reader"] }
-sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "7ac249a", version = "1.2.1" }
-sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "7ac249a", version = "2.0.2", features = ["bitstring"] }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "7ac249a", version = "3.0.0", features = ["worker", "metrics"] }
+sqd-assignments = { path = "../sqd-network/crates/assignments", features = ["reader"] }
+sqd-contract-client = { path = "../sqd-network/crates/contract-client", version = "1.2.1" }
+sqd-messages = { path = "../sqd-network/crates/messages", version = "2.0.2", features = ["bitstring"] }
+sqd-network-transport = { path = "../sqd-network/crates/transport", version = "3.0.0", features = ["worker", "metrics"] }
 
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "3c76f02", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "3c76f02" }
