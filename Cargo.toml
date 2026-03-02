@@ -66,6 +66,19 @@ sqd-query = { git = "https://github.com/subsquid/data.git", rev = "3c76f02", fea
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "3c76f02" }
 sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
 
+[[bench]]
+name = "query_throughput"
+harness = false
+
+[[bench]]
+name = "p2p_transport"
+harness = false
+
+[dev-dependencies]
+tempfile = "3"
+libp2p = { git = "https://github.com/kalabukdima/rust-libp2p.git", rev = "c0ed330", features = ["tokio", "quic", "request-response"] }
+libp2p-stream = { git = "https://github.com/kalabukdima/rust-libp2p.git", rev = "c0ed330" }
+
 [profile.release]
 debug = true
 opt-level = 3

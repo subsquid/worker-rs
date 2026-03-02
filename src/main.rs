@@ -34,22 +34,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
-use crate::cli::Args;
-use crate::controller::p2p::create_p2p_controller;
-use crate::controller::worker::Worker;
-use crate::http_server::Server as HttpServer;
-use crate::storage::manager::StateManager;
-
-mod cli;
-mod compute_units;
-mod controller;
-mod http_server;
-mod logs_storage;
-mod metrics;
-mod query;
-mod storage;
-mod types;
-mod util;
+use sqd_worker::cli::Args;
+use sqd_worker::controller::p2p::create_p2p_controller;
+use sqd_worker::controller::worker::Worker;
+use sqd_worker::http_server::Server as HttpServer;
+use sqd_worker::metrics;
+use sqd_worker::run_all;
+use sqd_worker::storage::manager::StateManager;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
