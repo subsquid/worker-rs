@@ -4,7 +4,10 @@ license = "AGPL-3.0-or-later"
 version = "2.10.0"
 edition = "2021"
 
-[dependencies]
+[features]
+query-tracing = ["sqd-query/max_level_trace"]
+
+[dependencies] 
 anyhow = "1.0"
 async-compression = { version = "0.4.27", features = ["gzip", "tokio"] }
 async-stream = "0.3.5"
@@ -62,8 +65,9 @@ sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "7ac249a", version = "2.0.2", features = ["bitstring"] }
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "7ac249a", version = "3.0.0", features = ["worker", "metrics"] }
 
-sqd-query = { git = "https://github.com/subsquid/data.git", rev = "b10a969", features = ["parquet"] }
-sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "b10a969" }
+sqd-query = { git = "https://github.com/subsquid/data.git", rev = "ab4d4c73ab87e8d8d8c8e3b2712aca04a1a95a00", features = ["parquet"] }
+sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "ab4d4c73ab87e8d8d8c8e3b2712aca04a1a95a00" }
+
 sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
 
 [profile.release]
