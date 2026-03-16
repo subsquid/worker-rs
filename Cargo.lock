@@ -7216,7 +7216,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0bbf921#0bbf9210c8895b3c671de3ed209cb6093378f1ae"
 dependencies = [
  "anyhow",
  "crypto_box",
@@ -7232,7 +7232,7 @@ dependencies = [
 [[package]]
 name = "sqd-bloom-filter"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=ad62dc2#ad62dc206e4ae7d0edc79e6875876dea1f2639df"
+source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
 dependencies = [
  "xxhash-rust",
 ]
@@ -7240,7 +7240,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.2.1"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0bbf921#0bbf9210c8895b3c671de3ed209cb6093378f1ae"
 dependencies = [
  "async-trait",
  "clap",
@@ -7260,7 +7260,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0bbf921#0bbf9210c8895b3c671de3ed209cb6093378f1ae"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7276,7 +7276,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0bbf921#0bbf9210c8895b3c671de3ed209cb6093378f1ae"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7309,7 +7309,7 @@ dependencies = [
 [[package]]
 name = "sqd-polars"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=ad62dc2#ad62dc206e4ae7d0edc79e6875876dea1f2639df"
+source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7321,12 +7321,12 @@ dependencies = [
 [[package]]
 name = "sqd-primitives"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=ad62dc2#ad62dc206e4ae7d0edc79e6875876dea1f2639df"
+source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
 
 [[package]]
 name = "sqd-query"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=ad62dc2#ad62dc206e4ae7d0edc79e6875876dea1f2639df"
+source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
 dependencies = [
  "anyhow",
  "arrow",
