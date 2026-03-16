@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::{http::StatusCode, response::IntoResponse};
-use sqd_query::{TableDoesNotExist, ColumnDoesNotExist};
+use sqd_query::{ColumnDoesNotExist, TableDoesNotExist};
 use tracing::instrument;
 
 use crate::util::hash::sha3_256;
@@ -100,7 +100,7 @@ impl From<std::io::Error> for QueryError {
 impl From<anyhow::Error> for QueryError {
     fn from(err: anyhow::Error) -> Self {
         let is_bad_request = err.is::<TableDoesNotExist>() || err.is::<ColumnDoesNotExist>();
-        
+
         if is_bad_request {
             QueryError::BadRequest(err.to_string())
         } else {
