@@ -485,7 +485,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 Some(peer_id),
                 query_type,
             )
-            .await;
+            .await
+            .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
         if let Err(QueryError::ServiceOverloaded) = result {
             self.allocations_checker.refund(peer_id);
