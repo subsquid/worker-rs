@@ -32,6 +32,7 @@ use crate::{
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
 const RESPONSE_LIMIT: usize = sqd_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
 
+#[derive(Debug, Clone, Copy)]
 pub enum QueryType {
     PlainQuery,
     SqlQuery,

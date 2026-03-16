@@ -7216,7 +7216,6 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
 dependencies = [
  "anyhow",
  "crypto_box",
@@ -7240,7 +7239,6 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.2.1"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
 dependencies = [
  "async-trait",
  "clap",
@@ -7260,7 +7258,6 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7276,7 +7273,6 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.0.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=7ac249a#7ac249aa0ae5b283f155f1cf5c1dada35a97f2e9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7372,6 +7368,8 @@ dependencies = [
  "hmac",
  "itertools 0.12.1",
  "lazy_static",
+ "libp2p",
+ "libp2p-stream",
  "mimalloc",
  "parking_lot",
  "polars",
@@ -7398,6 +7396,7 @@ dependencies = [
  "sqd-query",
  "sql_query_plan",
  "substrait",
+ "tempfile",
  "thiserror 1.0.65",
  "tokio",
  "tokio-rusqlite",

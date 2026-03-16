@@ -70,7 +70,7 @@ pub struct Args {
     #[clap(env, hide(true), default_value_t = 0.001)]
     pub sentry_traces_sample_rate: f32,
 
-    #[clap(env, hide(true), default_value_t = true)]
+    #[clap(long, env, hide(true), default_value_t = true)]
     pub sentry_is_enabled: bool,
 }
 

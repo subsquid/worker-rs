@@ -2,16 +2,18 @@ use std::{env, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf as PathBuf;
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
 use parking_lot::RwLock;
+use prost::Message;
 use sqd_messages::{
-    query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
+    query_error, query_executed, BitString, LogsRequest, Query, QueryExecuted, QueryLogs,
     TimeReport, WorkerStatus,
 };
 use sqd_network_transport::{
-    protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig,
-    WorkerEvent, WorkerTransportHandle,
+    protocol, IncomingStreams, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel,
+    Stream as P2PStream, WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
@@ -35,8 +37,6 @@ use super::worker::Worker;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
-const QUERIES_POOL_SIZE: usize = 16;
-const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -58,12 +58,10 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
-    queries_rx:
-        UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
-    sql_queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
-    sql_queries_rx:
-        UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
+    query_streams: UseOnce<IncomingStreams>,
+    sql_query_streams: UseOnce<IncomingStreams>,
+    active_queries: AtomicUsize,
+    max_queries: usize,
     log_requests_tx: mpsc::Sender<(LogsRequest, ResponseChannel<QueryLogs>)>,
     log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseChannel<QueryLogs>)>>,
 }
@@ -92,10 +90,9 @@ pub async fn create_p2p_controller(
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(1000);
-    let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
+    let (event_stream, transport_handle, query_streams, sql_query_streams) =
+        transport_builder.build_worker(config).await?;
 
-    let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
-    let (sql_queries_tx, sql_queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
     Ok(P2PController {
@@ -111,10 +108,10 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         assignment_url: args.assignment_url,
-        queries_tx,
-        queries_rx: UseOnce::new(queries_rx),
-        sql_queries_tx,
-        sql_queries_rx: UseOnce::new(sql_queries_rx),
+        query_streams: UseOnce::new(query_streams),
+        sql_query_streams: UseOnce::new(sql_query_streams),
+        active_queries: AtomicUsize::new(0),
+        max_queries: args.parallel_queries,
         log_requests_tx,
         log_requests_rx: UseOnce::new(log_requests_rx),
     })
@@ -128,11 +125,19 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
         let this = self.clone();
         let token = cancellation_token.child_token();
-        let queries_task = tokio::spawn(async move { this.run_queries_loop(token).await });
+        let query_incoming = this.query_streams.take().unwrap();
+        let query_streams_task = tokio::spawn(async move {
+            this.run_query_accept_loop(query_incoming, QueryType::PlainQuery, token)
+                .await
+        });
 
         let this = self.clone();
         let token = cancellation_token.child_token();
-        let sql_queries_task = tokio::spawn(async move { this.run_sql_queries_loop(token).await });
+        let sql_query_incoming = this.sql_query_streams.take().unwrap();
+        let sql_query_streams_task = tokio::spawn(async move {
+            this.run_query_accept_loop(sql_query_incoming, QueryType::SqlQuery, token)
+                .await
+        });
 
         let this = self.clone();
         let token = cancellation_token.child_token();
@@ -173,8 +178,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let _ = run_all!(
             cancellation_token,
             event_task,
-            queries_task,
-            sql_queries_task,
+            query_streams_task,
+            sql_query_streams_task,
             assignments_task,
             logs_task,
             logs_cleanup_task,
@@ -184,36 +189,207 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         );
     }
 
-    async fn run_queries_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
-        let queries_rx = self.queries_rx.take().unwrap();
-        ReceiverStream::new(queries_rx)
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
-                let this = self.clone();
-                tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan, QueryType::PlainQuery)
-                        .await;
-                })
-                .map(|r| r.unwrap())
-            })
-            .await;
-        info!("Query processing task finished");
+    /// Accept incoming query streams and spawn a task per stream.
+    /// Uses an atomic counter to limit concurrent queries. When at capacity,
+    /// incoming streams get an immediate ServiceOverloaded error response.
+    async fn run_query_accept_loop(
+        self: Arc<Self>,
+        mut incoming: IncomingStreams,
+        query_type: QueryType,
+        cancellation_token: CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                stream = incoming.next() => {
+                    let Some((peer_id, mut stream)) = stream else { break };
+
+                    if self.active_queries.fetch_add(1, Ordering::Relaxed) >= self.max_queries {
+                        self.active_queries.fetch_sub(1, Ordering::Relaxed);
+                        let _ = self.write_error_to_stream(
+                            &mut stream,
+                            "",
+                            QueryError::ServiceOverloaded,
+                            Some(DEFAULT_BACKOFF),
+                        ).await;
+                        continue;
+                    }
+
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.handle_query_stream(peer_id, stream, query_type).await;
+                        this.active_queries.fetch_sub(1, Ordering::Relaxed);
+                    });
+                }
+                _ = cancellation_token.cancelled() => break,
+            }
+        }
+        info!("Query accept loop finished (type: {query_type:?})");
     }
 
-    async fn run_sql_queries_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
-        let sql_queries_rx = self.sql_queries_rx.take().unwrap();
-        ReceiverStream::new(sql_queries_rx)
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
-                let this = self.clone();
-                tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan, QueryType::SqlQuery)
-                        .await;
+    /// Handle a single query stream: read request, process, write response.
+    #[instrument(skip_all, fields(peer_id = %peer_id))]
+    async fn handle_query_stream(
+        &self,
+        peer_id: PeerId,
+        mut stream: P2PStream,
+        query_type: QueryType,
+    ) {
+        // 1. Read the query from the stream (with size limit)
+        let query = match read_query_from_stream(&mut stream).await {
+            Ok(q) => q,
+            Err(e) => {
+                warn!("Failed to read query from {peer_id}: {e}");
+                return;
+            }
+        };
+
+        // Drop empty messages (same as old behaviour)
+        if query == Query::default() {
+            return;
+        }
+
+        // 2. Validate signature and timestamp
+        if !self.validate_query(&query, peer_id) {
+            // Write error response
+            let _ = self
+                .write_error_to_stream(
+                    &mut stream,
+                    &query.query_id,
+                    QueryError::BadRequest("Invalid signature or timestamp".to_string()),
+                    None,
+                )
+                .await;
+            return;
+        }
+
+        let query_id = query.query_id.clone();
+        let compression = query.compression();
+
+        // 3. Process query (CU check + execution)
+        let (mut result, retry_after) = self.process_query(peer_id, &query, query_type).await;
+        if let Err(e) = &result {
+            warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
+        }
+
+        metrics::query_executed(&result);
+
+        // 4. Build response message, compress, sign, and write to stream
+        match self
+            .build_and_write_response(
+                &mut stream,
+                query_id,
+                result.clone(),
+                retry_after,
+                compression,
+            )
+            .await
+        {
+            Ok((compression_duration, signing_duration)) => {
+                let _ = result.as_mut().map(|v| {
+                    v.time_report.compression_time = compression_duration;
+                    v.time_report.signing_time = signing_duration;
+                });
+            }
+            Err(e) => {
+                tracing::error!("Couldn't write query result to stream: {e:?}");
+                return;
+            }
+        }
+
+        // 5. Save query log
+        if let Some(log) = self.generate_log(&result, query, peer_id).await {
+            if log.encoded_len() > MAX_LOGS_SIZE {
+                warn!("Query log is too big: {log:?}");
+                return;
+            }
+            let result = self.logs_storage.save_log(log).await;
+            if let Err(e) = result {
+                warn!("Couldn't save query log: {e:?}");
+            }
+        }
+    }
+
+    /// Build a signed QueryResult protobuf and write it to the stream.
+    /// Returns (compression_duration, signing_duration).
+    #[instrument(skip_all)]
+    async fn build_and_write_response(
+        &self,
+        stream: &mut P2PStream,
+        query_id: String,
+        result: QueryResult,
+        retry_after: Option<Duration>,
+        compression: sqd_messages::Compression,
+    ) -> Result<(Duration, Duration)> {
+        let compression_timer = std::time::Instant::now();
+        let query_result = match result {
+            Ok(result) => {
+                let data = match compression {
+                    sqd_messages::Compression::None => result.data,
+                    sqd_messages::Compression::Gzip => result.data_gzip().await,
+                    sqd_messages::Compression::Zstd => result.data_zstd().await,
+                };
+                sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
+                    data,
+                    last_block: result.last_block,
                 })
-                .map(|r| r.unwrap())
-            })
-            .await;
-        info!("SQL Query processing task finished");
+            }
+            Err(e) => query_error::Err::from(e).into(),
+        };
+        let compression_duration = compression_timer.elapsed();
+
+        let mut msg = sqd_messages::QueryResult {
+            query_id,
+            result: Some(query_result),
+            retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
+            signature: Default::default(),
+        };
+
+        let signing_timer = std::time::Instant::now();
+        tokio::task::block_in_place(|| msg.sign(&self.keypair).map_err(|e| anyhow!(e)))?;
+        let signing_duration = signing_timer.elapsed();
+
+        let result_size = msg.encoded_len() as u64;
+        if result_size > protocol::MAX_QUERY_RESULT_SIZE {
+            anyhow::bail!("query result size too large: {result_size}");
+        }
+
+        let bytes = msg.encode_to_vec();
+        stream
+            .write_all(&bytes)
+            .await
+            .map_err(|e| anyhow!("Failed to write response: {e}"))?;
+        stream
+            .close()
+            .await
+            .map_err(|e| anyhow!("Failed to close stream: {e}"))?;
+
+        Ok((compression_duration, signing_duration))
+    }
+
+    /// Write an error response to the stream.
+    async fn write_error_to_stream(
+        &self,
+        stream: &mut P2PStream,
+        query_id: &str,
+        error: QueryError,
+        retry_after: Option<Duration>,
+    ) -> Result<()> {
+        let msg = build_error_response_message(
+            query_id.to_string(),
+            error,
+            retry_after,
+            &self.keypair,
+        )?;
+        let bytes = msg.encode_to_vec();
+        stream
+            .write_all(&bytes)
+            .await
+            .map_err(|e| anyhow!("Failed to write error response: {e}"))?;
+        stream
+            .close()
+            .await
+            .map_err(|e| anyhow!("Failed to close stream: {e}"))?;
+        Ok(())
     }
 
     async fn run_assignments_loop(
@@ -309,42 +485,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
         while let Some(ev) = event_stream.next().await {
             match ev {
-                WorkerEvent::Query {
-                    peer_id,
-                    query,
-                    resp_chan,
-                } => {
-                    if !self.validate_query(&query, peer_id) {
-                        continue;
-                    }
-                    match self.queries_tx.try_send((peer_id, query, resp_chan)) {
-                        Ok(_) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            warn!("Queries queue is full. Dropping query from {peer_id}");
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            break;
-                        }
-                    }
-                }
-                WorkerEvent::SqlQuery {
-                    peer_id,
-                    query,
-                    resp_chan,
-                } => {
-                    if !self.validate_query(&query, peer_id) {
-                        continue;
-                    }
-                    match self.sql_queries_tx.try_send((peer_id, query, resp_chan)) {
-                        Ok(_) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            warn!("SQL Queries queue is full. Dropping query from {peer_id}");
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            break;
-                        }
-                    }
-                }
                 WorkerEvent::LogsRequest { request, resp_chan } => {
                     match self.log_requests_tx.try_send((request, resp_chan)) {
                         Ok(_) => {}
@@ -373,6 +513,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
     #[instrument(skip_all)]
     fn validate_query(&self, query: &Query, peer_id: PeerId) -> bool {
+        if query.query.len() as u64 > protocol::MAX_RAW_QUERY_SIZE {
+            tracing::warn!(
+                "Rejected query with body too large ({} bytes) from {}",
+                query.query.len(),
+                peer_id
+            );
+            return false;
+        }
         if !query.verify_signature(peer_id, self.worker_id) {
             tracing::warn!("Rejected query with invalid signature from {}", peer_id);
             return false;
@@ -387,59 +535,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             );
             return false;
         }
-        // TODO: check rate limits here
-        // TODO: check that query_id has not been used before
         true
-    }
-
-    #[instrument(skip_all, fields(query_id = %query.query_id, peer_id = %peer_id, dataset = %query.dataset))]
-    async fn handle_query(
-        &self,
-        peer_id: PeerId,
-        query: Query,
-        resp_chan: ResponseChannel<sqd_messages::QueryResult>,
-        query_type: QueryType,
-    ) {
-        let query_id = query.query_id.clone();
-        let compression = query.compression();
-
-        let (mut result, retry_after) = self.process_query(peer_id, &query, query_type).await;
-        if let Err(e) = &result {
-            warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
-        }
-
-        metrics::query_executed(&result);
-
-        // Cloning is much cheaper than hash computation and we need to keep the result for logging
-        match self
-            .send_query_result(
-                query_id,
-                result.clone(),
-                resp_chan,
-                retry_after,
-                compression,
-            )
-            .await
-        {
-            Ok((compression_duration, signing_duration)) => {
-                let _ = result.as_mut().map(|v| {
-                    v.time_report.compression_time = compression_duration;
-                    v.time_report.signing_time = signing_duration;
-                });
-            }
-            Err(e) => tracing::error!("Couldn't send query result: {e:?}"),
-        }
-
-        if let Some(log) = self.generate_log(&result, query, peer_id).await {
-            if log.encoded_len() > MAX_LOGS_SIZE {
-                warn!("Query log is too big: {log:?}");
-                return;
-            }
-            let result = self.logs_storage.save_log(log).await;
-            if let Err(e) = result {
-                warn!("Couldn't save query log: {e:?}");
-            }
-        }
     }
 
     /// Returns query result and the time to wait before sending the next query
@@ -493,57 +589,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             retry_after = Some(DEFAULT_BACKOFF);
         }
         (result, retry_after)
-    }
-
-    #[instrument(skip_all)]
-    async fn send_query_result(
-        &self,
-        query_id: String,
-        result: QueryResult,
-        resp_chan: ResponseChannel<sqd_messages::QueryResult>,
-        retry_after: Option<Duration>,
-        compression: sqd_messages::Compression,
-    ) -> Result<(Duration, Duration)> {
-        let compression_timer = std::time::Instant::now();
-        let query_result = match result {
-            Ok(result) => {
-                let data = match compression {
-                    sqd_messages::Compression::None => result.data,
-                    sqd_messages::Compression::Gzip => result.data_gzip().await,
-                    sqd_messages::Compression::Zstd => result.data_zstd().await,
-                };
-                sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
-                    data,
-                    last_block: result.last_block,
-                })
-            }
-            Err(e) => query_error::Err::from(e).into(),
-        };
-        let compression_duration = compression_timer.elapsed();
-        let mut msg = sqd_messages::QueryResult {
-            query_id,
-            result: Some(query_result),
-            retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
-            signature: Default::default(),
-        };
-        let signing_timer = std::time::Instant::now();
-        let _span = tracing::debug_span!("sign_query_result");
-        tokio::task::block_in_place(|| msg.sign(&self.keypair).map_err(|e| anyhow!(e)))?;
-        drop(_span);
-        let signing_duration = signing_timer.elapsed();
-
-        let result_size = msg.encoded_len() as u64;
-        if result_size > protocol::MAX_QUERY_RESULT_SIZE {
-            anyhow::bail!("query result size too large: {result_size}");
-        }
-
-        tracing::trace!("Sending query result");
-        // TODO: propagate backpressure from the transport lib
-        self.transport_handle
-            .send_query_result(msg, resp_chan)
-            .map_err(|_| anyhow!("queue full"))?;
-
-        Ok((compression_duration, signing_duration))
     }
 
     #[instrument(skip_all)]
@@ -613,6 +658,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 }
 
+/// Read a protobuf-encoded Query from a libp2p stream with size limit.
+async fn read_query_from_stream(stream: &mut P2PStream) -> Result<Query> {
+    let mut buf = Vec::new();
+    let max_size = protocol::MAX_QUERY_MSG_SIZE;
+    let bytes_read = stream
+        .take(max_size + 1)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| anyhow!("Failed to read from stream: {e}"))?;
+    if bytes_read as u64 > max_size {
+        anyhow::bail!("Query message too large ({bytes_read} bytes, max {max_size})");
+    }
+    let query = Query::decode(buf.as_slice())
+        .map_err(|e| anyhow!("Failed to decode query: {e}"))?;
+    Ok(query)
+}
+
 #[tracing::instrument(skip_all)]
 async fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
     let status = worker.status().await;
@@ -646,4 +708,23 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
         file.write_all(peer_id.to_string().as_bytes())
             .expect("Couldn't write peer_id file");
     }
+}
+
+/// Build a signed error-only `sqd_messages::QueryResult` protobuf message.
+/// Used for immediate error responses from the event loop (NoAllocation, ServiceOverloaded).
+pub fn build_error_response_message(
+    query_id: String,
+    error: QueryError,
+    retry_after: Option<Duration>,
+    keypair: &Keypair,
+) -> Result<sqd_messages::QueryResult> {
+    let query_result: sqd_messages::query_result::Result = query_error::Err::from(error).into();
+    let mut msg = sqd_messages::QueryResult {
+        query_id,
+        result: Some(query_result),
+        retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
+        signature: Default::default(),
+    };
+    tokio::task::block_in_place(|| msg.sign(keypair).map_err(|e| anyhow!(e)))?;
+    Ok(msg)
 }
