@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use parking_lot::Mutex;
+use polars::prelude::all;
 use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -30,12 +31,12 @@ impl AllocationsChecker {
         })
     }
 
-    pub fn try_spend(&self, portal_id: PeerId) -> RateLimitStatus {
-        self.rate_limiter.lock().try_run_request(portal_id)
+    pub fn try_spend(&self, portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus {
+        self.rate_limiter.lock().try_run_request(portal_id, allocation_chip)
     }
 
-    pub fn refund(&self, portal_id: PeerId) {
-        self.rate_limiter.lock().refund(portal_id);
+    pub fn refund(&self, portal_id: PeerId, allocation_chip: f32) {
+        self.rate_limiter.lock().refund(portal_id, allocation_chip);
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {

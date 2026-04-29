@@ -18,17 +18,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn, Instrument};
 
 use crate::{
-    cli::Args,
-    compute_units::{
+    cli::Args, compute_units::{
         self,
         allocations_checker::{self, AllocationsChecker},
-    },
-    controller::worker::QueryType,
-    logs_storage::LogsStorage,
-    metrics,
-    query::result::{QueryError, QueryResult},
-    run_all,
-    util::{timestamp_now_ms, UseOnce},
+    }, controller::worker::QueryType, logs_storage::LogsStorage, metrics, query::result::{QueryError, QueryResult}, run_all, storage::layout::DataChunk, util::{UseOnce, timestamp_now_ms}
 };
 
 use super::worker::Worker;
@@ -464,7 +457,18 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
         }
 
-        let status = match self.allocations_checker.try_spend(peer_id) {
+        let mut allocation_chip = 1.0f32;
+
+        if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
+            if let Some(range) = query.block_range {
+                let active_len = (std::cmp::min(chunk.last_block.into(), range.end) - std::cmp::max(chunk.first_block.into(), range.begin)).min(1);
+                let chunk_len = Into::<u64>::into(chunk.last_block).saturating_sub(chunk.first_block.into()).max(1);
+                allocation_chip = active_len as f32 / chunk_len as f32;
+
+            }
+        };
+
+        let status = match self.allocations_checker.try_spend(peer_id, 1.) {
             compute_units::RateLimitStatus::NoAllocation => {
                 return (Err(QueryError::NoAllocation), None)
             }
@@ -489,8 +493,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
         if let Err(QueryError::ServiceOverloaded) = result {
-            self.allocations_checker.refund(peer_id);
+            self.allocations_checker.refund(peer_id, 1.);
             retry_after = Some(DEFAULT_BACKOFF);
+        } else {
+            if allocation_chip < 1. {
+                self.allocations_checker.refund(peer_id, 1. - allocation_chip);
+            }
         }
         (result, retry_after)
     }
