@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use parking_lot::Mutex;
-use polars::prelude::all;
 use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
