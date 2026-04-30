@@ -38,9 +38,6 @@ struct Bucket {
 impl Bucket {
     fn update(&mut self, now: Instant) {
         let elapsed = now - self.last_update;
-        // let tokens_to_add = (elapsed.as_nanos() as f64) /  (self.request_interval.as_nanos() as f64);
-        // self.tokens = (self.tokens + tokens_to_add as f32).min(MAX_TOKENS);
-        // self.last_update = now;
         let tokens_to_add = elapsed.as_nanos() / self.request_interval.as_nanos();
         if tokens_to_add <= u32::MAX as u128 {
             self.last_update += self.request_interval * (tokens_to_add as u32);
