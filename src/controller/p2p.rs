@@ -461,7 +461,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
         if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
             if let Some(range) = query.block_range {
-                let active_len = (std::cmp::min(chunk.last_block.into(), range.end) - std::cmp::max(chunk.first_block.into(), range.begin)).min(1);
+                let active_len = (std::cmp::min(chunk.last_block.into(), range.end) - std::cmp::max(chunk.first_block.into(), range.begin)).max(1);
                 let chunk_len = Into::<u64>::into(chunk.last_block).saturating_sub(chunk.first_block.into()).max(1);
                 allocation_chip = active_len as f32 / chunk_len as f32;
 
