@@ -31,7 +31,9 @@ impl AllocationsChecker {
     }
 
     pub fn try_spend(&self, portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus {
-        self.rate_limiter.lock().try_run_request(portal_id, allocation_chip)
+        self.rate_limiter
+            .lock()
+            .try_run_request(portal_id, allocation_chip)
     }
 
     pub fn refund(&self, portal_id: PeerId, allocation_chip: f32) {

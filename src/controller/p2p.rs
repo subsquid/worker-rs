@@ -18,10 +18,18 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn, Instrument};
 
 use crate::{
-    cli::Args, compute_units::{
+    cli::Args,
+    compute_units::{
         self,
         allocations_checker::{self, AllocationsChecker},
-    }, controller::worker::QueryType, logs_storage::LogsStorage, metrics, query::result::{QueryError, QueryResult}, run_all, storage::layout::DataChunk, util::{UseOnce, timestamp_now_ms}
+    },
+    controller::worker::QueryType,
+    logs_storage::LogsStorage,
+    metrics,
+    query::result::{QueryError, QueryResult},
+    run_all,
+    storage::layout::DataChunk,
+    util::{timestamp_now_ms, UseOnce},
 };
 
 use super::worker::Worker;
@@ -461,10 +469,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
         if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
             if let Some(range) = query.block_range {
-                let active_len = (std::cmp::min(chunk.last_block.into(), range.end) - std::cmp::max(chunk.first_block.into(), range.begin)).max(1);
-                let chunk_len = Into::<u64>::into(chunk.last_block).saturating_sub(chunk.first_block.into()).max(1);
+                let active_len = (std::cmp::min(chunk.last_block.into(), range.end)
+                    - std::cmp::max(chunk.first_block.into(), range.begin))
+                .max(1);
+                let chunk_len = Into::<u64>::into(chunk.last_block)
+                    .saturating_sub(chunk.first_block.into())
+                    .max(1);
                 allocation_chip = active_len as f32 / chunk_len as f32;
-
             }
         };
 
@@ -473,7 +484,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 return (Err(QueryError::NoAllocation), None)
             }
             compute_units::RateLimitStatus::Paused(retry_after) => {
-                return (Err(QueryError::ServiceOverloaded), Some(retry_after))
+                return (Err(QueryError::NoAllocation), Some(retry_after))
             }
             status => status,
         };
@@ -500,7 +511,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             retry_after = Some(DEFAULT_BACKOFF);
         } else {
             if allocation_chip < 1. {
-                self.allocations_checker.refund(peer_id, 1. - allocation_chip);
+                self.allocations_checker
+                    .refund(peer_id, 1. - allocation_chip);
             }
         }
         (result, retry_after)
