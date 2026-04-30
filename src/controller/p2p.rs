@@ -468,9 +468,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
         };
 
-        let status = match self.allocations_checker.try_spend(peer_id, allocation_chip) {
+        let status = match self.allocations_checker.try_spend(peer_id, 1.) {
             compute_units::RateLimitStatus::NoAllocation => {
                 return (Err(QueryError::NoAllocation), None)
+            }
+            compute_units::RateLimitStatus::Paused(retry_after) => {
+                return (Err(QueryError::ServiceOverloaded), Some(retry_after))
             }
             status => status,
         };
@@ -493,12 +496,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
         if let Err(QueryError::ServiceOverloaded) = result {
-            self.allocations_checker.refund(peer_id, allocation_chip);
+            self.allocations_checker.refund(peer_id, 1.);
             retry_after = Some(DEFAULT_BACKOFF);
         } else {
-            // if allocation_chip < 1. {
-            //     self.allocations_checker.refund(peer_id, 1. - allocation_chip);
-            // }
+            if allocation_chip < 1. {
+                self.allocations_checker.refund(peer_id, 1. - allocation_chip);
+            }
         }
         (result, retry_after)
     }

@@ -53,7 +53,6 @@ impl Bucket {
 
     fn take(&mut self, allocation_chip: f32) -> bool {
         let clipped = allocation_chip.max(0.).min(1.);
-        println!("Clipped: {clipped:?}, tokens: {:?}", self.tokens);
         if self.tokens - clipped >= 0. {
             self.tokens -= clipped;
             true
@@ -72,7 +71,6 @@ impl Bucket {
 
     fn until_next_token(&self, now: Instant) -> Duration {
         let next_update = self.last_update + self.request_interval;
-        println!("Until: {:?}", next_update - now);
         next_update - now
     }
 }
