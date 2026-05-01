@@ -177,4 +177,22 @@ mod tests {
         bucket.update(start + Duration::from_millis(1_200_000));
         assert_eq!(bucket.tokens, MAX_TOKENS);
     }
+
+    #[test]
+    fn test_bucket_put_fractional_chip() {
+        let start = Instant::now();
+        let mut bucket = Bucket {
+            request_interval: Duration::from_secs(1),
+            tokens: 0.0f32,
+            last_update: start,
+        };
+        // BUG: allocation_chip.min(0.).max(1.) clamps to 0.0, then .max(1.) always returns 1.0.
+        // A fractional refund of 0.5 incorrectly adds 1.0 token instead.
+        bucket.put(0.5);
+        assert!(
+            (bucket.tokens - 0.5).abs() < 1e-6,
+            "put(0.5) should add 0.5 tokens, got {}",
+            bucket.tokens
+        );
+    }
 }
