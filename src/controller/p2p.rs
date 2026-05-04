@@ -28,6 +28,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryResult},
     run_all,
+    storage::layout::DataChunk,
     util::{timestamp_now_ms, UseOnce},
 };
 
@@ -464,9 +465,29 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
         }
 
-        let status = match self.allocations_checker.try_spend(peer_id) {
+        let mut allocation_chip = 1.0f32;
+
+        if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
+            if let Some(range) = query.block_range {
+                let active_len = std::cmp::min(chunk.last_block.into(), range.end)
+                    .saturating_sub(std::cmp::max(chunk.first_block.into(), range.begin))
+                    .max(1);
+                let chunk_len = Into::<u64>::into(chunk.last_block)
+                    .saturating_sub(chunk.first_block.into())
+                    .max(1);
+                allocation_chip = active_len as f32 / chunk_len as f32;
+            }
+        };
+
+        // We claim 1. allocation first and refund unused allocation later. It's done to prevent burst overloading with small requests.
+        let status = match self.allocations_checker.try_spend(peer_id, 1.) {
             compute_units::RateLimitStatus::NoAllocation => {
-                return (Err(QueryError::NoAllocation), None)
+                // This error means that we don't have any allocation for particular peer_id at all (e.g. no allocation on contract)
+                return (Err(QueryError::NoAllocation), None);
+            }
+            compute_units::RateLimitStatus::Paused(retry_after) => {
+                // This error means that we don't have allocation at the moment, but it may be available after retry_after ms
+                return (Err(QueryError::NoAllocation), Some(retry_after));
             }
             status => status,
         };
@@ -489,8 +510,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
         if let Err(QueryError::ServiceOverloaded) = result {
-            self.allocations_checker.refund(peer_id);
+            // Refund everything as we were not able to process request
+            self.allocations_checker.refund(peer_id, 1.);
             retry_after = Some(DEFAULT_BACKOFF);
+        } else {
+            if allocation_chip < 1. {
+                // We refund unused allocation
+                self.allocations_checker
+                    .refund(peer_id, 1. - allocation_chip);
+            }
         }
         (result, retry_after)
     }

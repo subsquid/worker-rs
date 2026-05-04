@@ -27,11 +27,11 @@ impl RateLimitStatus {
     }
 }
 
-const MAX_TOKENS: u8 = 3;
+const MAX_TOKENS: f32 = 3.0f32;
 
 struct Bucket {
     request_interval: Duration, // 1 / RPS
-    tokens: u8,
+    tokens: f32,
     last_update: Instant,
 }
 
@@ -41,30 +41,29 @@ impl Bucket {
         let tokens_to_add = elapsed.as_nanos() / self.request_interval.as_nanos();
         if tokens_to_add <= u32::MAX as u128 {
             self.last_update += self.request_interval * (tokens_to_add as u32);
-            self.tokens = (self.tokens as u32)
-                .saturating_add(tokens_to_add as u32)
-                .min(MAX_TOKENS as u32) as u8;
+            self.tokens = (self.tokens + tokens_to_add as f32).min(MAX_TOKENS);
         } else {
             self.last_update = now;
             self.tokens = MAX_TOKENS;
         }
     }
 
-    fn take(&mut self) -> bool {
-        if self.tokens > 0 {
-            self.tokens -= 1;
+    fn take(&mut self, allocation_chip: f32) -> bool {
+        let clipped = allocation_chip.clamp(0., 1.);
+        if self.tokens - clipped >= 0. {
+            self.tokens -= clipped;
             true
         } else {
             false
         }
     }
 
-    fn put(&mut self) {
-        self.tokens = (self.tokens + 1).min(MAX_TOKENS);
+    fn put(&mut self, allocation_chip: f32) {
+        self.tokens = (self.tokens + allocation_chip.clamp(0., 1.)).min(MAX_TOKENS);
     }
 
-    fn is_empty(&self) -> bool {
-        self.tokens == 0
+    fn can_serve_one_token(&self) -> bool {
+        self.tokens < 1.
     }
 
     fn until_next_token(&self, now: Instant) -> Duration {
@@ -91,7 +90,7 @@ impl RateLimiter {
                         Bucket {
                             request_interval: epoch_length
                                 .div_f64(cluster.allocated_computation_units.as_u64() as f64),
-                            tokens: 0,
+                            tokens: 0.0f32,
                             last_update: Instant::now(),
                         },
                     );
@@ -112,7 +111,7 @@ impl RateLimiter {
     }
 
     // Returns whether the request was allowed and how long to wait until the next request can be made
-    pub fn try_run_request(&mut self, portal_id: PeerId) -> RateLimitStatus {
+    pub fn try_run_request(&mut self, portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus {
         let Some(operator_id) = self.operator_by_portal_id.get(&portal_id) else {
             return RateLimitStatus::NoAllocation;
         };
@@ -120,8 +119,8 @@ impl RateLimiter {
 
         let now = Instant::now();
         bucket.update(now);
-        if bucket.take() {
-            let retry_after = if bucket.is_empty() {
+        if bucket.take(allocation_chip) {
+            let retry_after = if bucket.can_serve_one_token() {
                 Some(bucket.until_next_token(now))
             } else {
                 None
@@ -132,12 +131,12 @@ impl RateLimiter {
         }
     }
 
-    pub fn refund(&mut self, portal_id: PeerId) {
+    pub fn refund(&mut self, portal_id: PeerId, allocation_chip: f32) {
         let Some(operator_id) = self.operator_by_portal_id.get(&portal_id) else {
             return;
         };
         let bucket = self.operators.get_mut(operator_id).unwrap();
-        bucket.put();
+        bucket.put(allocation_chip);
     }
 }
 
@@ -150,32 +149,48 @@ mod tests {
         let start = Instant::now();
         let mut bucket = Bucket {
             request_interval: Duration::from_secs(1),
-            tokens: 0,
+            tokens: 0.0f32,
             last_update: start,
         };
 
-        assert_eq!(bucket.take(), false);
+        assert_eq!(bucket.take(1.), false);
         assert_eq!(bucket.until_next_token(start), Duration::from_millis(1000));
 
         let now = start + Duration::from_millis(1000);
         bucket.update(now);
-        assert_eq!(bucket.take(), true);
-        assert_eq!(bucket.take(), false);
+        assert_eq!(bucket.take(1.), true);
+        assert_eq!(bucket.take(1.), false);
         assert_eq!(bucket.until_next_token(now), Duration::from_secs(1));
 
         let now = start + Duration::from_millis(3600);
         bucket.update(now);
-        assert_eq!(bucket.take(), true);
-        assert_eq!(bucket.take(), true);
-        assert!(bucket.is_empty());
+        assert_eq!(bucket.take(1.), true);
+        assert_eq!(bucket.take(1.), true);
+        assert!(bucket.can_serve_one_token());
         assert_eq!(bucket.until_next_token(now), Duration::from_millis(400));
 
-        bucket.put();
-        assert_eq!(bucket.take(), true);
-        assert!(bucket.is_empty());
+        bucket.put(1.);
+        assert_eq!(bucket.take(1.), true);
+        assert!(bucket.can_serve_one_token());
         assert_eq!(bucket.until_next_token(now), Duration::from_millis(400));
 
         bucket.update(start + Duration::from_millis(1_200_000));
         assert_eq!(bucket.tokens, MAX_TOKENS);
+    }
+
+    #[test]
+    fn test_bucket_put_fractional_chip() {
+        let start = Instant::now();
+        let mut bucket = Bucket {
+            request_interval: Duration::from_secs(1),
+            tokens: 0.0f32,
+            last_update: start,
+        };
+        bucket.put(0.5);
+        assert!(
+            (bucket.tokens - 0.5).abs() < 1e-6,
+            "put(0.5) should add 0.5 tokens, got {}",
+            bucket.tokens
+        );
     }
 }
