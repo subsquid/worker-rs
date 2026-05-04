@@ -510,12 +510,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
         if let Err(QueryError::ServiceOverloaded) = result {
-            // Refund everything as we was not able to process request
+            // Refund everything as we were not able to process request
             self.allocations_checker.refund(peer_id, 1.);
             retry_after = Some(DEFAULT_BACKOFF);
         } else {
             if allocation_chip < 1. {
-                // We refund unsused allocation
+                // We refund unused allocation
                 self.allocations_checker
                     .refund(peer_id, 1. - allocation_chip);
             }
