@@ -59,7 +59,7 @@ impl Bucket {
     }
 
     fn put(&mut self, allocation_chip: f32) {
-        self.tokens = (self.tokens + allocation_chip.min(0.).max(1.)).min(MAX_TOKENS);
+        self.tokens = (self.tokens + allocation_chip.max(0.).min(1.)).min(MAX_TOKENS);
     }
 
     fn is_empty(&self) -> bool {
@@ -186,8 +186,6 @@ mod tests {
             tokens: 0.0f32,
             last_update: start,
         };
-        // BUG: allocation_chip.min(0.).max(1.) clamps to 0.0, then .max(1.) always returns 1.0.
-        // A fractional refund of 0.5 incorrectly adds 1.0 token instead.
         bucket.put(0.5);
         assert!(
             (bucket.tokens - 0.5).abs() < 1e-6,
