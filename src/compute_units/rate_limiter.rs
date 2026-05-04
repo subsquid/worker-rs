@@ -62,7 +62,7 @@ impl Bucket {
         self.tokens = (self.tokens + allocation_chip.max(0.).min(1.)).min(MAX_TOKENS);
     }
 
-    fn is_empty(&self) -> bool {
+    fn can_serve_one_token(&self) -> bool {
         self.tokens < 1.
     }
 
@@ -120,7 +120,7 @@ impl RateLimiter {
         let now = Instant::now();
         bucket.update(now);
         if bucket.take(allocation_chip) {
-            let retry_after = if bucket.is_empty() {
+            let retry_after = if bucket.can_serve_one_token() {
                 Some(bucket.until_next_token(now))
             } else {
                 None
@@ -166,12 +166,12 @@ mod tests {
         bucket.update(now);
         assert_eq!(bucket.take(1.), true);
         assert_eq!(bucket.take(1.), true);
-        assert!(bucket.is_empty());
+        assert!(bucket.can_serve_one_token());
         assert_eq!(bucket.until_next_token(now), Duration::from_millis(400));
 
         bucket.put(1.);
         assert_eq!(bucket.take(1.), true);
-        assert!(bucket.is_empty());
+        assert!(bucket.can_serve_one_token());
         assert_eq!(bucket.until_next_token(now), Duration::from_millis(400));
 
         bucket.update(start + Duration::from_millis(1_200_000));
