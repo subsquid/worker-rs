@@ -479,6 +479,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
         };
 
+        // We claim 1. allocation first and refund unused allocation later. It's done to prevent burst overloading with small requests.
         let status = match self.allocations_checker.try_spend(peer_id, 1.) {
             compute_units::RateLimitStatus::NoAllocation => {
                 return (Err(QueryError::NoAllocation), None)
@@ -507,10 +508,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
         if let Err(QueryError::ServiceOverloaded) = result {
+            // Refund everything as we was not able to process request
             self.allocations_checker.refund(peer_id, 1.);
             retry_after = Some(DEFAULT_BACKOFF);
         } else {
             if allocation_chip < 1. {
+                // We refund unsused allocation
                 self.allocations_checker
                     .refund(peer_id, 1. - allocation_chip);
             }
