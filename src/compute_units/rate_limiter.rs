@@ -49,7 +49,7 @@ impl Bucket {
     }
 
     fn take(&mut self, allocation_chip: f32) -> bool {
-        let clipped = allocation_chip.max(0.).min(1.);
+        let clipped = allocation_chip.clamp(0., 1.);
         if self.tokens - clipped >= 0. {
             self.tokens -= clipped;
             true
@@ -59,7 +59,7 @@ impl Bucket {
     }
 
     fn put(&mut self, allocation_chip: f32) {
-        self.tokens = (self.tokens + allocation_chip.max(0.).min(1.)).min(MAX_TOKENS);
+        self.tokens = (self.tokens + allocation_chip.clamp(0., 1.)).min(MAX_TOKENS);
     }
 
     fn can_serve_one_token(&self) -> bool {
