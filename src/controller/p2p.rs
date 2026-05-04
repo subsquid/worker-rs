@@ -483,11 +483,11 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let status = match self.allocations_checker.try_spend(peer_id, 1.) {
             compute_units::RateLimitStatus::NoAllocation => {
                 // This error means that we don't have any allocation for particular peer_id at all (e.g. no allocation on contract)
-                return (Err(QueryError::NoAllocation), None)
+                return (Err(QueryError::NoAllocation), None);
             }
             compute_units::RateLimitStatus::Paused(retry_after) => {
                 // This error means that we don't have allocation at the moment, but it may be available after retry_after ms
-                return (Err(QueryError::NoAllocation), Some(retry_after))
+                return (Err(QueryError::NoAllocation), Some(retry_after));
             }
             status => status,
         };
