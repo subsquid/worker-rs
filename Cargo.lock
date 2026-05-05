@@ -7232,7 +7232,7 @@ dependencies = [
 [[package]]
 name = "sqd-bloom-filter"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
+source = "git+https://github.com/subsquid/data.git?rev=9db54d3#9db54d3bcd5b6aad35028f434a1ae7b4067e9a5e"
 dependencies = [
  "xxhash-rust",
 ]
@@ -7309,7 +7309,7 @@ dependencies = [
 [[package]]
 name = "sqd-polars"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
+source = "git+https://github.com/subsquid/data.git?rev=9db54d3#9db54d3bcd5b6aad35028f434a1ae7b4067e9a5e"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7321,12 +7321,12 @@ dependencies = [
 [[package]]
 name = "sqd-primitives"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
+source = "git+https://github.com/subsquid/data.git?rev=9db54d3#9db54d3bcd5b6aad35028f434a1ae7b4067e9a5e"
 
 [[package]]
 name = "sqd-query"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=1274b55#1274b5535d8ef91eefb9bf1f182d41429505d288"
+source = "git+https://github.com/subsquid/data.git?rev=9db54d3#9db54d3bcd5b6aad35028f434a1ae7b4067e9a5e"
 dependencies = [
  "anyhow",
  "arrow",
