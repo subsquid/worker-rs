@@ -164,8 +164,8 @@ impl StateManager {
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
     fn set_desired_chunks(&self, desired_chunks: ChunkSet, datasets_index: DatasetsIndex) {
-        let mut state = self.state.lock();
         let mut index = self.datasets_index.lock();
+        let mut state = self.state.lock();
         match state.set_desired_chunks(desired_chunks) {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
