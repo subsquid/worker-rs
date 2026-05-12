@@ -495,7 +495,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
         let block_range = query
             .block_range
-            .map(|sqd_messages::Range { begin, end }| (begin, end));
+            .map(|sqd_messages::Range { begin, end }| (begin, end))
+            .expect("block_range is required");
         let result = self
             .worker
             .run_query(
