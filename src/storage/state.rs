@@ -1,14 +1,10 @@
 use itertools::Itertools;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::HashMap;
 use tracing::{info, instrument};
 
-use super::layout::DataChunk;
 use crate::{
     metrics,
-    types::{
-        dataset::Dataset,
-        state::{ChunkRef, ChunkSet},
-    },
+    types::state::{ChunkId, ChunkRef, ChunkSet, DatasetId},
 };
 
 #[derive(Debug, Default)]
@@ -17,7 +13,7 @@ pub struct State {
     downloading: ChunkSet, // available and downloading don't intersect
     desired: ChunkSet,
     to_download: ChunkSet, // to_download is always equal to desired.diff(available).diff(downloading)
-    locks: BTreeMap<ChunkRef, u8>, // stores ref count for each chunk
+    locks: HashMap<ChunkRef, u8>, // stores ref count for each chunk
 }
 
 #[derive(Debug)]
@@ -120,11 +116,7 @@ impl State {
         }
     }
 
-    pub fn get_and_lock_chunk(
-        &mut self,
-        dataset: Arc<Dataset>,
-        chunk: DataChunk,
-    ) -> Option<ChunkRef> {
+    pub fn get_and_lock_chunk(&mut self, dataset: DatasetId, chunk: ChunkId) -> Option<ChunkRef> {
         let chunk_ref = self.available.get(&ChunkRef { dataset, chunk }).cloned();
 
         if let Some(chunk_ref) = chunk_ref.as_ref() {
@@ -183,7 +175,7 @@ mod tests {
 
     use itertools::Itertools;
 
-    use crate::{storage::layout::DataChunk, types::state::ChunkRef};
+    use crate::types::state::ChunkRef;
 
     use super::State;
 
@@ -192,12 +184,11 @@ mod tests {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
-            chunk: DataChunk::from_path(&format!(
+            chunk: Arc::new(format!(
                 "0000000000/000000000{}-000000000{}-00000000",
                 x,
                 x + 1
-            ))
-            .unwrap(),
+            )),
         };
         let a = chunk_ref(0);
         let b = chunk_ref(1);

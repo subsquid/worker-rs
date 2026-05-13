@@ -1,13 +1,14 @@
 use super::dataset::Dataset;
-use crate::storage::layout::DataChunk;
 use std::{collections::BTreeSet, sync::Arc};
 
 pub type ChunkSet = BTreeSet<ChunkRef>;
+pub type DatasetId = Arc<Dataset>;
+pub type ChunkId = Arc<String>;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkRef {
-    pub dataset: Arc<Dataset>,
-    pub chunk: DataChunk,
+    pub dataset: DatasetId,
+    pub chunk: ChunkId,
 }
 
 impl std::fmt::Debug for ChunkRef {
