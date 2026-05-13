@@ -28,9 +28,9 @@ use super::{
 
 pub struct StateManager {
     fs: LocalFs,
+    datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
     notify: tokio::sync::Notify,
-    datasets_index: Mutex<Option<DatasetsIndex>>,
     concurrent_downloads: usize,
     worker_id: PeerId,
     args: Args,
