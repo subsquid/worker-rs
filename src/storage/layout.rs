@@ -172,8 +172,8 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
             for (cur, next) in chunks.iter().tuple_windows() {
                 // Two chunks sharing the exact same range are allowed —
                 // suffix-distinguished forks. Anything else overlapping bails.
-                let same_range = cur.first_block == next.first_block
-                    && cur.last_block == next.last_block;
+                let same_range =
+                    cur.first_block == next.first_block && cur.last_block == next.last_block;
                 if !same_range && cur.last_block >= next.first_block {
                     bail!("Overlapping ranges: {} and {}", cur, next);
                 }
@@ -322,8 +322,7 @@ mod tests {
             .expect("layout should accept both chunks");
 
         assert_eq!(chunks.len(), 2);
-        let ids: std::collections::HashSet<&str> =
-            chunks.iter().map(|c| c.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
         assert!(ids.contains(chunk_a_id));
         assert!(ids.contains(chunk_b_id));
 

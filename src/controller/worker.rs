@@ -115,7 +115,7 @@ impl Worker {
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
         let (from_block, to_block) = block_range;
-            
+
         query.set_first_block(from_block);
         query.set_last_block(Some(to_block));
 
@@ -144,7 +144,7 @@ impl Worker {
                     // the chunk's last_block (parsed from the chunk_id) so the
                     // portal could see progress. After NET-385 the worker
                     // treats chunk_id as opaque, so we report the query's
-                    // upper bound 
+                    // upper bound
                     to_block
                 };
                 let bytes = writer.finish()?;

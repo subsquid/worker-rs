@@ -144,4 +144,3 @@ fn test_url_joining() {
         .unwrap();
     assert_eq!(url.as_str(), "https://eclipse-testnet-2.sqd-datasets.io/0086800000/0089600001-0089800000-cg1JNYDM/blocks.parquet");
 }
-
