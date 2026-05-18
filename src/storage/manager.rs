@@ -28,9 +28,9 @@ use super::{
 
 pub struct StateManager {
     fs: LocalFs,
+    datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
     notify: tokio::sync::Notify,
-    datasets_index: Mutex<Option<DatasetsIndex>>,
     concurrent_downloads: usize,
     worker_id: PeerId,
     args: Args,
@@ -164,8 +164,8 @@ impl StateManager {
     // TODO: prevent accidental massive removals
     #[instrument(skip_all)]
     fn set_desired_chunks(&self, desired_chunks: ChunkSet, datasets_index: DatasetsIndex) {
-        let mut state = self.state.lock();
         let mut index = self.datasets_index.lock();
+        let mut state = self.state.lock();
         match state.set_desired_chunks(desired_chunks) {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
