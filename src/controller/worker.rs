@@ -125,7 +125,7 @@ impl Worker {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         sqd_polars::POOL.spawn(move || {
-            let result = (move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let data_chunk = ParquetChunk::new(chunk_guard.as_str());
                 let parse_timer = std::time::Instant::now();
                 let plan = query.compile();
@@ -162,7 +162,15 @@ impl Worker {
                     exec_duration,
                     serialization_duration,
                 ))
-            })();
+            }))
+            .unwrap_or_else(|panic| {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+            });
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");
             })
@@ -203,7 +211,7 @@ impl Worker {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let local_chunk_id = chunk_id.to_owned().clone();
         sqd_polars::POOL.spawn(move || {
-            let result = (move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let data_source = WorkerChunkStore {
                     path: chunk_guard.as_str().to_owned(),
                 };
@@ -249,7 +257,15 @@ impl Worker {
                     exec_duration,
                     serialization_duration,
                 ))
-            })();
+            }))
+            .unwrap_or_else(|panic| {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+            });
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");
             })
@@ -259,5 +275,63 @@ impl Worker {
                 "Query processor didn't produce a result"
             )))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn run_in_pool<F>(f: F) -> QueryResult
+    where
+        F: FnOnce() -> QueryResult + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sqd_polars::POOL.spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .unwrap_or_else(|panic| {
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+                });
+            tx.send(result).ok();
+        });
+        rx.await
+            .unwrap_or_else(|_| Err(QueryError::from(anyhow::anyhow!("no result"))))
+    }
+
+    #[tokio::test]
+    async fn pool_panic_is_caught_with_str_message() {
+        let result = run_in_pool(|| panic!("something went wrong")).await;
+        let Err(QueryError::Other(msg)) = result else {
+            panic!("expected QueryError::Other, got {result:?}");
+        };
+        assert!(msg.contains("something went wrong"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn pool_panic_is_caught_with_string_message() {
+        let result = run_in_pool(|| panic!("{}", "dynamic message".to_string())).await;
+        let Err(QueryError::Other(msg)) = result else {
+            panic!("expected QueryError::Other, got {result:?}");
+        };
+        assert!(msg.contains("dynamic message"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn pool_panic_is_caught_from_assert() {
+        let result = run_in_pool(|| {
+            assert!(false, "assert message");
+            #[allow(unreachable_code)]
+            Ok(unreachable!())
+        })
+        .await;
+        let Err(QueryError::Other(msg)) = result else {
+            panic!("expected QueryError::Other, got {result:?}");
+        };
+        assert!(msg.contains("assert message"), "got: {msg}");
     }
 }
