@@ -288,8 +288,8 @@ mod tests {
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         sqd_polars::POOL.spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-                .unwrap_or_else(|panic| {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
                     let msg = panic
                         .downcast_ref::<&str>()
                         .map(|s| s.to_string())
