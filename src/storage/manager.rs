@@ -105,14 +105,18 @@ impl StateManager {
             }
 
             let guard = self.datasets_index.lock();
-            let Some(index) = guard.as_ref() else {
+            let Some(dataset_index) = guard.as_ref() else {
                 continue;
             };
             while downloader.download_count() < self.concurrent_downloads {
-                if let Some(chunk) = self.state.lock().take_next_download() {
-                    info!("Downloading chunk {chunk}");
-                    let dst = self.chunk_path(&chunk);
-                    downloader.start_download(chunk, dst, &index);
+                if let Some(chunk_ref) = self.state.lock().take_next_download() {
+                    info!("Downloading chunk {chunk_ref}");
+                    let dst = self.chunk_path(&chunk_ref);
+                    let files = dataset_index
+                        .list_files(&chunk_ref)
+                        .unwrap_or_else(|| panic!("Dataset {} not found", chunk_ref.dataset));
+                    let headers = dataset_index.get_headers().clone();
+                    downloader.start_download(chunk_ref, dst, files, headers);
                 } else {
                     break;
                 }
@@ -161,21 +165,6 @@ impl StateManager {
         }
     }
 
-    // TODO: prevent accidental massive removals
-    #[instrument(skip_all)]
-    fn set_desired_chunks(&self, desired_chunks: ChunkSet, datasets_index: DatasetsIndex) {
-        let mut index = self.datasets_index.lock();
-        let mut state = self.state.lock();
-        match state.set_desired_chunks(desired_chunks) {
-            UpdateStatus::Unchanged => {}
-            UpdateStatus::Updated => {
-                info!("Got new assignment");
-                self.notify.notify_one();
-            }
-        }
-        *index = Some(datasets_index);
-    }
-
     pub fn set_assignment(
         &self,
         assignment: sqd_assignments::Assignment,
@@ -191,8 +180,19 @@ impl StateManager {
             }
         };
         let status = datasets_index.status();
-        let chunks = datasets_index.create_chunks_set();
-        self.set_desired_chunks(chunks, datasets_index);
+        let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
+
+        let mut index = self.datasets_index.lock();
+        let mut state = self.state.lock();
+
+        match state.set_desired_chunks(chunks) {
+            UpdateStatus::Unchanged => {}
+            UpdateStatus::Updated => {
+                info!("Got new assignment");
+                self.notify.notify_one();
+            }
+        }
+        *index = Some(datasets_index);
 
         match status {
             sqd_assignments::WorkerStatus::Ok => {
@@ -223,17 +223,20 @@ impl StateManager {
         }
     }
 
+    /// Returns the on-disk path to a locally available chunk, or `None` if
+    /// the chunk isn't present. The chunk is reference-counted for the
+    /// lifetime of the returned guard — it won't be evicted by the state
+    /// manager until every guard for it is dropped.
     pub fn get_chunk(
         self: Arc<Self>,
         dataset: Dataset,
-        chunk: DataChunk,
+        chunk_id: &str,
     ) -> Option<scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>> {
-        let encoded_dataset = dataset::encode_dataset(&dataset);
         let chunk = self
             .state
             .lock()
-            .get_and_lock_chunk(Arc::new(dataset), chunk)?;
-        let path = self.fs.root.join(encoded_dataset).join(chunk.chunk.path());
+            .get_and_lock_chunk(Arc::new(dataset), Arc::from(chunk_id.to_string()))?;
+        let path = self.chunk_path(&chunk);
         let guard = scopeguard::guard(path, move |_| self.state.lock().unlock_chunk(&chunk));
         Some(guard)
     }
@@ -248,11 +251,11 @@ impl StateManager {
         Ok(())
     }
 
-    fn chunk_path(&self, chunk: &ChunkRef) -> PathBuf {
+    fn chunk_path(&self, chunk_ref: &ChunkRef) -> PathBuf {
         self.fs
             .root
-            .join(dataset::encode_dataset(&chunk.dataset))
-            .join(chunk.chunk.path())
+            .join(dataset::encode_dataset(&chunk_ref.dataset))
+            .join(chunk_ref.chunk.as_ref())
     }
 }
 
@@ -289,7 +292,7 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
             for chunk in chunks {
                 result.insert(ChunkRef {
                     dataset: dataset.clone(),
-                    chunk,
+                    chunk: Arc::from(chunk.id),
                 });
             }
         } else {

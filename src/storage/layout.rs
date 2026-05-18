@@ -58,43 +58,50 @@ impl Deref for BlockNumber {
     }
 }
 
-#[derive(Default, PartialEq, Eq, Clone, Hash)]
+/// On-disk chunk identity.
+///
+/// The original chunk path format was `<top>/<first>-<last>-<hash>`, e.g.
+/// `0000001000/0000001024-0000002047-0xabcdef`. It has been extended with an
+/// optional trailing suffix so multiple chunks can cover the same block
+/// range, e.g. `0000001000/0000001024-0000002047-0xabcdef<suffix>`.
+#[derive(PartialEq, Eq, Clone, Hash)]
 pub struct DataChunk {
-    pub last_block: BlockNumber,
+    pub id: String,
     pub first_block: BlockNumber,
-    pub last_hash: String,
-    pub top: BlockNumber,
+    pub last_block: BlockNumber,
+}
+
+impl Ord for DataChunk {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.last_block
+            .cmp(&other.last_block)
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for DataChunk {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl DataChunk {
-    pub fn path(&self) -> String {
-        format!(
-            "{}/{}-{}-{}",
-            self.top, self.first_block, self.last_block, self.last_hash
-        )
-    }
-
     // TODO: synchronize with other language implementations
     pub fn from_path(dirname: &str) -> Result<Self> {
         lazy_static! {
-            static ref RE: Regex = Regex::new(r"(\d{10})/(\d{10})-(\d{10})-(\w{5,8})$").unwrap();
+            static ref RE: Regex =
+                Regex::new(r"((?:\d{10})/(\d{10})-(\d{10})-(?:\w{5,8}).*)$").unwrap();
         }
-        let (top, beg, end, hash) = RE
+        let captures = RE
             .captures(dirname)
-            .and_then(
-                |cap| match (cap.get(1), cap.get(2), cap.get(3), cap.get(4)) {
-                    (Some(top), Some(beg), Some(end), Some(hash)) => {
-                        Some((top.as_str(), beg.as_str(), end.as_str(), hash.as_str()))
-                    }
-                    _ => None,
-                },
-            )
             .ok_or_else(|| anyhow!("Could not parse chunk dirname '{dirname}'"))?;
+        let id = captures.get(1).unwrap().as_str().to_owned();
+        let first_block = BlockNumber::try_from(captures.get(2).unwrap().as_str())?;
+        let last_block = BlockNumber::try_from(captures.get(3).unwrap().as_str())?;
         Ok(Self {
-            first_block: BlockNumber::try_from(beg)?,
-            last_block: BlockNumber::try_from(end)?,
-            last_hash: hash.into(),
-            top: BlockNumber::try_from(top)?,
+            id,
+            first_block,
+            last_block,
         })
     }
 }
@@ -109,25 +116,13 @@ impl FromStr for DataChunk {
 
 impl std::fmt::Display for DataChunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.path())
+        write!(f, "{}", self.id)
     }
 }
 
 impl std::fmt::Debug for DataChunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self, f)
-    }
-}
-
-impl Ord for DataChunk {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.last_block.cmp(&other.last_block)
-    }
-}
-
-impl PartialOrd for DataChunk {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -189,7 +184,11 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
                 }
             }
             for (cur, next) in chunks.iter().tuple_windows() {
-                if cur.last_block >= next.first_block {
+                // Two chunks sharing the exact same range are allowed —
+                // suffix-distinguished forks. Anything else overlapping bails.
+                let same_range =
+                    cur.first_block == next.first_block && cur.last_block == next.last_block;
+                if !same_range && cur.last_block >= next.first_block {
                     bail!("Overlapping ranges: {} and {}", cur, next);
                 }
             }
@@ -243,25 +242,17 @@ mod tests {
 
     #[test]
     fn test_data_chunk() {
-        let chunk0 = DataChunk {
-            first_block: 1024.into(),
-            last_block: 2047.into(),
-            last_hash: "0xabcdef".into(),
-            top: 1000.into(),
-        };
         let path = "0000001000/0000001024-0000002047-0xabcdef";
-        assert_eq!(chunk0.path(), path);
-        assert_eq!(DataChunk::from_path(&path).unwrap(), chunk0);
+        let chunk0 = DataChunk::from_path(path).unwrap();
+        assert_eq!(&*chunk0.id, path);
+        assert_eq!(chunk0.first_block, 1024.into());
+        assert_eq!(chunk0.last_block, 2047.into());
 
-        let chunk1 = DataChunk {
-            first_block: 221000000.into(),
-            last_block: 221000649.into(),
-            last_hash: "9QgFD".into(),
-            top: 221000000.into(),
-        };
         let path = "0221000000/0221000000-0221000649-9QgFD";
-        assert_eq!(chunk1.path(), path);
-        assert_eq!(DataChunk::from_path(&path).unwrap(), chunk1);
+        let chunk1 = DataChunk::from_path(path).unwrap();
+        assert_eq!(&*chunk1.id, path);
+        assert_eq!(chunk1.first_block, 221000000.into());
+        assert_eq!(chunk1.last_block, 221000649.into());
     }
 
     #[tokio::test]
@@ -290,34 +281,29 @@ mod tests {
             chunks,
             vec![
                 DataChunk {
-                    top: 1000.into(),
+                    id: "0000001000/0000001000-0000001999-0xabcdef".to_owned(),
                     first_block: 1000.into(),
                     last_block: 1999.into(),
-                    last_hash: "0xabcdef".to_owned()
                 },
                 DataChunk {
-                    top: 1000.into(),
+                    id: "0000001000/0000002000-0000002999-0x191919".to_owned(),
                     first_block: 2000.into(),
                     last_block: 2999.into(),
-                    last_hash: "0x191919".to_owned()
                 },
                 DataChunk {
-                    top: 1000.into(),
+                    id: "0000001000/0000003000-0000003999-0xdedede".to_owned(),
                     first_block: 3000.into(),
                     last_block: 3999.into(),
-                    last_hash: "0xdedede".to_owned()
                 },
                 DataChunk {
-                    top: 4000.into(),
+                    id: "0000004000/0000004000-0000004999-0xaaaaaa".to_owned(),
                     first_block: 4000.into(),
                     last_block: 4999.into(),
-                    last_hash: "0xaaaaaa".to_owned()
                 },
                 DataChunk {
-                    top: 4000.into(),
+                    id: "0000004000/1000000000-1000999999-0xbbbbbb".to_owned(),
                     first_block: 1000000000.into(),
                     last_block: 1000999999.into(),
-                    last_hash: "0xbbbbbb".to_owned()
                 },
             ]
         );
@@ -330,6 +316,55 @@ mod tests {
         assert_eq!(
             chunks,
             vec![DataChunk::from_path("0017881390/0017881390-0017882786-32ee9457").unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunks_with_same_block_range() {
+        let chunk_a_id = "0000000000/0000000000-0000001000-abcdef12";
+        let chunk_b_id = "0000000000/0000000000-0000001000-abcdef12-fork";
+
+        let fs = TestFilesystem {
+            files: HashMap::from([(
+                "0000000000".into(),
+                vec![chunk_a_id.into(), chunk_b_id.into()],
+            )]),
+        };
+
+        let chunks = read_all_chunks(&fs)
+            .await
+            .expect("layout should accept both chunks");
+
+        assert_eq!(chunks.len(), 2);
+        let ids: std::collections::HashSet<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(chunk_a_id));
+        assert!(ids.contains(chunk_b_id));
+
+        for chunk in &chunks {
+            assert_eq!(chunk.first_block, 0u64.into());
+            assert_eq!(chunk.last_block, 1000u64.into());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chunks_with_partial_overlap_rejected() {
+        // Ranges share blocks but aren't identical — the suffix exception
+        // shouldn't apply.
+        let fs = TestFilesystem {
+            files: HashMap::from([(
+                "0000000000".into(),
+                vec![
+                    "0000000000/0000000000-0000001000-abcdef12".into(),
+                    "0000000000/0000000500-0000001500-bbbbbbbb".into(),
+                ],
+            )]),
+        };
+        let err = read_all_chunks(&fs)
+            .await
+            .expect_err("partial overlap should be rejected");
+        assert!(
+            err.to_string().contains("Overlapping ranges"),
+            "unexpected error: {err}"
         );
     }
 }

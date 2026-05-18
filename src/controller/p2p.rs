@@ -465,18 +465,27 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
         }
 
+        let Some(block_range) = query
+            .block_range
+            .map(|sqd_messages::Range { begin, end }| (begin, end))
+        else {
+            return (
+                Err(QueryError::BadRequest("block_range is required".to_owned())),
+                None,
+            );
+        };
+
         let mut allocation_chip = 1.0f32;
 
         if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
-            if let Some(range) = query.block_range {
-                let active_len = std::cmp::min(chunk.last_block.into(), range.end)
-                    .saturating_sub(std::cmp::max(chunk.first_block.into(), range.begin))
-                    .max(1);
-                let chunk_len = Into::<u64>::into(chunk.last_block)
-                    .saturating_sub(chunk.first_block.into())
-                    .max(1);
-                allocation_chip = active_len as f32 / chunk_len as f32;
-            }
+            let (begin, end) = block_range;
+            let active_len = std::cmp::min(chunk.last_block.into(), end)
+                .saturating_sub(std::cmp::max(chunk.first_block.into(), begin))
+                .max(1);
+            let chunk_len = Into::<u64>::into(chunk.last_block)
+                .saturating_sub(chunk.first_block.into())
+                .max(1);
+            allocation_chip = active_len as f32 / chunk_len as f32;
         };
 
         // We claim 1. allocation first and refund unused allocation later. It's done to prevent burst overloading with small requests.
@@ -493,9 +502,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         };
         let mut retry_after = status.retry_after();
 
-        let block_range = query
-            .block_range
-            .map(|sqd_messages::Range { begin, end }| (begin, end));
         let result = self
             .worker
             .run_query(

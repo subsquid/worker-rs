@@ -22,10 +22,7 @@ use crate::{
     controller::{polars_target, sql_request::WorkerChunkStore},
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
-    storage::{
-        layout::DataChunk,
-        manager::{self, StateManager},
-    },
+    storage::manager::{self, StateManager},
     types::dataset::Dataset,
 };
 
@@ -73,7 +70,7 @@ impl Worker {
         &self,
         query_str: &str,
         dataset: Dataset,
-        block_range: Option<(u64, u64)>,
+        block_range: (u64, u64),
         chunk_id: &str,
         client_id: Option<PeerId>,
         query_type: QueryType,
@@ -112,22 +109,17 @@ impl Worker {
         &self,
         query_str: &str,
         dataset: Dataset,
-        block_range: Option<(u64, u64)>,
+        block_range: (u64, u64),
         chunk_id: &str,
     ) -> QueryResult {
-        let Ok(chunk) = chunk_id.parse::<DataChunk>() else {
-            return Err(QueryError::BadRequest(format!(
-                "Can't parse chunk id '{chunk_id}'"
-            )));
-        };
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
-        if let Some((from_block, to_block)) = block_range {
-            query.set_first_block(from_block);
-            query.set_last_block(Some(to_block));
-        }
+        let (from_block, to_block) = block_range;
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk.clone()) else {
+        query.set_first_block(from_block);
+        query.set_last_block(Some(to_block));
+
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk_id) else {
             return Err(QueryError::NotFound);
         };
 
@@ -148,11 +140,12 @@ impl Worker {
                     writer.write_blocks(&mut blocks)?;
                     blocks.last_block()
                 } else {
-                    if let Some(last_query_block) = query.last_block() {
-                        std::cmp::min(last_query_block, chunk.last_block.into())
-                    } else {
-                        chunk.last_block.into()
-                    }
+                    // No matching rows in this chunk. We used to fall back to
+                    // the chunk's last_block (parsed from the chunk_id) so the
+                    // portal could see progress. After NET-385 the worker
+                    // treats chunk_id as opaque, so we report the query's
+                    // upper bound
+                    to_block
                 };
                 let bytes = writer.finish()?;
                 let serialization_duration = serialization_timer.elapsed();
@@ -188,11 +181,6 @@ impl Worker {
         dataset: Dataset,
         chunk_id: &str,
     ) -> QueryResult {
-        let Ok(chunk) = chunk_id.parse::<DataChunk>() else {
-            return Err(QueryError::BadRequest(format!(
-                "Can't parse chunk id '{chunk_id}'"
-            )));
-        };
         let Ok(query_bytes) = base64.decode(query_str) else {
             return Err(QueryError::BadRequest(format!(
                 "Can't decode plan '{query_str}'"
@@ -207,7 +195,7 @@ impl Worker {
         let Some(chunk_guard) = self
             .state_manager
             .clone()
-            .get_chunk(dataset.clone(), chunk.clone())
+            .get_chunk(dataset.clone(), chunk_id)
         else {
             return Err(QueryError::NotFound);
         };

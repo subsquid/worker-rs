@@ -11,11 +11,7 @@ use tracing::instrument;
 
 use crate::{cli, types::state::ChunkRef};
 
-use super::{
-    datasets_index::{DatasetsIndex, RemoteFile},
-    guard::FsGuard,
-    local_fs::add_temp_prefix,
-};
+use super::{datasets_index::RemoteFile, guard::FsGuard, local_fs::add_temp_prefix};
 
 const START_DELAY: Duration = Duration::from_millis(100);
 
@@ -51,7 +47,8 @@ impl ChunkDownloader {
         &mut self,
         chunk: ChunkRef,
         dst: PathBuf,
-        datasets_index: &DatasetsIndex,
+        files: Vec<RemoteFile>,
+        headers: reqwest::header::HeaderMap,
     ) {
         let cancel_token = CancellationToken::new();
 
@@ -62,13 +59,7 @@ impl ChunkDownloader {
             panic!("Chunk {chunk} is already being downloaded");
         }
 
-        let files = datasets_index
-            .list_files(&chunk.dataset, &chunk.chunk)
-            .unwrap_or_else(|| {
-                panic!("Dataset {} not found", chunk.dataset);
-            });
         let num_files = files.len();
-        let headers = datasets_index.get_headers().clone();
         let client = self.reqwest_client.clone();
         let current_delay = self.current_delay;
         let s3_timeout = self.args.s3_timeout;

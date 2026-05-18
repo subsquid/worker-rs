@@ -1,22 +1,19 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use reqwest::Url;
-use sqd_network_transport::{Keypair, PeerId};
+use sqd_network_transport::Keypair;
 use tracing::error;
 
-use crate::types::{
-    dataset::Dataset,
-    state::{ChunkRef, ChunkSet},
-};
-
-use super::layout::DataChunk;
+use crate::types::state::ChunkRef;
+use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
 pub struct DatasetsIndex {
     assignment: sqd_assignments::Assignment,
     assignment_id: String,
-    peer_id: PeerId,
     status: sqd_assignments::WorkerStatus,
     http_headers: reqwest::header::HeaderMap,
+    // chunks assigned to this worker
+    chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,11 +23,12 @@ pub struct RemoteFile {
 }
 
 impl DatasetsIndex {
-    pub fn list_files(&self, dataset: &Dataset, chunk: &DataChunk) -> Option<Vec<RemoteFile>> {
-        let chunk = self
-            .assignment
-            .find_chunk(dataset, *chunk.first_block)
-            .ok()?;
+    /// Returns the remote files (URL + filename) associated with the given
+    /// chunk, or `None` if the chunk is not in the assignment or any URL
+    /// fails to parse.
+    pub fn list_files(&self, chunk: &ChunkRef) -> Option<Vec<RemoteFile>> {
+        let chunk_ref = self.chunks.get(chunk)?;
+        let chunk = self.assignment.get_chunk(*chunk_ref)?;
         let base_url = Url::from_str(&chunk.dataset_base_url())
             .inspect_err(|e| {
                 tracing::warn!(
@@ -81,40 +79,23 @@ impl DatasetsIndex {
             })
             .collect();
 
+        let mut chunks = HashMap::new();
+        let mut pool = StringPool::default();
+        for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
+            let key = ChunkRef {
+                dataset: pool.get(chunk.dataset_id()),
+                chunk: Arc::from(chunk.id()),
+            };
+            chunks.insert(key, chunk_ref);
+        }
+
         Ok(Self {
             status: worker.status(),
             assignment,
             assignment_id: id.into(),
-            peer_id,
             http_headers,
+            chunks,
         })
-    }
-
-    pub fn create_chunks_set(&self) -> ChunkSet {
-        let mut chunk_set = ChunkSet::new();
-        let Some(worker) = self.assignment.get_worker(&self.peer_id) else {
-            return chunk_set;
-        };
-        let mut pool = StringPool::default();
-        for chunk in worker.iter_chunks() {
-            match DataChunk::from_str(chunk.id()) {
-                Ok(id) => {
-                    let chunk = ChunkRef {
-                        dataset: pool.get(chunk.dataset_id()),
-                        chunk: id,
-                    };
-                    if let Some(last) = chunk_set.last() {
-                        debug_assert!(
-                            last < &chunk,
-                            "Assigned chunks are not sorted: {last} >= {chunk}"
-                        );
-                    }
-                    chunk_set.insert(chunk);
-                }
-                Err(e) => tracing::warn!("Couldn't parse chunk id {}: {e}", chunk.id()),
-            }
-        }
-        chunk_set
     }
 
     pub fn status(&self) -> sqd_assignments::WorkerStatus {
@@ -127,6 +108,10 @@ impl DatasetsIndex {
 
     pub fn assignment_id(&self) -> &str {
         &self.assignment_id
+    }
+
+    pub fn chunks(&self) -> &HashMap<ChunkRef, ChunkAssignmentRef> {
+        &self.chunks
     }
 }
 
