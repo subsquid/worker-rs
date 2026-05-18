@@ -255,7 +255,7 @@ impl StateManager {
         self.fs
             .root
             .join(dataset::encode_dataset(&chunk_ref.dataset))
-            .join(&chunk_ref.chunk.as_str())
+            .join(chunk_ref.chunk.as_ref())
     }
 }
 

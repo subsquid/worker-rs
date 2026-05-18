@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub type ChunkSet = BTreeSet<ChunkRef>;
 pub type DatasetId = Arc<Dataset>;
-pub type ChunkId = Arc<String>;
+pub type ChunkId = Arc<str>;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkRef {

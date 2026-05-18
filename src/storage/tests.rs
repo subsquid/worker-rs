@@ -80,13 +80,13 @@ fn test_chunks_with_same_block_range() {
     let chunk_a = index
         .chunks()
         .keys()
-        .find(|cr| cr.chunk.as_str() == chunk_a_id)
+        .find(|cr| cr.chunk.as_ref() == chunk_a_id)
         .cloned()
         .expect("chunk A should be in the index");
     let chunk_b = index
         .chunks()
         .keys()
-        .find(|cr| cr.chunk.as_str() == chunk_b_id)
+        .find(|cr| cr.chunk.as_ref() == chunk_b_id)
         .cloned()
         .expect("chunk B should be in the index");
 

@@ -84,7 +84,7 @@ impl DatasetsIndex {
         for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
             let key = ChunkRef {
                 dataset: pool.get(chunk.dataset_id()),
-                chunk: Arc::from(chunk.id().to_string()),
+                chunk: Arc::from(chunk.id()),
             };
             chunks.insert(key, chunk_ref);
         }

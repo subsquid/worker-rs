@@ -184,7 +184,7 @@ mod tests {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
-            chunk: Arc::new(format!(
+            chunk: Arc::from(format!(
                 "0000000000/000000000{}-000000000{}-00000000",
                 x,
                 x + 1

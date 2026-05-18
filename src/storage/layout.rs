@@ -64,11 +64,25 @@ impl Deref for BlockNumber {
 /// `0000001000/0000001024-0000002047-0xabcdef`. It has been extended with an
 /// optional trailing suffix so multiple chunks can cover the same block
 /// range, e.g. `0000001000/0000001024-0000002047-0xabcdef<suffix>`.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
+#[derive(PartialEq, Eq, Clone, Hash)]
 pub struct DataChunk {
     pub id: String,
     pub first_block: BlockNumber,
     pub last_block: BlockNumber,
+}
+
+impl Ord for DataChunk {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.last_block
+            .cmp(&other.last_block)
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for DataChunk {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl DataChunk {
