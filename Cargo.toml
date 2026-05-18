@@ -60,7 +60,7 @@ url = "2.5.2"
 walkdir = "2.5.0"
 zstd = "0.13"
 
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "938ffe1", features = ["reader", "builder"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "938ffe1", features = ["reader"] }
 sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "938ffe1", version = "1.2.1" }
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "938ffe1", version = "2.0.2", features = ["bitstring"] }
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "938ffe1", version = "3.0.0", features = ["worker", "metrics"] }
@@ -69,6 +69,9 @@ sqd-query = { git = "https://github.com/subsquid/data.git", rev = "9db54d3", fea
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "9db54d3" }
 
 sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
+
+[dev-dependencies]
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "938ffe1", features = ["builder"] }
 
 [profile.release]
 debug = true
