@@ -36,9 +36,9 @@ polars = { version = "0.43.1", features = ["json", "parquet"] }
 prost = "0.13.5"
 rand = "0.9.2"
 regex = "1.10.2"
-reqwest = { version = "0.12.8", features = ["json", "stream"] }
+reqwest = { version = "0.12.8", default-features = false, features = ["json", "stream", "rustls-tls"] }
 scopeguard = "1.2.0"
-sentry = { version = "0.32.2", features = ["tracing"] }
+sentry = { version = "0.32.2", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "reqwest", "rustls", "tracing"] }
 sentry-tower = { version = "0.32.2", features = ["axum", "http"] }
 serde = "1.0.195"
 serde-rename-rule = "0.2.2"
