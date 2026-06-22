@@ -79,14 +79,14 @@ pub async fn create_p2p_controller(
     info!("Local peer ID: {worker_id}");
     check_peer_id(worker_id, args.data_dir.join("peer_id"));
 
-    let worker_status = get_worker_status(&worker).await;
-
     let allocations_checker = allocations_checker::AllocationsChecker::new(
         transport_builder.contract_client(),
         worker_id,
         args.network_polling_interval,
     )
     .await?;
+
+    let worker_status = get_worker_status(&worker, allocations_checker.current_epoch()).await;
 
     let mut config = WorkerConfig::default();
     config.status_queue_size = std::env::var("WORKER_STATUS_QUEUE_SIZE")
@@ -268,7 +268,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         IntervalStream::new(timer)
             .take_until(cancellation_token.cancelled_owned())
             .for_each(|_| async move {
-                let status = get_worker_status(&self.worker).await;
+                let status =
+                    get_worker_status(&self.worker, self.allocations_checker.current_epoch()).await;
                 *self.worker_status.write() = status;
             })
             .await;
@@ -648,7 +649,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 }
 
 #[tracing::instrument(skip_all)]
-async fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
+async fn get_worker_status(
+    worker: &Worker,
+    current_epoch: Option<u32>,
+) -> sqd_messages::WorkerStatus {
     let status = worker.status().await;
     let assignment_id = status.assignment_id.unwrap_or_default();
     sqd_messages::WorkerStatus {
@@ -656,6 +660,7 @@ async fn get_worker_status(worker: &Worker) -> sqd_messages::WorkerStatus {
         missing_chunks: Some(BitString::new(&status.unavailability_map)),
         version: WORKER_VERSION.to_string(),
         stored_bytes: Some(status.stored_bytes),
+        current_epoch,
     }
 }
 

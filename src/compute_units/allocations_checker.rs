@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -13,6 +14,7 @@ pub struct AllocationsChecker {
     own_id: sqd_contract_client::U256,
     rate_limiter: Mutex<RateLimiter>,
     polling_interval: Duration,
+    current_epoch: AtomicU32,
 }
 
 impl AllocationsChecker {
@@ -27,7 +29,16 @@ impl AllocationsChecker {
             own_id,
             rate_limiter: Default::default(),
             polling_interval,
+            current_epoch: AtomicU32::new(0),
         })
+    }
+
+    /// The latest on-chain epoch observed by the polling loop, or `None` if not yet fetched.
+    pub fn current_epoch(&self) -> Option<u32> {
+        match self.current_epoch.load(Ordering::Relaxed) {
+            0 => None,
+            epoch => Some(epoch),
+        }
     }
 
     pub fn try_spend(&self, portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus {
@@ -59,6 +70,7 @@ impl AllocationsChecker {
                     continue;
                 }
             };
+            self.current_epoch.store(epoch, Ordering::Relaxed);
             if epoch > current_epoch {
                 info!("New epoch started. Updating allocations");
                 match tokio::try_join!(
