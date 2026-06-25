@@ -663,6 +663,8 @@ async fn get_worker_status(
         current_epoch,
         #[cfg(feature = "mvcc-chunks")]
         last_applied_assignment_id: status.last_applied_assignment_id,
+        #[cfg(not(feature = "mvcc-chunks"))]
+        last_applied_assignment_id: None,
     }
 }
 
