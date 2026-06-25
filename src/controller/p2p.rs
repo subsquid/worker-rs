@@ -661,6 +661,8 @@ async fn get_worker_status(
         version: WORKER_VERSION.to_string(),
         stored_bytes: Some(status.stored_bytes),
         current_epoch,
+        #[cfg(feature = "mvcc-chunks")]
+        last_applied_assignment_id: status.last_applied_assignment_id,
     }
 }
 

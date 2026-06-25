@@ -30,6 +30,8 @@ pub struct StateManager {
     fs: LocalFs,
     datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
+    #[cfg(feature = "mvcc-chunks")]
+    assignment_application: Mutex<AssignmentApplicationStatus>,
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
     worker_id: PeerId,
@@ -40,6 +42,15 @@ pub struct Status {
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
     pub assignment_id: Option<String>,
+    #[cfg(feature = "mvcc-chunks")]
+    pub last_applied_assignment_id: Option<String>,
+}
+
+#[cfg(feature = "mvcc-chunks")]
+#[derive(Debug, Default)]
+struct AssignmentApplicationStatus {
+    current_assignment_id: Option<String>,
+    last_applied_assignment_id: Option<String>,
 }
 
 impl StateManager {
@@ -61,6 +72,8 @@ impl StateManager {
             worker_id,
             notify: tokio::sync::Notify::new(),
             datasets_index: Mutex::new(None),
+            #[cfg(feature = "mvcc-chunks")]
+            assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
             args,
         })
     }
@@ -121,6 +134,8 @@ impl StateManager {
                     break;
                 }
             }
+            #[cfg(feature = "mvcc-chunks")]
+            self.update_last_applied_assignment();
         }
         info!("State manager loop finished");
     }
@@ -145,6 +160,12 @@ impl StateManager {
                 unavailability_map: Default::default(),
                 stored_bytes,
                 assignment_id: None,
+                #[cfg(feature = "mvcc-chunks")]
+                last_applied_assignment_id: self
+                    .assignment_application
+                    .lock()
+                    .last_applied_assignment_id
+                    .clone(),
             };
         };
 
@@ -162,6 +183,12 @@ impl StateManager {
             unavailability_map,
             stored_bytes,
             assignment_id: Some(assignment_id.to_owned()),
+            #[cfg(feature = "mvcc-chunks")]
+            last_applied_assignment_id: self
+                .assignment_application
+                .lock()
+                .last_applied_assignment_id
+                .clone(),
         }
     }
 
@@ -171,6 +198,7 @@ impl StateManager {
         id: impl Into<String>,
         key: &Keypair,
     ) {
+        let id = id.into();
         let datasets_index = match DatasetsIndex::new(assignment, id, key) {
             Ok(result) => result,
             Err(e) => {
@@ -179,6 +207,11 @@ impl StateManager {
                 return;
             }
         };
+        #[cfg(feature = "mvcc-chunks")]
+        {
+            self.assignment_application.lock().current_assignment_id =
+                Some(datasets_index.assignment_id().to_owned());
+        }
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
@@ -191,6 +224,10 @@ impl StateManager {
                 info!("Got new assignment");
                 self.notify.notify_one();
             }
+        }
+        #[cfg(feature = "mvcc-chunks")]
+        if state.is_fully_applied() {
+            self.update_last_applied_assignment_with_state(&state);
         }
         *index = Some(datasets_index);
 
@@ -256,6 +293,25 @@ impl StateManager {
             .root
             .join(dataset::encode_dataset(&chunk_ref.dataset))
             .join(chunk_ref.chunk.as_ref())
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    fn update_last_applied_assignment(&self) {
+        let state = self.state.lock();
+        if state.is_fully_applied() {
+            self.update_last_applied_assignment_with_state(&state);
+        }
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    fn update_last_applied_assignment_with_state(&self, state: &State) {
+        debug_assert!(state.is_fully_applied());
+        let mut assignment_application = self.assignment_application.lock();
+        let Some(current_assignment_id) = assignment_application.current_assignment_id.clone()
+        else {
+            return;
+        };
+        assignment_application.last_applied_assignment_id = Some(current_assignment_id);
     }
 }
 
