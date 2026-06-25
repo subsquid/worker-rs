@@ -50,6 +50,8 @@ pub struct Status {
 #[derive(Debug, Default)]
 struct AssignmentApplicationStatus {
     current_assignment_id: Option<String>,
+    // Intentionally remains set while a newer assignment is being applied.
+    // This reports the latest fully applied assignment, not the current target.
     last_applied_assignment_id: Option<String>,
 }
 
@@ -135,7 +137,12 @@ impl StateManager {
                 }
             }
             #[cfg(feature = "mvcc-chunks")]
-            self.update_last_applied_assignment();
+            {
+                let fully_applied = self.state.lock().is_fully_applied();
+                if fully_applied {
+                    self.mark_current_assignment_applied();
+                }
+            }
         }
         info!("State manager loop finished");
     }
@@ -194,6 +201,8 @@ impl StateManager {
         key: &Keypair,
     ) {
         let id = id.into();
+        #[cfg(feature = "mvcc-chunks")]
+        let current_assignment_id = id.clone();
         let datasets_index = match DatasetsIndex::new(assignment, id, key) {
             Ok(result) => result,
             Err(e) => {
@@ -204,8 +213,7 @@ impl StateManager {
         };
         #[cfg(feature = "mvcc-chunks")]
         {
-            self.assignment_application.lock().current_assignment_id =
-                Some(datasets_index.assignment_id().to_owned());
+            self.assignment_application.lock().current_assignment_id = Some(current_assignment_id);
         }
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
@@ -221,10 +229,15 @@ impl StateManager {
             }
         }
         #[cfg(feature = "mvcc-chunks")]
-        if state.is_fully_applied() {
-            self.update_last_applied_assignment_with_state(&state);
-        }
+        let fully_applied = state.is_fully_applied();
         *index = Some(datasets_index);
+        drop(state);
+        drop(index);
+
+        #[cfg(feature = "mvcc-chunks")]
+        if fully_applied {
+            self.mark_current_assignment_applied();
+        }
 
         match status {
             sqd_assignments::WorkerStatus::Ok => {
@@ -291,16 +304,7 @@ impl StateManager {
     }
 
     #[cfg(feature = "mvcc-chunks")]
-    fn update_last_applied_assignment(&self) {
-        let state = self.state.lock();
-        if state.is_fully_applied() {
-            self.update_last_applied_assignment_with_state(&state);
-        }
-    }
-
-    #[cfg(feature = "mvcc-chunks")]
-    fn update_last_applied_assignment_with_state(&self, state: &State) {
-        debug_assert!(state.is_fully_applied());
+    fn mark_current_assignment_applied(&self) {
         let mut assignment_application = self.assignment_application.lock();
         let Some(current_assignment_id) = assignment_application.current_assignment_id.clone()
         else {
