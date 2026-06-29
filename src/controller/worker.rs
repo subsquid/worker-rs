@@ -54,8 +54,19 @@ impl Worker {
         assignment: Assignment,
         id: impl Into<String>,
         key: &Keypair,
-    ) {
-        self.state_manager.set_assignment(assignment, id, key);
+    ) -> bool {
+        self.state_manager.set_assignment(assignment, id, key)
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    pub async fn wait_until_assignment_applied(
+        &self,
+        assignment_id: &str,
+        cancellation_token: CancellationToken,
+    ) -> bool {
+        self.state_manager
+            .wait_until_assignment_applied(assignment_id, cancellation_token)
+            .await
     }
 
     pub fn _stop_downloads(&self) {

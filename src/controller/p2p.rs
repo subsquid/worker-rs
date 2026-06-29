@@ -1,3 +1,5 @@
+#[cfg(feature = "mvcc-chunks")]
+use std::collections::VecDeque;
 use std::{env, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
@@ -42,6 +44,8 @@ const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(feature = "mvcc-chunks")]
+const MAX_PENDING_ASSIGNMENTS: usize = 5;
 // TODO: find out why the margin is required
 const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
@@ -222,6 +226,25 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         cancellation_token: CancellationToken,
         assignment_check_interval: Duration,
     ) {
+        #[cfg(feature = "mvcc-chunks")]
+        {
+            self.run_ordered_assignments_loop(cancellation_token, assignment_check_interval)
+                .await;
+        }
+
+        #[cfg(not(feature = "mvcc-chunks"))]
+        {
+            self.run_legacy_assignments_loop(cancellation_token, assignment_check_interval)
+                .await;
+        }
+    }
+
+    #[cfg(not(feature = "mvcc-chunks"))]
+    async fn run_legacy_assignments_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        assignment_check_interval: Duration,
+    ) {
         super::assignments::new_assignments_stream(
             self.assignment_url.clone(),
             assignment_check_interval,
@@ -242,6 +265,82 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .expect("register_assignment shouldn't panic");
         })
         .await;
+        info!("Assignment processing task finished");
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    async fn run_ordered_assignments_loop(
+        &self,
+        cancellation_token: CancellationToken,
+        assignment_check_interval: Duration,
+    ) {
+        let mut assignments = Box::pin(
+            super::assignments::new_assignments_stream(
+                self.assignment_url.clone(),
+                assignment_check_interval,
+                self.assignment_fetch_timeout,
+                self.assignment_fetch_max_delay,
+                self.worker_id,
+            )
+            .take_until(cancellation_token.clone().cancelled_owned())
+            .fuse(),
+        );
+        let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
+        let mut processing_id: Option<String> = None;
+
+        loop {
+            if processing_id.is_none() {
+                if let Some(update) = pending.pop_front() {
+                    let worker = self.worker.clone();
+                    let keypair = self.keypair.clone();
+                    let id = update.id.clone();
+                    let registered = tokio::task::spawn_blocking(move || {
+                        worker.register_assignment(update.assignment, update.id, &keypair)
+                    })
+                    .instrument(tracing::info_span!("set_assignment", id))
+                    .await
+                    .expect("register_assignment shouldn't panic");
+                    if registered {
+                        processing_id = Some(id);
+                    }
+                    continue;
+                }
+            }
+
+            match processing_id.clone() {
+                Some(id) => {
+                    tokio::select! {
+                        update = assignments.next() => {
+                            let Some(update) = update else {
+                                let _ = self
+                                    .worker
+                                    .wait_until_assignment_applied(&id, cancellation_token.clone())
+                                    .await;
+                                break;
+                            };
+                            push_pending_assignment(&mut pending, update);
+                        }
+                        applied = self.worker.wait_until_assignment_applied(&id, cancellation_token.clone()) => {
+                            if !applied {
+                                break;
+                            }
+                            processing_id = None;
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        update = assignments.next() => {
+                            let Some(update) = update else {
+                                break;
+                            };
+                            push_pending_assignment(&mut pending, update);
+                        }
+                        _ = cancellation_token.cancelled() => break,
+                    }
+                }
+            }
+        }
         info!("Assignment processing task finished");
     }
 
@@ -668,6 +767,39 @@ async fn get_worker_status(
     }
 }
 
+#[cfg(feature = "mvcc-chunks")]
+fn push_pending_assignment(
+    pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
+    update: super::assignments::AssignmentUpdate,
+) {
+    if let Some(skipped) = push_pending_item(pending, update) {
+        warn!(
+            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
+        );
+    }
+}
+
+#[cfg(feature = "mvcc-chunks")]
+fn push_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
+    pending.push_back(item);
+    if pending.len() > MAX_PENDING_ASSIGNMENTS {
+        Some(keep_only_latest_pending_assignment(pending))
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "mvcc-chunks")]
+fn keep_only_latest_pending_assignment<T>(pending: &mut VecDeque<T>) -> usize {
+    let latest = pending
+        .pop_back()
+        .expect("pending queue was just checked as non-empty");
+    let skipped = pending.len();
+    pending.clear();
+    pending.push_back(latest);
+    skipped
+}
+
 fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
     use std::fs::File;
     use std::io::{Read, Write};
@@ -688,5 +820,34 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
         let mut file = File::create(&filename).expect("Couldn't create peer_id file");
         file.write_all(peer_id.to_string().as_bytes())
             .expect("Couldn't write peer_id file");
+    }
+}
+
+#[cfg(all(test, feature = "mvcc-chunks"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_only_latest_pending_assignment_drops_intermediate_assignments() {
+        let mut pending = VecDeque::from([1, 2, 3, 4, 5, 6]);
+
+        let skipped = keep_only_latest_pending_assignment(&mut pending);
+
+        assert_eq!(skipped, 5);
+        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![6]);
+    }
+
+    #[test]
+    fn pending_assignments_below_threshold_keep_fifo_order() {
+        let mut pending = VecDeque::new();
+
+        for assignment in 1..=MAX_PENDING_ASSIGNMENTS {
+            assert_eq!(push_pending_item(&mut pending, assignment), None);
+        }
+
+        assert_eq!(
+            pending.into_iter().collect::<Vec<_>>(),
+            (1..=MAX_PENDING_ASSIGNMENTS).collect::<Vec<_>>()
+        );
     }
 }
