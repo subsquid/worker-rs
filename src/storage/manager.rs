@@ -32,6 +32,8 @@ pub struct StateManager {
     state: Mutex<State>,
     #[cfg(feature = "mvcc-chunks")]
     assignment_application: Mutex<AssignmentApplicationStatus>,
+    #[cfg(feature = "mvcc-chunks")]
+    assignment_applied_tx: tokio::sync::watch::Sender<Option<String>>,
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
     worker_id: PeerId,
@@ -67,6 +69,9 @@ impl StateManager {
         let existing_chunks = load_state(&fs).await?;
         debug!("Loaded state: {:#?}", existing_chunks);
 
+        #[cfg(feature = "mvcc-chunks")]
+        let (assignment_applied_tx, _) = tokio::sync::watch::channel(None);
+
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
@@ -76,6 +81,8 @@ impl StateManager {
             datasets_index: Mutex::new(None),
             #[cfg(feature = "mvcc-chunks")]
             assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
+            #[cfg(feature = "mvcc-chunks")]
+            assignment_applied_tx,
             args,
         })
     }
@@ -204,7 +211,7 @@ impl StateManager {
         assignment: sqd_assignments::Assignment,
         id: impl Into<String>,
         key: &Keypair,
-    ) {
+    ) -> bool {
         let id = id.into();
         #[cfg(feature = "mvcc-chunks")]
         let current_assignment_id = id.clone();
@@ -213,13 +220,9 @@ impl StateManager {
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
                 error!("Can not get assigned chunks: {e}");
-                return;
+                return false;
             }
         };
-        #[cfg(feature = "mvcc-chunks")]
-        {
-            self.assignment_application.lock().current_assignment_id = Some(current_assignment_id);
-        }
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
@@ -238,6 +241,11 @@ impl StateManager {
         *index = Some(datasets_index);
         drop(state);
         drop(index);
+
+        #[cfg(feature = "mvcc-chunks")]
+        {
+            self.assignment_application.lock().current_assignment_id = Some(current_assignment_id);
+        }
 
         #[cfg(feature = "mvcc-chunks")]
         if fully_applied {
@@ -260,6 +268,29 @@ impl StateManager {
             sqd_assignments::WorkerStatus::UnsupportedVersion => {
                 warn!("Worker version is unsupported");
                 metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
+            }
+        }
+        true
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    pub async fn wait_until_assignment_applied(
+        &self,
+        assignment_id: &str,
+        cancellation_token: CancellationToken,
+    ) -> bool {
+        let mut assignment_applied_rx = self.assignment_applied_tx.subscribe();
+        loop {
+            if assignment_applied_rx.borrow().as_deref() == Some(assignment_id) {
+                return true;
+            }
+            tokio::select! {
+                changed = assignment_applied_rx.changed() => {
+                    if changed.is_err() {
+                        return false;
+                    }
+                }
+                _ = cancellation_token.cancelled() => return false,
             }
         }
     }
@@ -315,7 +346,8 @@ impl StateManager {
         else {
             return;
         };
-        assignment_application.last_applied_assignment_id = Some(current_assignment_id);
+        assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
+        let _ = self.assignment_applied_tx.send(Some(current_assignment_id));
     }
 }
 
