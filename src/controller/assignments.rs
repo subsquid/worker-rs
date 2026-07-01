@@ -7,9 +7,19 @@ use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
 
 pub struct AssignmentUpdate {
-    pub assignment: sqd_assignments::Assignment,
     pub id: String,
+    pub fb_url_v1: String,
     pub _effective_from: u64,
+}
+
+pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client {
+    let version = env!("CARGO_PKG_VERSION");
+    reqwest::Client::builder()
+        .user_agent(format!("SQD Worker/{version} {peer_id}"))
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
 }
 
 pub fn new_assignments_stream(
@@ -22,13 +32,7 @@ pub fn new_assignments_stream(
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    let version = env!("CARGO_PKG_VERSION");
-    let reqwest_client = reqwest::Client::builder()
-        .user_agent(format!("SQD Worker/{version} {peer_id}"))
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
+    let reqwest_client = new_reqwest_client(timeout, peer_id);
 
     let mut last_id = None;
 
@@ -69,22 +73,17 @@ async fn update_assignment(
         return anyhow::Ok(None);
     }
 
-    tracing::debug!("Downloading assignment \"{}\"", assignment_id);
-    let assignment = fetch_assignment(
-        &network_state
-            .assignment
-            .fb_url_v1
-            .ok_or(anyhow::anyhow!("Missing fb_url_v1"))?,
-        &reqwest_client,
-    )
-    .await?;
+    let fb_url_v1 = network_state
+        .assignment
+        .fb_url_v1
+        .ok_or_else(|| anyhow::anyhow!("Missing fb_url_v1"))?;
     *last_id = Some(assignment_id.clone());
 
-    tracing::debug!("Downloaded assignment \"{}\"", assignment_id);
+    tracing::debug!("Discovered assignment \"{}\"", assignment_id);
 
     Ok(Some(AssignmentUpdate {
-        assignment,
         id: assignment_id,
+        fb_url_v1,
         _effective_from: network_state.assignment.effective_from,
     }))
 }
@@ -98,7 +97,7 @@ async fn fetch_network_state(
     Ok(network_state)
 }
 
-async fn fetch_assignment(
+pub async fn fetch_assignment(
     url: &str,
     reqwest_client: &reqwest::Client,
 ) -> anyhow::Result<sqd_assignments::Assignment> {

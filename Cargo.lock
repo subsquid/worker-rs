@@ -7094,7 +7094,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=e3ed821#e3ed821ffa4d18443c8c9390a4cd63c28d65fe99"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c05f657#c05f657b7a08d4d5c312731f60b974c471723d09"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7122,7 +7122,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.3.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=e3ed821#e3ed821ffa4d18443c8c9390a4cd63c28d65fe99"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c05f657#c05f657b7a08d4d5c312731f60b974c471723d09"
 dependencies = [
  "async-trait",
  "clap",
@@ -7131,6 +7131,7 @@ dependencies = [
  "libp2p",
  "log",
  "num-rational",
+ "reqwest 0.11.27",
  "serde",
  "serde_json",
  "thiserror 1.0.65",
@@ -7142,7 +7143,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=e3ed821#e3ed821ffa4d18443c8c9390a4cd63c28d65fe99"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c05f657#c05f657b7a08d4d5c312731f60b974c471723d09"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7158,7 +7159,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=e3ed821#e3ed821ffa4d18443c8c9390a4cd63c28d65fe99"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=c05f657#c05f657b7a08d4d5c312731f60b974c471723d09"
 dependencies = [
  "anyhow",
  "async-trait",

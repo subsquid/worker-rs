@@ -30,6 +30,10 @@ pub struct StateManager {
     fs: LocalFs,
     datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
+    #[cfg(feature = "mvcc-chunks")]
+    assignment_application: Mutex<AssignmentApplicationStatus>,
+    #[cfg(feature = "mvcc-chunks")]
+    assignment_applied_tx: tokio::sync::watch::Sender<Option<String>>,
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
     worker_id: PeerId,
@@ -40,6 +44,17 @@ pub struct Status {
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
     pub assignment_id: Option<String>,
+    #[cfg(feature = "mvcc-chunks")]
+    pub last_applied_assignment_id: Option<String>,
+}
+
+#[cfg(feature = "mvcc-chunks")]
+#[derive(Debug, Default)]
+struct AssignmentApplicationStatus {
+    current_assignment_id: Option<String>,
+    // Intentionally remains set while a newer assignment is being applied.
+    // This reports the latest fully applied assignment, not the current target.
+    last_applied_assignment_id: Option<String>,
 }
 
 impl StateManager {
@@ -54,6 +69,9 @@ impl StateManager {
         let existing_chunks = load_state(&fs).await?;
         debug!("Loaded state: {:#?}", existing_chunks);
 
+        #[cfg(feature = "mvcc-chunks")]
+        let (assignment_applied_tx, _) = tokio::sync::watch::channel(None);
+
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
@@ -61,6 +79,10 @@ impl StateManager {
             worker_id,
             notify: tokio::sync::Notify::new(),
             datasets_index: Mutex::new(None),
+            #[cfg(feature = "mvcc-chunks")]
+            assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
+            #[cfg(feature = "mvcc-chunks")]
+            assignment_applied_tx,
             args,
         })
     }
@@ -121,6 +143,13 @@ impl StateManager {
                     break;
                 }
             }
+            #[cfg(feature = "mvcc-chunks")]
+            {
+                let fully_applied = self.state.lock().is_fully_applied();
+                if fully_applied {
+                    self.mark_current_assignment_applied();
+                }
+            }
         }
         info!("State manager loop finished");
     }
@@ -145,6 +174,12 @@ impl StateManager {
                 unavailability_map: Default::default(),
                 stored_bytes,
                 assignment_id: None,
+                #[cfg(feature = "mvcc-chunks")]
+                last_applied_assignment_id: self
+                    .assignment_application
+                    .lock()
+                    .last_applied_assignment_id
+                    .clone(),
             };
         };
 
@@ -162,6 +197,12 @@ impl StateManager {
             unavailability_map,
             stored_bytes,
             assignment_id: Some(assignment_id.to_owned()),
+            #[cfg(feature = "mvcc-chunks")]
+            last_applied_assignment_id: self
+                .assignment_application
+                .lock()
+                .last_applied_assignment_id
+                .clone(),
         }
     }
 
@@ -170,13 +211,16 @@ impl StateManager {
         assignment: sqd_assignments::Assignment,
         id: impl Into<String>,
         key: &Keypair,
-    ) {
+    ) -> bool {
+        let id = id.into();
+        #[cfg(feature = "mvcc-chunks")]
+        let current_assignment_id = id.clone();
         let datasets_index = match DatasetsIndex::new(assignment, id, key) {
             Ok(result) => result,
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
                 error!("Can not get assigned chunks: {e}");
-                return;
+                return false;
             }
         };
         let status = datasets_index.status();
@@ -192,7 +236,21 @@ impl StateManager {
                 self.notify.notify_one();
             }
         }
+        #[cfg(feature = "mvcc-chunks")]
+        let fully_applied = state.is_fully_applied();
         *index = Some(datasets_index);
+        drop(state);
+        drop(index);
+
+        #[cfg(feature = "mvcc-chunks")]
+        {
+            self.assignment_application.lock().current_assignment_id = Some(current_assignment_id);
+        }
+
+        #[cfg(feature = "mvcc-chunks")]
+        if fully_applied {
+            self.mark_current_assignment_applied();
+        }
 
         match status {
             sqd_assignments::WorkerStatus::Ok => {
@@ -210,6 +268,29 @@ impl StateManager {
             sqd_assignments::WorkerStatus::UnsupportedVersion => {
                 warn!("Worker version is unsupported");
                 metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
+            }
+        }
+        true
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    pub async fn wait_until_assignment_applied(
+        &self,
+        assignment_id: &str,
+        cancellation_token: CancellationToken,
+    ) -> bool {
+        let mut assignment_applied_rx = self.assignment_applied_tx.subscribe();
+        loop {
+            if assignment_applied_rx.borrow().as_deref() == Some(assignment_id) {
+                return true;
+            }
+            tokio::select! {
+                changed = assignment_applied_rx.changed() => {
+                    if changed.is_err() {
+                        return false;
+                    }
+                }
+                _ = cancellation_token.cancelled() => return false,
             }
         }
     }
@@ -256,6 +337,17 @@ impl StateManager {
             .root
             .join(dataset::encode_dataset(&chunk_ref.dataset))
             .join(chunk_ref.chunk.as_ref())
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    fn mark_current_assignment_applied(&self) {
+        let mut assignment_application = self.assignment_application.lock();
+        let Some(current_assignment_id) = assignment_application.current_assignment_id.clone()
+        else {
+            return;
+        };
+        assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
+        let _ = self.assignment_applied_tx.send(Some(current_assignment_id));
     }
 }
 
