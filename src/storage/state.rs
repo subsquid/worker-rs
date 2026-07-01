@@ -118,7 +118,14 @@ impl State {
 
     #[cfg(any(feature = "mvcc-chunks", test))]
     pub fn is_fully_applied(&self) -> bool {
-        self.available == self.desired && self.downloading.is_empty() && self.to_download.is_empty()
+        // A stale in-flight download for a chunk no longer desired does not block
+        // applying the current assignment. It will either complete as extra
+        // available data or be ignored when cancellation is reported.
+        self.to_download.is_empty()
+            && self
+                .desired
+                .iter()
+                .all(|chunk| self.available.contains(chunk))
     }
 
     pub fn get_and_lock_chunk(&mut self, dataset: DatasetId, chunk: ChunkId) -> Option<ChunkRef> {
@@ -228,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn fully_applied_requires_available_desired_chunks_and_no_pending_work() {
+    fn fully_applied_requires_desired_chunks_to_be_available() {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
@@ -255,9 +262,35 @@ mod tests {
         assert!(state.is_fully_applied());
 
         state.set_desired_chunks([b.clone(), c.clone()].into_iter().collect());
-        assert!(!state.is_fully_applied());
+        assert!(state.is_fully_applied());
 
         assert_eq!(state.take_removals(), &[a]);
+        assert!(state.is_fully_applied());
+    }
+
+    #[test]
+    fn fully_applied_ignores_stale_downloads() {
+        let ds = Arc::new("ds".to_owned());
+        let chunk_ref = |x| ChunkRef {
+            dataset: ds.clone(),
+            chunk: Arc::from(format!(
+                "0000000000/000000000{}-000000000{}-00000000",
+                x,
+                x + 1
+            )),
+        };
+        let a = chunk_ref(0);
+        let b = chunk_ref(1);
+        let c = chunk_ref(2);
+
+        let mut state = State::new([a.clone(), b.clone()].into_iter().collect());
+        state.set_desired_chunks([a.clone(), b.clone(), c.clone()].into_iter().collect());
+
+        assert_eq!(state.take_next_download(), Some(c.clone()));
+        assert!(!state.is_fully_applied());
+
+        state.set_desired_chunks([a, b].into_iter().collect());
+        assert!(state.get_stale_downloads().contains(&c));
         assert!(state.is_fully_applied());
     }
 }
