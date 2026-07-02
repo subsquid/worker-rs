@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
+use camino::Utf8PathBuf as PathBuf;
 use parking_lot::Mutex;
 use sqd_contract_client::PeerId;
 use sqd_network_transport::Keypair;
@@ -69,7 +69,7 @@ impl StateManager {
         let mut downloader = ChunkDownloader::new(self.worker_id, self.args.clone());
         loop {
             self.state.lock().report_status();
-            let stored_bytes = get_directory_size(&self.fs.root);
+            let stored_bytes = get_directory_size(self.fs.root.clone()).await;
             metrics::STORED_BYTES.set(stored_bytes as i64);
 
             tokio::select! {
@@ -128,12 +128,7 @@ impl StateManager {
     #[instrument(skip_all)]
     pub async fn current_status(&self) -> Status {
         let status = self.state.lock().status();
-        let stored_bytes = tokio::task::spawn_blocking({
-            let root = self.fs.root.clone();
-            move || get_directory_size(&root)
-        })
-        .await
-        .unwrap();
+        let stored_bytes = get_directory_size(self.fs.root.clone()).await;
         let Some(assignment_id) = self
             .datasets_index
             .lock()
@@ -302,26 +297,33 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
     Ok(result)
 }
 
-fn get_directory_size(path: &Path) -> u64 {
-    let mut result = 0;
-    for entry in walkdir::WalkDir::new(path) {
-        let entry = if let Ok(entry) = entry {
-            entry
-        } else {
-            warn!("Couldn't read dir: {entry:?}");
-            continue;
-        };
-        let metadata = if let Ok(metadata) = entry.metadata() {
-            metadata
-        } else {
-            warn!("Couldn't read metadata: {entry:?}");
-            continue;
-        };
-        if metadata.is_file() {
-            result += metadata.len();
+/// Walks the entire directory tree, so it also accounts for files not tracked by the worker.
+/// The walk runs on the blocking thread pool — a full scan of a large workdir may take minutes
+/// and must never run directly on the async runtime.
+async fn get_directory_size(path: PathBuf) -> u64 {
+    tokio::task::spawn_blocking(move || {
+        let mut result = 0;
+        for entry in walkdir::WalkDir::new(&path) {
+            let entry = if let Ok(entry) = entry {
+                entry
+            } else {
+                warn!("Couldn't read dir: {entry:?}");
+                continue;
+            };
+            let metadata = if let Ok(metadata) = entry.metadata() {
+                metadata
+            } else {
+                warn!("Couldn't read metadata: {entry:?}");
+                continue;
+            };
+            if metadata.is_file() {
+                result += metadata.len();
+            }
         }
-    }
-    result
+        result
+    })
+    .await
+    .expect("Directory size calculation shouldn't panic")
 }
 
 #[cfg(test)]
