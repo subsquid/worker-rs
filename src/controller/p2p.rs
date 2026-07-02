@@ -661,6 +661,8 @@ async fn get_worker_status(
         version: WORKER_VERSION.to_string(),
         stored_bytes: Some(status.stored_bytes),
         current_epoch,
+        // Reporting the applied assignment is a separate feature (NET-685)
+        last_applied_assignment_id: None,
     }
 }
 
