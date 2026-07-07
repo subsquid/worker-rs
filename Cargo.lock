@@ -3622,7 +3622,7 @@ dependencies = [
 [[package]]
 name = "libp2p"
 version = "0.56.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "bytes",
  "either",
@@ -3655,7 +3655,7 @@ dependencies = [
 [[package]]
 name = "libp2p-allow-block-list"
 version = "0.6.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "libp2p-core",
  "libp2p-identity",
@@ -3665,7 +3665,7 @@ dependencies = [
 [[package]]
 name = "libp2p-autonat"
 version = "0.15.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -3689,7 +3689,7 @@ dependencies = [
 [[package]]
 name = "libp2p-connection-limits"
 version = "0.6.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "libp2p-core",
  "libp2p-identity",
@@ -3699,7 +3699,7 @@ dependencies = [
 [[package]]
 name = "libp2p-core"
 version = "0.43.1"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "either",
  "fnv",
@@ -3723,7 +3723,7 @@ dependencies = [
 [[package]]
 name = "libp2p-dns"
 version = "0.44.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "async-trait",
  "futures",
@@ -3738,7 +3738,7 @@ dependencies = [
 [[package]]
 name = "libp2p-gossipsub"
 version = "0.50.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "async-channel",
  "asynchronous-codec",
@@ -3768,7 +3768,7 @@ dependencies = [
 [[package]]
 name = "libp2p-identify"
 version = "0.47.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "asynchronous-codec",
  "either",
@@ -3788,8 +3788,7 @@ dependencies = [
 [[package]]
 name = "libp2p-identity"
 version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3104e13b51e4711ff5738caa1fb54467c8604c2e94d607e27745bcf709068774"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "bs58",
  "ed25519-dalek",
@@ -3807,7 +3806,7 @@ dependencies = [
 [[package]]
 name = "libp2p-kad"
 version = "0.49.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "asynchronous-codec",
  "bytes",
@@ -3834,7 +3833,7 @@ dependencies = [
 [[package]]
 name = "libp2p-mdns"
 version = "0.48.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "hickory-proto",
@@ -3852,7 +3851,7 @@ dependencies = [
 [[package]]
 name = "libp2p-metrics"
 version = "0.17.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "libp2p-core",
@@ -3869,7 +3868,7 @@ dependencies = [
 [[package]]
 name = "libp2p-ping"
 version = "0.47.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3884,7 +3883,7 @@ dependencies = [
 [[package]]
 name = "libp2p-quic"
 version = "0.13.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3905,7 +3904,7 @@ dependencies = [
 [[package]]
 name = "libp2p-request-response"
 version = "0.29.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "async-trait",
  "futures",
@@ -3921,7 +3920,7 @@ dependencies = [
 [[package]]
 name = "libp2p-stream"
 version = "0.4.0-alpha"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "libp2p-core",
@@ -3934,7 +3933,7 @@ dependencies = [
 [[package]]
 name = "libp2p-swarm"
 version = "0.47.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "either",
  "fnv",
@@ -3954,7 +3953,7 @@ dependencies = [
 [[package]]
 name = "libp2p-swarm-derive"
 version = "0.35.1"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "heck 0.5.0",
  "quote",
@@ -3964,7 +3963,7 @@ dependencies = [
 [[package]]
 name = "libp2p-tcp"
 version = "0.44.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3979,7 +3978,7 @@ dependencies = [
 [[package]]
 name = "libp2p-tls"
 version = "0.6.2"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "futures-rustls",
@@ -3997,7 +3996,7 @@ dependencies = [
 [[package]]
 name = "libp2p-upnp"
 version = "0.5.1"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -4281,7 +4280,7 @@ checksum = "defc4c55412d89136f966bbb339008b474350e5e6e78d2714439c386b3137a03"
 [[package]]
 name = "multistream-select"
 version = "0.13.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "bytes",
  "futures",
@@ -5834,7 +5833,7 @@ dependencies = [
 [[package]]
 name = "quick-protobuf-codec"
 version = "0.3.1"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "asynchronous-codec",
  "bytes",
@@ -6488,7 +6487,7 @@ checksum = "0e819f2bc632f285be6d7cd36e25940d45b2391dd6d9b939e79de557f7014248"
 [[package]]
 name = "rw-stream-sink"
 version = "0.4.0"
-source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=c0ed330#c0ed3308db3a7deda74a688e13b69007942c41ab"
+source = "git+https://github.com/kalabukdima/rust-libp2p.git?rev=fac3b0c9#fac3b0c97757d6d8d6042f5423d9467a94ea80b0"
 dependencies = [
  "futures",
  "pin-project",
@@ -7094,7 +7093,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=292e67f#292e67f39d392592de609dda6323b1c2e638d271"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=541684c#541684c1ad9cd25a6c1423ec699eb8b6dcf65d1e"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7122,7 +7121,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.3.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=292e67f#292e67f39d392592de609dda6323b1c2e638d271"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=541684c#541684c1ad9cd25a6c1423ec699eb8b6dcf65d1e"
 dependencies = [
  "async-trait",
  "clap",
@@ -7143,7 +7142,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=292e67f#292e67f39d392592de609dda6323b1c2e638d271"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=541684c#541684c1ad9cd25a6c1423ec699eb8b6dcf65d1e"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7159,7 +7158,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=292e67f#292e67f39d392592de609dda6323b1c2e638d271"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=541684c#541684c1ad9cd25a6c1423ec699eb8b6dcf65d1e"
 dependencies = [
  "anyhow",
  "async-trait",

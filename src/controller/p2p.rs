@@ -6,12 +6,12 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::RwLock;
 use sqd_messages::{
-    query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted, QueryLogs,
+    query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted,
     TimeReport, WorkerStatus,
 };
 use sqd_network_transport::{
-    protocol, Keypair, P2PTransportBuilder, PeerId, QueueFull, ResponseChannel, WorkerConfig,
-    WorkerEvent, WorkerTransportHandle,
+    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseSender, WorkerConfig, WorkerEvent,
+    WorkerTransportHandle,
 };
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -62,14 +62,12 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
-    queries_rx:
-        UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
-    sql_queries_tx: mpsc::Sender<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>,
-    sql_queries_rx:
-        UseOnce<mpsc::Receiver<(PeerId, Query, ResponseChannel<sqd_messages::QueryResult>)>>,
-    log_requests_tx: mpsc::Sender<(LogsRequest, ResponseChannel<QueryLogs>)>,
-    log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseChannel<QueryLogs>)>>,
+    queries_tx: mpsc::Sender<(PeerId, Query, ResponseSender)>,
+    queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query, ResponseSender)>>,
+    sql_queries_tx: mpsc::Sender<(PeerId, Query, ResponseSender)>,
+    sql_queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query, ResponseSender)>>,
+    log_requests_tx: mpsc::Sender<(LogsRequest, ResponseSender)>,
+    log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseSender)>>,
 }
 
 pub async fn create_p2p_controller(
@@ -91,11 +89,7 @@ pub async fn create_p2p_controller(
 
     let worker_status = get_worker_status(&worker, allocations_checker.current_epoch()).await;
 
-    let mut config = WorkerConfig::default();
-    config.status_queue_size = std::env::var("WORKER_STATUS_QUEUE_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1000);
+    let config = WorkerConfig::default();
     let (event_stream, transport_handle) = transport_builder.build_worker(config).await?;
 
     let (queries_tx, queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
@@ -416,7 +410,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Logs cleanup task finished");
     }
 
-    async fn run_event_loop(&self, cancellation_token: CancellationToken) {
+    async fn run_event_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
         let event_stream = self
             .raw_event_stream
             .take()
@@ -436,8 +430,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     }
                     match self.queries_tx.try_send((peer_id, query, resp_chan)) {
                         Ok(_) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            warn!("Queries queue is full. Dropping query from {peer_id}");
+                        Err(mpsc::error::TrySendError::Full((_, query, resp_chan))) => {
+                            warn!("Queries queue is full. Rejecting query from {peer_id}");
+                            self.clone().reject_overloaded(query, resp_chan);
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             break;
@@ -454,8 +449,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     }
                     match self.sql_queries_tx.try_send((peer_id, query, resp_chan)) {
                         Ok(_) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            warn!("SQL Queries queue is full. Dropping query from {peer_id}");
+                        Err(mpsc::error::TrySendError::Full((_, query, resp_chan))) => {
+                            warn!("SQL Queries queue is full. Rejecting query from {peer_id}");
+                            self.clone().reject_overloaded(query, resp_chan);
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             break;
@@ -475,17 +471,38 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 }
                 WorkerEvent::StatusRequest { peer_id, resp_chan } => {
                     let status = self.worker_status.read().clone();
-                    match self.transport_handle.send_status(status, resp_chan) {
-                        Ok(_) => {}
-                        Err(QueueFull) => {
-                            warn!("Couldn't respond with status to {peer_id}: out queue full");
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = this.transport_handle.send_status(status, resp_chan).await {
+                            warn!("Couldn't respond with status to {peer_id}: {e:?}");
                         }
-                    }
+                    });
                 }
             }
         }
 
         info!("Transport event loop finished");
+    }
+
+    /// Respond to a query the worker can't accept right now (its processing queue is full) with a
+    /// signed `too_many_requests` error, instead of dropping the stream and leaving the client to
+    /// see an opaque transport error. Runs off the event loop so the response write can't stall it.
+    fn reject_overloaded(self: Arc<Self>, query: Query, resp_chan: ResponseSender) {
+        tokio::spawn(async move {
+            let mut msg = sqd_messages::QueryResult {
+                query_id: query.query_id,
+                result: Some(query_error::Err::TooManyRequests(()).into()),
+                retry_after_ms: Some(DEFAULT_BACKOFF.as_millis() as u32),
+                signature: Default::default(),
+            };
+            if let Err(e) = msg.sign(&self.keypair) {
+                warn!("Couldn't sign too_many_requests response: {e}");
+                return;
+            }
+            if let Err(e) = self.transport_handle.send_query_result(msg, resp_chan).await {
+                warn!("Couldn't send too_many_requests response: {e:?}");
+            }
+        });
     }
 
     #[instrument(skip_all)]
@@ -514,7 +531,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         &self,
         peer_id: PeerId,
         query: Query,
-        resp_chan: ResponseChannel<sqd_messages::QueryResult>,
+        resp_chan: ResponseSender,
         query_type: QueryType,
     ) {
         let query_id = query.query_id.clone();
@@ -571,7 +588,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         &self,
         query_id: String,
         result: QueryResult,
-        resp_chan: ResponseChannel<sqd_messages::QueryResult>,
+        resp_chan: ResponseSender,
         retry_after: Option<Duration>,
         compression: sqd_messages::Compression,
     ) -> Result<(Duration, Duration)> {
@@ -609,10 +626,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         }
 
         tracing::trace!("Sending query result");
-        // TODO: propagate backpressure from the transport lib
         self.transport_handle
             .send_query_result(msg, resp_chan)
-            .map_err(|_| anyhow!("queue full"))?;
+            .await
+            .map_err(|e| anyhow!("couldn't send query result: {e}"))?;
 
         Ok((compression_duration, signing_duration))
     }
@@ -620,7 +637,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     async fn handle_logs_request(
         &self,
         request: LogsRequest,
-        resp_chan: ResponseChannel<QueryLogs>,
+        resp_chan: ResponseSender,
     ) -> Result<()> {
         let msg = self
             .logs_storage
@@ -636,7 +653,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             msg.queries_executed.len(),
             msg.encoded_len()
         );
-        self.transport_handle.send_logs(msg, resp_chan)?;
+        self.transport_handle.send_logs(msg, resp_chan).await?;
         Ok(())
     }
 }
