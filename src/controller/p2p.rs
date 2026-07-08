@@ -56,7 +56,9 @@ pub struct P2PController<EventStream> {
     assignment_fetch_timeout: Duration,
     assignment_fetch_max_delay: Duration,
     raw_event_stream: UseOnce<EventStream>,
-    transport_handle: WorkerTransportHandle,
+    // Keeps the transport running: it shuts down when the last handle drops. Responses go through
+    // each request's `ResponseSender`, so this handle is only held, never called.
+    _transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
@@ -103,7 +105,7 @@ pub async fn create_p2p_controller(
         assignment_fetch_timeout: args.assignment_fetch_timeout,
         assignment_fetch_max_delay: args.assignment_fetch_max_delay,
         raw_event_stream: UseOnce::new(event_stream),
-        transport_handle,
+        _transport_handle: transport_handle,
         logs_storage: LogsStorage::new(args.data_dir.join("logs.db").as_str()).await?,
         allocations_checker,
         worker_id,
@@ -422,9 +424,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             match ev {
                 WorkerEvent::Query {
                     peer_id,
-                    query,
+                    request,
                     resp_chan,
                 } => {
+                    let query = match Query::decode(request.as_ref()) {
+                        Ok(query) => query,
+                        Err(e) => {
+                            warn!("Failed to decode query from {peer_id}: {e}");
+                            continue;
+                        }
+                    };
                     if !self.validate_query(&query, peer_id) {
                         continue;
                     }
@@ -441,9 +450,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 }
                 WorkerEvent::SqlQuery {
                     peer_id,
-                    query,
+                    request,
                     resp_chan,
                 } => {
+                    let query = match Query::decode(request.as_ref()) {
+                        Ok(query) => query,
+                        Err(e) => {
+                            warn!("Failed to decode SQL query from {peer_id}: {e}");
+                            continue;
+                        }
+                    };
                     if !self.validate_query(&query, peer_id) {
                         continue;
                     }
@@ -458,7 +474,18 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                         }
                     }
                 }
-                WorkerEvent::LogsRequest { request, resp_chan } => {
+                WorkerEvent::LogsRequest {
+                    peer_id,
+                    request,
+                    resp_chan,
+                } => {
+                    let request = match LogsRequest::decode(request.as_ref()) {
+                        Ok(request) => request,
+                        Err(e) => {
+                            warn!("Failed to decode logs request from {peer_id}: {e}");
+                            continue;
+                        }
+                    };
                     match self.log_requests_tx.try_send((request, resp_chan)) {
                         Ok(_) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -471,9 +498,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 }
                 WorkerEvent::StatusRequest { peer_id, resp_chan } => {
                     let status = self.worker_status.read().clone();
-                    let this = self.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = this.transport_handle.send_status(status, resp_chan).await {
+                        tracing::debug!("Sending worker status to {peer_id}");
+                        if let Err(e) = resp_chan.send(&status.encode_to_vec()).await {
                             warn!("Couldn't respond with status to {peer_id}: {e:?}");
                         }
                     });
@@ -485,8 +512,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 
     /// Respond to a query the worker can't accept right now (its processing queue is full) with a
-    /// signed `too_many_requests` error, instead of dropping the stream and leaving the client to
-    /// see an opaque transport error. Runs off the event loop so the response write can't stall it.
+    /// signed `too_many_requests` error carrying a retry hint, so the client can back off cleanly.
+    /// Runs off the event loop so the response write can't stall it.
     fn reject_overloaded(self: Arc<Self>, query: Query, resp_chan: ResponseSender) {
         tokio::spawn(async move {
             let mut msg = sqd_messages::QueryResult {
@@ -499,7 +526,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 warn!("Couldn't sign too_many_requests response: {e}");
                 return;
             }
-            if let Err(e) = self.transport_handle.send_query_result(msg, resp_chan).await {
+            if let Err(e) = resp_chan.send(&msg.encode_to_vec()).await {
                 warn!("Couldn't send too_many_requests response: {e:?}");
             }
         });
@@ -626,8 +653,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         }
 
         tracing::trace!("Sending query result");
-        self.transport_handle
-            .send_query_result(msg, resp_chan)
+        resp_chan
+            .send(&msg.encode_to_vec())
             .await
             .map_err(|e| anyhow!("couldn't send query result: {e}"))?;
 
@@ -653,7 +680,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             msg.queries_executed.len(),
             msg.encoded_len()
         );
-        self.transport_handle.send_logs(msg, resp_chan).await?;
+        resp_chan.send(&msg.encode_to_vec()).await?;
         Ok(())
     }
 }
