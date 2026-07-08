@@ -17,16 +17,6 @@ pub enum RateLimitStatus {
     NoAllocation,
 }
 
-impl RateLimitStatus {
-    pub fn retry_after(&self) -> Option<Duration> {
-        match self {
-            RateLimitStatus::Spent(retry_after) => *retry_after,
-            RateLimitStatus::Paused(retry_after) => Some(*retry_after),
-            RateLimitStatus::NoAllocation => None,
-        }
-    }
-}
-
 const MAX_TOKENS: f32 = 3.0f32;
 
 struct Bucket {

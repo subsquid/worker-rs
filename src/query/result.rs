@@ -8,13 +8,12 @@ use crate::util::hash::sha3_256;
 
 pub type QueryResult = std::result::Result<QueryOk, QueryError>;
 
+/// Timings from the query engine. Compression and signing are measured at delivery, not here.
 #[derive(Debug, Clone, Default)]
 pub struct WorkerTimeReport {
     pub parsing_time: Duration,
     pub execution_time: Duration,
     pub serialization_time: Duration,
-    pub compression_time: Duration,
-    pub signing_time: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +40,6 @@ impl QueryOk {
                 parsing_time,
                 execution_time,
                 serialization_time,
-                compression_time: Duration::from_secs(0),
-                signing_time: Duration::from_secs(0),
             },
             last_block,
         }

@@ -1,29 +1,24 @@
-//! Dependency seams for the query-serving pipeline (`process_query`, `generate_log`) in
-//! [`super::p2p`]. Production runs against the real `Worker` and `AllocationsChecker`; the traits
-//! let tests inject an engine with a fixed outcome and a rate limiter that records what it spent,
-//! with no transport or storage.
+//! Dependency seams for the query-serving pipeline in [`super::p2p`]. Production runs against the
+//! real `Worker` and `AllocationsChecker`; the traits let tests inject an engine with a fixed
+//! outcome and a rate limiter that records what it spent, with no transport or storage.
 
 use async_trait::async_trait;
 use sqd_network_transport::PeerId;
 
 use crate::{
-    compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus},
+    compute_units::allocations_checker::AllocationsChecker,
     controller::worker::{QueryType, Worker},
     query::result::QueryResult,
     types::dataset::Dataset,
 };
 
-/// Compute-unit rate limiting, behind a trait so tests can set a verdict and record spending.
+/// The refund half of compute-unit accounting. A unit is spent at admission on the concrete
+/// `AllocationsChecker`; the served stage only refunds the fraction the query didn't use.
 pub trait CuChecker {
-    fn try_spend(&self, portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus;
     fn refund(&self, portal_id: PeerId, allocation_chip: f32);
 }
 
 impl CuChecker for AllocationsChecker {
-    fn try_spend(&self, portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus {
-        AllocationsChecker::try_spend(self, portal_id, allocation_chip)
-    }
-
     fn refund(&self, portal_id: PeerId, allocation_chip: f32) {
         AllocationsChecker::refund(self, portal_id, allocation_chip)
     }
@@ -101,16 +96,17 @@ pub mod mocks {
         pub fn net_spent(&self) -> f32 {
             *self.net_spent.lock()
         }
-    }
 
-    impl CuChecker for MockChecker {
-        fn try_spend(&self, _portal_id: PeerId, allocation_chip: f32) -> RateLimitStatus {
+        /// Stand in for the admission spend that production does before the served stage.
+        pub fn try_spend(&self, allocation_chip: f32) -> RateLimitStatus {
             if let RateLimitStatus::Spent(_) = self.verdict {
                 *self.net_spent.lock() += allocation_chip;
             }
             self.verdict
         }
+    }
 
+    impl CuChecker for MockChecker {
         fn refund(&self, _portal_id: PeerId, allocation_chip: f32) {
             *self.net_spent.lock() -= allocation_chip;
         }
