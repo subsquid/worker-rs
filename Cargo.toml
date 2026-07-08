@@ -6,6 +6,7 @@ edition = "2021"
 
 [features]
 query-tracing = ["sqd-query/max_level_trace"]
+mvcc-chunks = []
 
 [dependencies]
 anyhow = "1.0"

@@ -30,6 +30,10 @@ pub struct StateManager {
     fs: LocalFs,
     datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
+    #[cfg(feature = "mvcc-chunks")]
+    assignment_application: Mutex<AssignmentApplicationStatus>,
+    #[cfg(feature = "mvcc-chunks")]
+    assignment_applied_tx: tokio::sync::watch::Sender<Option<String>>,
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
     worker_id: PeerId,
@@ -40,6 +44,17 @@ pub struct Status {
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
     pub assignment_id: Option<String>,
+    #[cfg(feature = "mvcc-chunks")]
+    pub last_applied_assignment_id: Option<String>,
+}
+
+#[cfg(feature = "mvcc-chunks")]
+#[derive(Debug, Default)]
+struct AssignmentApplicationStatus {
+    current_assignment_id: Option<String>,
+    // Intentionally remains set while a newer assignment is being applied.
+    // This reports the latest fully applied assignment, not the current target.
+    last_applied_assignment_id: Option<String>,
 }
 
 impl StateManager {
@@ -54,6 +69,9 @@ impl StateManager {
         let existing_chunks = load_state(&fs).await?;
         debug!("Loaded state: {:#?}", existing_chunks);
 
+        #[cfg(feature = "mvcc-chunks")]
+        let (assignment_applied_tx, _) = tokio::sync::watch::channel(None);
+
         Ok(Self {
             fs,
             state: Mutex::new(State::new(existing_chunks)),
@@ -61,6 +79,10 @@ impl StateManager {
             worker_id,
             notify: tokio::sync::Notify::new(),
             datasets_index: Mutex::new(None),
+            #[cfg(feature = "mvcc-chunks")]
+            assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
+            #[cfg(feature = "mvcc-chunks")]
+            assignment_applied_tx,
             args,
         })
     }
@@ -121,6 +143,10 @@ impl StateManager {
                     break;
                 }
             }
+            #[cfg(feature = "mvcc-chunks")]
+            {
+                self.mark_current_assignment_applied_if_ready();
+            }
         }
         info!("State manager loop finished");
     }
@@ -140,6 +166,12 @@ impl StateManager {
                 unavailability_map: Default::default(),
                 stored_bytes,
                 assignment_id: None,
+                #[cfg(feature = "mvcc-chunks")]
+                last_applied_assignment_id: self
+                    .assignment_application
+                    .lock()
+                    .last_applied_assignment_id
+                    .clone(),
             };
         };
 
@@ -157,6 +189,12 @@ impl StateManager {
             unavailability_map,
             stored_bytes,
             assignment_id: Some(assignment_id.to_owned()),
+            #[cfg(feature = "mvcc-chunks")]
+            last_applied_assignment_id: self
+                .assignment_application
+                .lock()
+                .last_applied_assignment_id
+                .clone(),
         }
     }
 
@@ -165,13 +203,16 @@ impl StateManager {
         assignment: sqd_assignments::Assignment,
         id: impl Into<String>,
         key: &Keypair,
-    ) {
+    ) -> bool {
+        let id = id.into();
+        #[cfg(feature = "mvcc-chunks")]
+        let current_assignment_id = id.clone();
         let datasets_index = match DatasetsIndex::new(assignment, id, key) {
             Ok(result) => result,
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
                 error!("Can not get assigned chunks: {e}");
-                return;
+                return false;
             }
         };
         let status = datasets_index.status();
@@ -188,6 +229,16 @@ impl StateManager {
             }
         }
         *index = Some(datasets_index);
+        drop(state);
+        drop(index);
+
+        #[cfg(feature = "mvcc-chunks")]
+        {
+            self.assignment_application.lock().current_assignment_id = Some(current_assignment_id);
+        }
+
+        #[cfg(feature = "mvcc-chunks")]
+        self.mark_current_assignment_applied_if_ready();
 
         match status {
             sqd_assignments::WorkerStatus::Ok => {
@@ -205,6 +256,29 @@ impl StateManager {
             sqd_assignments::WorkerStatus::UnsupportedVersion => {
                 warn!("Worker version is unsupported");
                 metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
+            }
+        }
+        true
+    }
+
+    #[cfg(feature = "mvcc-chunks")]
+    pub async fn wait_until_assignment_applied(
+        &self,
+        assignment_id: &str,
+        cancellation_token: CancellationToken,
+    ) -> bool {
+        let mut assignment_applied_rx = self.assignment_applied_tx.subscribe();
+        loop {
+            if assignment_applied_rx.borrow().as_deref() == Some(assignment_id) {
+                return true;
+            }
+            tokio::select! {
+                changed = assignment_applied_rx.changed() => {
+                    if changed.is_err() {
+                        return false;
+                    }
+                }
+                _ = cancellation_token.cancelled() => return false,
             }
         }
     }
@@ -252,6 +326,39 @@ impl StateManager {
             .join(dataset::encode_dataset(&chunk_ref.dataset))
             .join(chunk_ref.chunk.as_ref())
     }
+
+    #[cfg(feature = "mvcc-chunks")]
+    fn mark_current_assignment_applied_if_ready(&self) {
+        mark_assignment_applied_if_ready(
+            &self.state,
+            &self.assignment_application,
+            &self.assignment_applied_tx,
+        );
+    }
+}
+
+// Free function (rather than a `StateManager` method) so tests can drive the exact
+// check-and-mark critical section without constructing a full `StateManager`.
+#[cfg(feature = "mvcc-chunks")]
+fn mark_assignment_applied_if_ready(
+    state: &Mutex<State>,
+    assignment_application: &Mutex<AssignmentApplicationStatus>,
+    assignment_applied_tx: &tokio::sync::watch::Sender<Option<String>>,
+) {
+    let mut assignment_application = assignment_application.lock();
+    let Some(current_assignment_id) = assignment_application.current_assignment_id.clone() else {
+        return;
+    };
+    if assignment_application.last_applied_assignment_id.as_deref()
+        == Some(current_assignment_id.as_str())
+    {
+        return;
+    }
+    if !state.lock().is_fully_applied() {
+        return;
+    }
+    assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
+    let _ = assignment_applied_tx.send(Some(current_assignment_id));
 }
 
 #[instrument(skip_all)]
@@ -334,5 +441,80 @@ mod tests {
     fn test_join_glob() {
         // `remove_temps` depends on this behavior
         assert_eq!(PathBuf::from("a/b").join("**/*.c").as_str(), "a/b/**/*.c");
+    }
+
+    // Reproduces one specific interleaving between `set_assignment` and the state
+    // loop's periodic check that used to let a not-yet-applied assignment be reported
+    // as applied (see git history of `mark_assignment_applied_if_ready`). It is not an
+    // exhaustive test of every possible interleaving, just this one.
+    #[cfg(feature = "mvcc-chunks")]
+    #[test]
+    fn does_not_misattribute_applied_state_to_a_newer_assignment() {
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+
+        use super::{mark_assignment_applied_if_ready, AssignmentApplicationStatus, State};
+        use crate::types::state::{ChunkRef, ChunkSet};
+
+        let chunk = |id: &str| ChunkRef {
+            dataset: Arc::new("ds".to_owned()),
+            chunk: Arc::from(id),
+        };
+        let chunk_a = chunk("a");
+        let chunk_b = chunk("b");
+
+        // Assignment A only needs `chunk_a`, which is already available, and is
+        // already marked as applied (steady state before the race begins).
+        let state = Mutex::new(State::new([chunk_a.clone()].into_iter().collect()));
+        let assignment_application = Mutex::new(AssignmentApplicationStatus {
+            current_assignment_id: Some("A".to_owned()),
+            last_applied_assignment_id: Some("A".to_owned()),
+        });
+        let (assignment_applied_tx, assignment_applied_rx) =
+            tokio::sync::watch::channel(Some("A".to_owned()));
+
+        // Step 1: `set_assignment(B)` updates the desired chunks first. B additionally
+        // needs `chunk_b`, which isn't available yet, so state stops being fully applied.
+        let desired: ChunkSet = [chunk_a.clone(), chunk_b.clone()].into_iter().collect();
+        state.lock().set_desired_chunks(desired);
+        assert!(!state.lock().is_fully_applied());
+
+        // Step 2: the state loop's own check races in before `current_assignment_id`
+        // has been updated to B. `current_assignment_id` is still A, which is already
+        // marked applied, so this must be a no-op.
+        mark_assignment_applied_if_ready(&state, &assignment_application, &assignment_applied_tx);
+        assert_eq!(
+            assignment_application.lock().last_applied_assignment_id,
+            Some("A".to_owned())
+        );
+
+        // Step 3: `set_assignment` now points `current_assignment_id` at B.
+        assignment_application.lock().current_assignment_id = Some("B".to_owned());
+
+        // Step 4: `set_assignment`'s own post-update check runs. `chunk_b` is still
+        // missing, so B must NOT be marked applied here. Before the fix, a
+        // `fully_applied` bool captured back in step 1 (still `true`, for A) would
+        // have been reused here and wrongly marked B applied.
+        mark_assignment_applied_if_ready(&state, &assignment_application, &assignment_applied_tx);
+        assert_eq!(
+            assignment_application.lock().last_applied_assignment_id,
+            Some("A".to_owned()),
+            "B must not be marked applied while chunk_b is still missing"
+        );
+        assert_eq!(*assignment_applied_rx.borrow(), Some("A".to_owned()));
+
+        // Step 5: `chunk_b` finishes downloading, so B genuinely becomes fully applied.
+        state.lock().take_next_download();
+        state.lock().complete_download(&chunk_b, true);
+        assert!(state.lock().is_fully_applied());
+
+        // Step 6: only now should B be marked applied.
+        mark_assignment_applied_if_ready(&state, &assignment_application, &assignment_applied_tx);
+        assert_eq!(
+            assignment_application.lock().last_applied_assignment_id,
+            Some("B".to_owned())
+        );
+        assert_eq!(*assignment_applied_rx.borrow(), Some("B".to_owned()));
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::{env, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
@@ -42,6 +43,7 @@ const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_PENDING_ASSIGNMENTS: usize = 5;
 // TODO: find out why the margin is required
 const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
@@ -222,26 +224,129 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         cancellation_token: CancellationToken,
         assignment_check_interval: Duration,
     ) {
-        super::assignments::new_assignments_stream(
-            self.assignment_url.clone(),
-            assignment_check_interval,
-            self.assignment_fetch_timeout,
-            self.assignment_fetch_max_delay,
-            self.worker_id,
-        )
-        .take_until(cancellation_token.cancelled_owned())
-        .for_each(|update| async move {
-            let worker = self.worker.clone();
-            let keypair = self.keypair.clone();
-            let id = update.id.clone();
-            tokio::task::spawn_blocking(move || {
-                worker.register_assignment(update.assignment, update.id, &keypair);
-            })
-            .instrument(tracing::info_span!("set_assignment", id))
-            .await
-            .expect("register_assignment shouldn't panic");
-        })
-        .await;
+        let mut assignments = Box::pin(
+            super::assignments::new_assignments_stream(
+                self.assignment_url.clone(),
+                assignment_check_interval,
+                self.assignment_fetch_timeout,
+                self.assignment_fetch_max_delay,
+                self.worker_id,
+            )
+            .take_until(cancellation_token.clone().cancelled_owned())
+            .fuse(),
+        );
+        let assignment_client =
+            super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
+        let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
+        #[cfg(feature = "mvcc-chunks")]
+        let mut processing_id: Option<String> = None;
+        #[cfg(not(feature = "mvcc-chunks"))]
+        let processing_id: Option<String> = None;
+
+        'assignments: loop {
+            if processing_id.is_none() {
+                if let Some(update) = pending.pop_front() {
+                    tracing::debug!("Downloading assignment \"{}\"", update.id);
+                    let assignment = match super::assignments::fetch_assignment(
+                        &update.fb_url_v1,
+                        &assignment_client,
+                    )
+                    .await
+                    {
+                        Ok(assignment) => assignment,
+                        Err(e) => {
+                            warn!(assignment_id = %update.id, error = %e, "Failed to download assignment");
+                            let retry_delay = tokio::time::sleep(DEFAULT_BACKOFF);
+                            tokio::pin!(retry_delay);
+                            let mut skip_retry = false;
+                            loop {
+                                tokio::select! {
+                                    next_update = assignments.next() => {
+                                        let Some(next_update) = next_update else {
+                                            break 'assignments;
+                                        };
+                                        if push_pending_assignment(&mut pending, next_update) {
+                                            skip_retry = true;
+                                        }
+                                    }
+                                    _ = &mut retry_delay => break,
+                                    _ = cancellation_token.cancelled() => break 'assignments,
+                                }
+                            }
+                            if !skip_retry {
+                                requeue_pending_assignment(&mut pending, update);
+                            }
+                            continue;
+                        }
+                    };
+                    tracing::debug!("Downloaded assignment \"{}\"", update.id);
+
+                    let worker = self.worker.clone();
+                    let keypair = self.keypair.clone();
+                    let id = update.id.clone();
+                    let registered = tokio::task::spawn_blocking(move || {
+                        worker.register_assignment(assignment, update.id, &keypair)
+                    })
+                    .instrument(tracing::info_span!("set_assignment", id))
+                    .await
+                    .expect("register_assignment shouldn't panic");
+
+                    #[cfg(feature = "mvcc-chunks")]
+                    if registered {
+                        processing_id = Some(id);
+                    }
+                    #[cfg(not(feature = "mvcc-chunks"))]
+                    let _ = registered;
+
+                    continue;
+                }
+            }
+
+            #[cfg(feature = "mvcc-chunks")]
+            match processing_id.clone() {
+                Some(id) => {
+                    tokio::select! {
+                        update = assignments.next() => {
+                            let Some(update) = update else {
+                                break;
+                            };
+                            if push_pending_assignment(&mut pending, update) {
+                                warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
+                                processing_id = None;
+                            }
+                        }
+                        applied = self.worker.wait_until_assignment_applied(&id, cancellation_token.clone()) => {
+                            if !applied {
+                                break;
+                            }
+                            processing_id = None;
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        update = assignments.next() => {
+                            let Some(update) = update else {
+                                break;
+                            };
+                            push_pending_assignment(&mut pending, update);
+                        }
+                        _ = cancellation_token.cancelled() => break,
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "mvcc-chunks"))]
+            tokio::select! {
+                update = assignments.next() => {
+                    let Some(update) = update else {
+                        break;
+                    };
+                    push_pending_assignment(&mut pending, update);
+                }
+                _ = cancellation_token.cancelled() => break,
+            }
+        }
         info!("Assignment processing task finished");
     }
 
@@ -661,9 +766,80 @@ async fn get_worker_status(
         version: WORKER_VERSION.to_string(),
         stored_bytes: Some(status.stored_bytes),
         current_epoch,
-        // Reporting the applied assignment is a separate feature (NET-685)
+        #[cfg(feature = "mvcc-chunks")]
+        last_applied_assignment_id: status.last_applied_assignment_id,
+        #[cfg(not(feature = "mvcc-chunks"))]
         last_applied_assignment_id: None,
     }
+}
+
+fn push_pending_assignment(
+    pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
+    update: super::assignments::AssignmentUpdate,
+) -> bool {
+    if let Some(skipped) = push_pending_item(pending, update) {
+        warn!(
+            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn push_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
+    pending.push_back(item);
+    #[cfg(feature = "mvcc-chunks")]
+    if pending.len() > MAX_PENDING_ASSIGNMENTS {
+        Some(keep_only_latest_pending_assignment(pending))
+    } else {
+        None
+    }
+
+    #[cfg(not(feature = "mvcc-chunks"))]
+    {
+        None
+    }
+}
+
+fn requeue_pending_assignment(
+    pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
+    update: super::assignments::AssignmentUpdate,
+) -> bool {
+    if let Some(skipped) = requeue_pending_item(pending, update) {
+        warn!(
+            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn requeue_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
+    pending.push_front(item);
+    #[cfg(feature = "mvcc-chunks")]
+    if pending.len() > MAX_PENDING_ASSIGNMENTS {
+        Some(keep_only_latest_pending_assignment(pending))
+    } else {
+        None
+    }
+
+    #[cfg(not(feature = "mvcc-chunks"))]
+    {
+        None
+    }
+}
+
+#[cfg(feature = "mvcc-chunks")]
+fn keep_only_latest_pending_assignment<T>(pending: &mut VecDeque<T>) -> usize {
+    let latest = pending
+        .pop_back()
+        .expect("pending queue was just checked as non-empty");
+    let skipped = pending.len();
+    pending.clear();
+    pending.push_back(latest);
+    skipped
 }
 
 fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
@@ -686,5 +862,44 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
         let mut file = File::create(&filename).expect("Couldn't create peer_id file");
         file.write_all(peer_id.to_string().as_bytes())
             .expect("Couldn't write peer_id file");
+    }
+}
+
+#[cfg(all(test, feature = "mvcc-chunks"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_only_latest_pending_assignment_drops_intermediate_assignments() {
+        let mut pending = VecDeque::from([1, 2, 3, 4, 5, 6]);
+
+        let skipped = keep_only_latest_pending_assignment(&mut pending);
+
+        assert_eq!(skipped, 5);
+        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![6]);
+    }
+
+    #[test]
+    fn pending_assignments_below_threshold_keep_fifo_order() {
+        let mut pending = VecDeque::new();
+
+        for assignment in 1..=MAX_PENDING_ASSIGNMENTS {
+            assert_eq!(push_pending_item(&mut pending, assignment), None);
+        }
+
+        assert_eq!(
+            pending.into_iter().collect::<Vec<_>>(),
+            (1..=MAX_PENDING_ASSIGNMENTS).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn failed_assignment_requeue_overflow_keeps_latest_pending_assignment() {
+        let mut pending = VecDeque::from([2, 3, 4, 5, 6]);
+
+        let skipped = requeue_pending_item(&mut pending, 1);
+
+        assert_eq!(skipped, Some(5));
+        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![6]);
     }
 }
