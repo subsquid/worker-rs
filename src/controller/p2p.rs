@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::{env, sync::Arc, time::Duration};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::RwLock;
@@ -13,7 +13,10 @@ use sqd_network_transport::{
     protocol, Keypair, P2PTransportBuilder, PeerId, ResponseSender, WorkerConfig, WorkerEvent,
     WorkerTransportHandle,
 };
-use tokio::{sync::mpsc, time::MissedTickBehavior};
+use tokio::{
+    sync::{mpsc, Semaphore},
+    time::MissedTickBehavior,
+};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn, Instrument};
@@ -41,6 +44,9 @@ const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
+/// Caps concurrent reject sends. Past this, the response is dropped — a cheap stream reset — rather
+/// than spawning unbounded signing tasks under a flood.
+const MAX_CONCURRENT_REJECTS: usize = 64;
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
@@ -49,6 +55,21 @@ const MAX_PENDING_ASSIGNMENTS: usize = 5;
 const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
 
+/// The trailing `Option<Duration>` is the rate-limit backoff hint carried from admission.
+type AdmittedQuery = (PeerId, Query, ResponseSender, Option<Duration>);
+
+/// What the log records for a served query, built alongside the wire message in [`build_delivery`]
+/// so the two can't diverge — a downgraded (oversized or unsignable) result is `Err` in both.
+enum Logged {
+    Ok {
+        data_hash: Vec<u8>,
+        uncompressed_size: u64,
+        last_block: u64,
+        timings: TimeReport,
+    },
+    Err(query_error::Err),
+}
+
 pub struct P2PController<EventStream> {
     worker: Arc<Worker>,
     worker_status: RwLock<WorkerStatus>,
@@ -56,20 +77,22 @@ pub struct P2PController<EventStream> {
     assignment_fetch_timeout: Duration,
     assignment_fetch_max_delay: Duration,
     raw_event_stream: UseOnce<EventStream>,
-    // Keeps the transport running: it shuts down when the last handle drops. Responses go through
-    // each request's `ResponseSender`, so this handle is only held, never called.
+    // Held to keep the transport running; it stops when the last handle drops. Responses go through
+    // each request's `ResponseSender`, never this handle.
     _transport_handle: WorkerTransportHandle,
     logs_storage: LogsStorage,
     allocations_checker: AllocationsChecker,
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    queries_tx: mpsc::Sender<(PeerId, Query, ResponseSender)>,
-    queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query, ResponseSender)>>,
-    sql_queries_tx: mpsc::Sender<(PeerId, Query, ResponseSender)>,
-    sql_queries_rx: UseOnce<mpsc::Receiver<(PeerId, Query, ResponseSender)>>,
+    queries_tx: mpsc::Sender<AdmittedQuery>,
+    queries_rx: UseOnce<mpsc::Receiver<AdmittedQuery>>,
+    sql_queries_tx: mpsc::Sender<AdmittedQuery>,
+    sql_queries_rx: UseOnce<mpsc::Receiver<AdmittedQuery>>,
     log_requests_tx: mpsc::Sender<(LogsRequest, ResponseSender)>,
     log_requests_rx: UseOnce<mpsc::Receiver<(LogsRequest, ResponseSender)>>,
+    // Caps concurrent reject sends; see `spawn_error_response`.
+    reject_semaphore: Arc<Semaphore>,
 }
 
 pub async fn create_p2p_controller(
@@ -117,6 +140,7 @@ pub async fn create_p2p_controller(
         sql_queries_rx: UseOnce::new(sql_queries_rx),
         log_requests_tx,
         log_requests_rx: UseOnce::new(log_requests_rx),
+        reject_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REJECTS)),
     })
 }
 
@@ -188,14 +212,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let queries_rx = self.queries_rx.take().unwrap();
         ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
-                let this = self.clone();
-                tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan, QueryType::PlainQuery)
+            .for_each_concurrent(
+                CONCURRENT_QUERY_MESSAGES,
+                |(peer_id, query, resp_chan, retry_after)| {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.handle_query(
+                            peer_id,
+                            query,
+                            resp_chan,
+                            retry_after,
+                            QueryType::PlainQuery,
+                        )
                         .await;
-                })
-                .map(|r| r.unwrap())
-            })
+                    })
+                    .map(|r| r.unwrap())
+                },
+            )
             .await;
         info!("Query processing task finished");
     }
@@ -204,14 +237,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let sql_queries_rx = self.sql_queries_rx.take().unwrap();
         ReceiverStream::new(sql_queries_rx)
             .take_until(cancellation_token.cancelled_owned())
-            .for_each_concurrent(CONCURRENT_QUERY_MESSAGES, |(peer_id, query, resp_chan)| {
-                let this = self.clone();
-                tokio::spawn(async move {
-                    this.handle_query(peer_id, query, resp_chan, QueryType::SqlQuery)
+            .for_each_concurrent(
+                CONCURRENT_QUERY_MESSAGES,
+                |(peer_id, query, resp_chan, retry_after)| {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.handle_query(
+                            peer_id,
+                            query,
+                            resp_chan,
+                            retry_after,
+                            QueryType::SqlQuery,
+                        )
                         .await;
-                })
-                .map(|r| r.unwrap())
-            })
+                    })
+                    .map(|r| r.unwrap())
+                },
+            )
             .await;
         info!("SQL Query processing task finished");
     }
@@ -430,22 +472,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let query = match Query::decode(request.as_ref()) {
                         Ok(query) => query,
                         Err(e) => {
+                            // Without a decodable query_id there's nothing to bind a signed
+                            // response to.
                             warn!("Failed to decode query from {peer_id}: {e}");
                             continue;
                         }
                     };
-                    if !self.validate_query(&query, peer_id) {
-                        continue;
-                    }
-                    match self.queries_tx.try_send((peer_id, query, resp_chan)) {
-                        Ok(_) => {}
-                        Err(mpsc::error::TrySendError::Full((_, query, resp_chan))) => {
-                            warn!("Queries queue is full. Rejecting query from {peer_id}");
-                            self.clone().reject_overloaded(query, resp_chan);
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            break;
-                        }
+                    if !self.admit_query(peer_id, query, resp_chan, &self.queries_tx, "Query") {
+                        break;
                     }
                 }
                 WorkerEvent::SqlQuery {
@@ -456,22 +490,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let query = match Query::decode(request.as_ref()) {
                         Ok(query) => query,
                         Err(e) => {
+                            // Without a decodable query_id there's nothing to bind a signed
+                            // response to.
                             warn!("Failed to decode SQL query from {peer_id}: {e}");
                             continue;
                         }
                     };
-                    if !self.validate_query(&query, peer_id) {
-                        continue;
-                    }
-                    match self.sql_queries_tx.try_send((peer_id, query, resp_chan)) {
-                        Ok(_) => {}
-                        Err(mpsc::error::TrySendError::Full((_, query, resp_chan))) => {
-                            warn!("SQL Queries queue is full. Rejecting query from {peer_id}");
-                            self.clone().reject_overloaded(query, resp_chan);
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            break;
-                        }
+                    if !self.admit_query(peer_id, query, resp_chan, &self.sql_queries_tx, "SQL query")
+                    {
+                        break;
                     }
                 }
                 WorkerEvent::LogsRequest {
@@ -511,60 +538,144 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Transport event loop finished");
     }
 
-    /// Respond to a query the worker can't accept right now (its processing queue is full) with a
-    /// signed `too_many_requests` error carrying a retry hint, so the client can back off cleanly.
-    /// Runs off the event loop so the response write can't stall it.
-    fn reject_overloaded(self: Arc<Self>, query: Query, resp_chan: ResponseSender) {
+    /// The admission bar: reserve a queue slot, then spend one compute unit. Past it a query is
+    /// billable and always logged; rejected here (queue full, no allocation, rate limited) it gets a
+    /// typed error but no log. Reserving before spending guarantees a spent unit always enqueues.
+    /// Returns `false` when the receiver is gone, to stop the event loop.
+    fn admit_query(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        query: Query,
+        resp_chan: ResponseSender,
+        queue_tx: &mpsc::Sender<AdmittedQuery>,
+        protocol: &str,
+    ) -> bool {
+        if let Err(err) = self.validate_query(&query, peer_id) {
+            self.clone()
+                .spawn_error_response(query.query_id, err, None, resp_chan);
+            return true;
+        }
+        let permit = match queue_tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                warn!("{protocol} queue is full. Rejecting query from {peer_id}");
+                self.clone().spawn_error_response(
+                    query.query_id,
+                    query_error::Err::TooManyRequests(()),
+                    Some(DEFAULT_BACKOFF),
+                    resp_chan,
+                );
+                return true;
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => return false,
+        };
+        // Claim a full unit up front, refund the unused fraction after; otherwise a burst of small
+        // requests could overload the worker.
+        match self.allocations_checker.try_spend(peer_id, 1.) {
+            RateLimitStatus::NoAllocation => {
+                self.clone().spawn_error_response(
+                    query.query_id,
+                    query_error::Err::TooManyRequests(()),
+                    None,
+                    resp_chan,
+                );
+            }
+            RateLimitStatus::Paused(retry_after) => {
+                self.clone().spawn_error_response(
+                    query.query_id,
+                    query_error::Err::TooManyRequests(()),
+                    Some(retry_after),
+                    resp_chan,
+                );
+            }
+            RateLimitStatus::Spent(retry_after) => {
+                permit.send((peer_id, query, resp_chan, retry_after));
+            }
+        }
+        true
+    }
+
+    /// Send a signed error, so a rejected query gets a typed reason instead of an opaque stream
+    /// reset. Best-effort: on a signing or send failure it drops the response, resetting the stream.
+    async fn send_error_result(
+        &self,
+        query_id: String,
+        err: query_error::Err,
+        retry_after: Option<Duration>,
+        resp_chan: ResponseSender,
+    ) {
+        let mut msg = sqd_messages::QueryResult {
+            query_id,
+            result: Some(err.into()),
+            retry_after_ms: retry_after.map(|d| d.as_millis() as u32),
+            signature: Default::default(),
+        };
+        if let Err(e) = msg.sign(&self.keypair) {
+            warn!("Couldn't sign error response: {e}");
+            return;
+        }
+        if let Err(e) = resp_chan.send(&msg.encode_to_vec()).await {
+            warn!("Couldn't send error response: {e:?}");
+        }
+    }
+
+    /// Run [`Self::send_error_result`] off the event loop so the write can't stall it. `reject_semaphore`
+    /// caps in-flight sends; past the limit the response is dropped instead of spawning unbounded tasks.
+    fn spawn_error_response(
+        self: Arc<Self>,
+        query_id: String,
+        err: query_error::Err,
+        retry_after: Option<Duration>,
+        resp_chan: ResponseSender,
+    ) {
+        let Ok(permit) = self.reject_semaphore.clone().try_acquire_owned() else {
+            warn!("Too many pending rejections, dropping response for query {query_id}");
+            return;
+        };
         tokio::spawn(async move {
-            let mut msg = sqd_messages::QueryResult {
-                query_id: query.query_id,
-                result: Some(query_error::Err::TooManyRequests(()).into()),
-                retry_after_ms: Some(DEFAULT_BACKOFF.as_millis() as u32),
-                signature: Default::default(),
-            };
-            if let Err(e) = msg.sign(&self.keypair) {
-                warn!("Couldn't sign too_many_requests response: {e}");
-                return;
-            }
-            if let Err(e) = resp_chan.send(&msg.encode_to_vec()).await {
-                warn!("Couldn't send too_many_requests response: {e:?}");
-            }
+            let _permit = permit;
+            self.send_error_result(query_id, err, retry_after, resp_chan)
+                .await;
         });
     }
 
+    /// Checks the signature and timestamp freshness; the `Err` is the response to send back.
     #[instrument(skip_all)]
-    fn validate_query(&self, query: &Query, peer_id: PeerId) -> bool {
+    fn validate_query(&self, query: &Query, peer_id: PeerId) -> Result<(), query_error::Err> {
         if !query.verify_signature(peer_id, self.worker_id) {
-            tracing::warn!("Rejected query with invalid signature from {}", peer_id);
-            return false;
+            warn!("Rejected query with invalid signature from {peer_id}");
+            return Err(query_error::Err::BadRequest(
+                "invalid query signature".to_owned(),
+            ));
         }
         if query.timestamp_ms.abs_diff(timestamp_now_ms()) as u128
             > protocol::MAX_TIME_LAG.as_millis()
         {
-            tracing::warn!(
-                "Rejected query with invalid timestamp ({}) from {}",
-                query.timestamp_ms,
-                peer_id
+            warn!(
+                "Rejected query with invalid timestamp ({}) from {peer_id}",
+                query.timestamp_ms
             );
-            return false;
+            return Err(query_error::Err::BadRequest(
+                "timestamp out of allowed range".to_owned(),
+            ));
         }
         // TODO: check rate limits here
         // TODO: check that query_id has not been used before
-        true
+        Ok(())
     }
 
+    /// Serve an admitted query. It already spent a compute unit, so it always produces a response
+    /// and a matching log — both come from the same outcome, so they can't diverge.
     #[instrument(skip_all, fields(query_id = %query.query_id, peer_id = %peer_id, dataset = %query.dataset))]
     async fn handle_query(
         &self,
         peer_id: PeerId,
         query: Query,
         resp_chan: ResponseSender,
+        retry_after: Option<Duration>,
         query_type: QueryType,
     ) {
-        let query_id = query.query_id.clone();
-        let compression = query.compression();
-
-        let (mut result, retry_after) = process_query(
+        let outcome = execute(
             &*self.worker,
             &self.allocations_checker,
             peer_id,
@@ -572,93 +683,36 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             query_type,
         )
         .await;
-        if let Err(e) = &result {
-            warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
+        if let Err(e) = &outcome {
+            warn!("Query {} by {peer_id} execution failed: {e:?}", query.query_id);
         }
+        metrics::query_executed(&outcome);
 
-        metrics::query_executed(&result);
-
-        // Cloning is much cheaper than hash computation and we need to keep the result for logging
-        match self
-            .send_query_result(
-                query_id,
-                result.clone(),
-                resp_chan,
-                retry_after,
-                compression,
-            )
-            .await
-        {
-            Ok((compression_duration, signing_duration)) => {
-                let _ = result.as_mut().map(|v| {
-                    v.time_report.compression_time = compression_duration;
-                    v.time_report.signing_time = signing_duration;
-                });
-            }
-            Err(e) => tracing::error!("Couldn't send query result: {e:?}"),
-        }
-
-        if let Some(log) = generate_log(&result, query, peer_id).await {
-            if log.encoded_len() > MAX_LOGS_SIZE {
-                warn!("Query log is too big: {log:?}");
-                return;
-            }
-            let result = self.logs_storage.save_log(log).await;
-            if let Err(e) = result {
-                warn!("Couldn't save query log: {e:?}");
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
-    async fn send_query_result(
-        &self,
-        query_id: String,
-        result: QueryResult,
-        resp_chan: ResponseSender,
-        retry_after: Option<Duration>,
-        compression: sqd_messages::Compression,
-    ) -> Result<(Duration, Duration)> {
-        let compression_timer = std::time::Instant::now();
-        let query_result = match result {
-            Ok(result) => {
-                let data = match compression {
-                    sqd_messages::Compression::None => result.data,
-                    sqd_messages::Compression::Gzip => result.data_gzip().await,
-                    sqd_messages::Compression::Zstd => result.data_zstd().await,
-                };
-                sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
-                    data,
-                    last_block: result.last_block,
-                })
-            }
-            Err(e) => query_error::Err::from(e).into(),
+        // Overload is transient, so hint a retry; otherwise keep the admission hint.
+        let retry_after = if matches!(outcome, Err(QueryError::ServiceOverloaded)) {
+            Some(DEFAULT_BACKOFF)
+        } else {
+            retry_after
         };
-        let compression_duration = compression_timer.elapsed();
-        let mut msg = sqd_messages::QueryResult {
-            query_id,
-            result: Some(query_result),
-            retry_after_ms: retry_after.map(|duration| duration.as_millis() as u32),
-            signature: Default::default(),
-        };
-        let signing_timer = std::time::Instant::now();
-        let _span = tracing::debug_span!("sign_query_result");
-        tokio::task::block_in_place(|| msg.sign(&self.keypair).map_err(|e| anyhow!(e)))?;
-        drop(_span);
-        let signing_duration = signing_timer.elapsed();
 
-        let result_size = msg.encoded_len() as u64;
-        if result_size > protocol::MAX_QUERY_RESULT_SIZE {
-            anyhow::bail!("query result size too large: {result_size}");
+        let compression = query.compression();
+        let (message, logged) =
+            build_delivery(&self.keypair, &query.query_id, outcome, retry_after, compression).await;
+
+        // Send before logging: the unit was spent at admission so the log happens regardless, and
+        // the SQLite write stays off the response path.
+        if let Err(e) = resp_chan.send(&message.encode_to_vec()).await {
+            warn!("Couldn't send query result to {peer_id}: {e:?}");
         }
 
-        tracing::trace!("Sending query result");
-        resp_chan
-            .send(&msg.encode_to_vec())
-            .await
-            .map_err(|e| anyhow!("couldn't send query result: {e}"))?;
-
-        Ok((compression_duration, signing_duration))
+        let log = build_log(query, peer_id, logged);
+        if log.encoded_len() > MAX_LOGS_SIZE {
+            warn!("Query log is too big: {log:?}");
+            return;
+        }
+        if let Err(e) = self.logs_storage.save_log(log).await {
+            warn!("Couldn't save query log: {e:?}");
+        }
     }
 
     async fn handle_logs_request(
@@ -700,28 +754,25 @@ async fn wait_for_assignment_applied(
     }
 }
 
-/// Run a query and account for its compute units: claim one up front, refund the unused chunk
-/// fraction after. Generic over the engine and rate limiter for mock-based tests (see
-/// [`super::query_deps`]).
+/// Run an admitted query and refund the unused chunk fraction. The unit was spent at admission, so
+/// malformed params here are still charged and logged. Generic over the engine and rate limiter for
+/// mock-based tests (see [`super::query_deps`]).
 #[instrument(skip_all)]
-async fn process_query<W: QueryRunner, A: CuChecker>(
+async fn execute<W: QueryRunner, A: CuChecker>(
     worker: &W,
     allocations_checker: &A,
     peer_id: PeerId,
     query: &Query,
     query_type: QueryType,
-) -> (QueryResult, Option<Duration>) {
+) -> QueryResult {
     match query.compression {
         c if c == sqd_messages::Compression::Gzip as i32
             || c == sqd_messages::Compression::Zstd as i32
             || c == sqd_messages::Compression::None as i32 => {}
         _ => {
-            return (
-                Err(QueryError::BadRequest(
-                    "Unsupported compression type".to_owned(),
-                )),
-                None,
-            );
+            return Err(QueryError::BadRequest(
+                "Unsupported compression type".to_owned(),
+            ));
         }
     }
 
@@ -729,14 +780,10 @@ async fn process_query<W: QueryRunner, A: CuChecker>(
         .block_range
         .map(|sqd_messages::Range { begin, end }| (begin, end))
     else {
-        return (
-            Err(QueryError::BadRequest("block_range is required".to_owned())),
-            None,
-        );
+        return Err(QueryError::BadRequest("block_range is required".to_owned()));
     };
 
     let mut allocation_chip = 1.0f32;
-
     if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
         let (begin, end) = block_range;
         let active_len = std::cmp::min(chunk.last_block.into(), end)
@@ -747,20 +794,6 @@ async fn process_query<W: QueryRunner, A: CuChecker>(
             .max(1);
         allocation_chip = active_len as f32 / chunk_len as f32;
     };
-
-    // We claim 1. allocation first and refund unused allocation later. It's done to prevent burst overloading with small requests.
-    let status = match allocations_checker.try_spend(peer_id, 1.) {
-        RateLimitStatus::NoAllocation => {
-            // This error means that we don't have any allocation for particular peer_id at all (e.g. no allocation on contract)
-            return (Err(QueryError::NoAllocation), None);
-        }
-        RateLimitStatus::Paused(retry_after) => {
-            // This error means that we don't have allocation at the moment, but it may be available after retry_after ms
-            return (Err(QueryError::NoAllocation), Some(retry_after));
-        }
-        status => status,
-    };
-    let mut retry_after = status.retry_after();
 
     let result = worker
         .run_query(
@@ -774,47 +807,144 @@ async fn process_query<W: QueryRunner, A: CuChecker>(
         .await
         .inspect_err(|err| tracing::error!("error processing query: {err}"));
 
-    if let Err(QueryError::ServiceOverloaded) = result {
-        // Refund everything as we were not able to process request
-        allocations_checker.refund(peer_id, 1.);
-        retry_after = Some(DEFAULT_BACKOFF);
-    } else if allocation_chip < 1. {
-        // We refund unused allocation
+    if allocation_chip < 1. {
         allocations_checker.refund(peer_id, 1. - allocation_chip);
     }
-    (result, retry_after)
+    result
 }
 
+/// Build the wire message and the log record from one outcome, so they can't diverge: an oversized
+/// or unsignable success downgrades to a signed `server_error` in both.
 #[instrument(skip_all)]
-async fn generate_log(
-    query_result: &QueryResult,
-    query: Query,
-    client_id: PeerId,
-) -> Option<QueryExecuted> {
-    use query_executed::Result;
-
-    let result = match query_result {
-        Ok(result) => Result::Ok(sqd_messages::QueryOkSummary {
-            uncompressed_data_size: result.data.len() as u64,
-            data_hash: result.sha3_256().await,
-            last_block: result.last_block,
-        }),
-        Err(QueryError::NoAllocation) => return None,
-        Err(e) => query_error::Err::from(e).into(),
+async fn build_delivery(
+    keypair: &Keypair,
+    query_id: &str,
+    outcome: QueryResult,
+    retry_after: Option<Duration>,
+    compression: sqd_messages::Compression,
+) -> (sqd_messages::QueryResult, Logged) {
+    let retry_after_ms = retry_after.map(|d| d.as_millis() as u32);
+    let qok = match outcome {
+        Ok(qok) => qok,
+        Err(e) => {
+            let err = query_error::Err::from(e);
+            return (
+                signed_result(keypair, query_id, err.clone().into(), retry_after_ms),
+                Logged::Err(err),
+            );
+        }
     };
 
-    let exec_time_report = match query_result {
-        Ok(result) => Some(TimeReport {
-            parsing_time_micros: result.time_report.parsing_time.as_micros() as u32,
-            execution_time_micros: result.time_report.execution_time.as_micros() as u32,
-            compression_time_micros: result.time_report.compression_time.as_micros() as u32,
-            signing_time_micros: result.time_report.signing_time.as_micros() as u32,
-            serialization_time_micros: result.time_report.serialization_time.as_micros() as u32,
-        }),
-        Err(_) => None, // TODO: always measure execution time
+    let data_hash = qok.sha3_256().await;
+    let uncompressed_size = qok.data.len() as u64;
+    let last_block = qok.last_block;
+    let time_report = qok.time_report.clone();
+
+    let compression_timer = std::time::Instant::now();
+    let data = match compression {
+        sqd_messages::Compression::None => qok.data,
+        sqd_messages::Compression::Gzip => qok.data_gzip().await,
+        sqd_messages::Compression::Zstd => qok.data_zstd().await,
+    };
+    let compression_time = compression_timer.elapsed();
+
+    let mut msg = sqd_messages::QueryResult {
+        query_id: query_id.to_owned(),
+        result: Some(sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
+            data,
+            last_block,
+        })),
+        retry_after_ms,
+        signature: Default::default(),
+    };
+    let signing_timer = std::time::Instant::now();
+    let _span = tracing::debug_span!("sign_query_result").entered();
+    let sign_result = tokio::task::block_in_place(|| msg.sign(keypair));
+    drop(_span);
+    let signing_time = signing_timer.elapsed();
+
+    let too_large = msg.encoded_len() as u64 > protocol::MAX_QUERY_RESULT_SIZE;
+    if let Err(e) = &sign_result {
+        // Unreachable given a 36-byte query_id and 32-byte hash, but downgrade defensively so
+        // client and log still agree.
+        warn!("Couldn't sign query result for {query_id}: {e}");
+    }
+    if too_large {
+        warn!("Query result for {query_id} is too large: {} bytes", msg.encoded_len());
+    }
+    if sign_result.is_err() || too_large {
+        let reason = if sign_result.is_err() {
+            "failed to sign query result"
+        } else {
+            "query result too large"
+        };
+        let err = query_error::Err::ServerError(reason.to_owned());
+        // A downgraded result carries no retry hint.
+        return (
+            signed_result(keypair, query_id, err.clone().into(), None),
+            Logged::Err(err),
+        );
+    }
+
+    let timings = TimeReport {
+        parsing_time_micros: time_report.parsing_time.as_micros() as u32,
+        execution_time_micros: time_report.execution_time.as_micros() as u32,
+        compression_time_micros: compression_time.as_micros() as u32,
+        signing_time_micros: signing_time.as_micros() as u32,
+        serialization_time_micros: time_report.serialization_time.as_micros() as u32,
+    };
+    (
+        msg,
+        Logged::Ok {
+            data_hash,
+            uncompressed_size,
+            last_block,
+            timings,
+        },
+    )
+}
+
+/// Sign a prepared `QueryResult`. Best-effort: a signing failure is logged and the message goes out
+/// unsigned, which the client rejects.
+fn signed_result(
+    keypair: &Keypair,
+    query_id: &str,
+    result: sqd_messages::query_result::Result,
+    retry_after_ms: Option<u32>,
+) -> sqd_messages::QueryResult {
+    let mut msg = sqd_messages::QueryResult {
+        query_id: query_id.to_owned(),
+        result: Some(result),
+        retry_after_ms,
+        signature: Default::default(),
+    };
+    if let Err(e) = msg.sign(keypair) {
+        warn!("Couldn't sign query result for {query_id}: {e}");
+    }
+    msg
+}
+
+/// Build the log from the delivery projection. Every admitted query is logged — no skip path — and
+/// the projection already carries whatever error the client saw.
+fn build_log(query: Query, client_id: PeerId, logged: Logged) -> QueryExecuted {
+    let (result, exec_time_report) = match logged {
+        Logged::Ok {
+            data_hash,
+            uncompressed_size,
+            last_block,
+            timings,
+        } => (
+            query_executed::Result::Ok(sqd_messages::QueryOkSummary {
+                uncompressed_data_size: uncompressed_size,
+                data_hash,
+                last_block,
+            }),
+            Some(timings),
+        ),
+        Logged::Err(err) => (query_executed::Result::from(err), None),
     };
 
-    Some(QueryExecuted {
+    QueryExecuted {
         client_id: client_id.to_string(),
         query: Some(query),
         exec_time_micros: exec_time_report
@@ -824,7 +954,7 @@ async fn generate_log(
         timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
         result: Some(result),
         worker_version: WORKER_VERSION.to_string(),
-    })
+    }
 }
 
 #[tracing::instrument(skip_all)]
@@ -982,7 +1112,7 @@ mod assignment_tests {
 mod tests {
     use std::time::Duration;
 
-    use sqd_messages::{query_executed, Compression, Range};
+    use sqd_messages::{query_result, Compression, Range};
 
     use crate::{
         controller::query_deps::mocks::{MockChecker, MockWorker},
@@ -993,10 +1123,12 @@ mod tests {
 
     // first_block = 100, last_block = 200 → chunk length 100.
     const CHUNK_ID: &str = "0000000000/0000000100-0000000200-abcde";
+    // 36 chars — the UUID length the signature scheme requires.
+    const QUERY_ID: &str = "00000000-0000-0000-0000-000000000000";
 
     fn query_with(compression: i32, block_range: Option<(u64, u64)>, chunk_id: &str) -> Query {
         Query {
-            query_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            query_id: QUERY_ID.to_owned(),
             dataset: "s3://dataset".to_owned(),
             query: "{}".to_owned(),
             chunk_id: chunk_id.to_owned(),
@@ -1017,112 +1149,130 @@ mod tests {
         ))
     }
 
-    // An overloaded engine is fully refunded, so the query consumes no compute unit.
+    // An overloaded engine keeps the compute unit: admission spent it and the served stage doesn't
+    // refund on overload.
     #[tokio::test(flavor = "multi_thread")]
-    async fn overloaded_query_consumes_no_cu() {
+    async fn overloaded_query_consumes_a_cu() {
         let checker = MockChecker::new(RateLimitStatus::Spent(None));
+        checker.try_spend(1.0); // admission
         let worker = MockWorker::new(Err(QueryError::ServiceOverloaded));
         let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
 
-        let (result, retry) =
-            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome =
+            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
 
-        assert!(matches!(result, Err(QueryError::ServiceOverloaded)));
-        assert_eq!(retry, Some(DEFAULT_BACKOFF));
-        assert_eq!(checker.net_spent(), 0.0);
+        assert!(matches!(outcome, Err(QueryError::ServiceOverloaded)));
+        assert_eq!(checker.net_spent(), 1.0);
         assert_eq!(worker.calls(), 1);
     }
 
-    // Malformed params are rejected before the CU spend: no retry hint, no charge, engine not run.
+    // Malformed params are validated after admission, so they're charged the full unit and never
+    // reach the engine.
     #[tokio::test(flavor = "multi_thread")]
-    async fn malformed_query_is_not_charged() {
+    async fn malformed_query_is_charged_a_cu() {
         let checker = MockChecker::new(RateLimitStatus::Spent(Some(Duration::from_secs(5))));
+        checker.try_spend(1.0);
         let worker = MockWorker::new(ok_result());
         let query = query_with(999, Some((100, 200)), CHUNK_ID);
 
-        let (result, retry) =
-            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome =
+            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
 
-        assert!(matches!(result, Err(QueryError::BadRequest(_))));
-        assert_eq!(retry, None);
-        assert_eq!(checker.net_spent(), 0.0);
+        assert!(matches!(outcome, Err(QueryError::BadRequest(_))));
         assert_eq!(worker.calls(), 0);
+        assert_eq!(checker.net_spent(), 1.0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn successful_full_chunk_consumes_one_cu() {
         let checker = MockChecker::new(RateLimitStatus::Spent(None));
+        checker.try_spend(1.0);
         let worker = MockWorker::new(ok_result());
         let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
 
-        let (result, retry) =
-            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome =
+            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
 
-        assert!(result.is_ok());
-        assert_eq!(retry, None);
+        assert!(outcome.is_ok());
         assert_eq!(checker.net_spent(), 1.0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn partial_chunk_refunds_unused_fraction() {
         let checker = MockChecker::new(RateLimitStatus::Spent(None));
+        checker.try_spend(1.0);
         let worker = MockWorker::new(ok_result());
-        let query = query_with(Compression::None as i32, Some((100, 150)), CHUNK_ID);
+        // 30% of [100, 200] — asymmetric, so a flipped fraction would fail.
+        let query = query_with(Compression::None as i32, Some((100, 130)), CHUNK_ID);
 
-        let (result, _) =
-            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome =
+            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
 
-        assert!(result.is_ok());
+        assert!(outcome.is_ok());
         assert!(
-            (checker.net_spent() - 0.5).abs() < 1e-6,
-            "expected 0.5 CU, got {}",
+            (checker.net_spent() - 0.3).abs() < 1e-6,
+            "expected 0.3 CU, got {}",
             checker.net_spent()
         );
     }
 
+    // The admission backoff hint rides along with a BadRequest response.
     #[tokio::test(flavor = "multi_thread")]
-    async fn no_allocation_is_rejected_without_running() {
-        let checker = MockChecker::new(RateLimitStatus::NoAllocation);
-        let worker = MockWorker::new(ok_result());
-        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+    async fn bad_request_response_carries_retry_after() {
+        let keypair = Keypair::generate_ed25519();
+        let outcome = Err(QueryError::BadRequest("timestamp out of allowed range".to_owned()));
 
-        let (result, retry) =
-            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let (message, logged) = build_delivery(
+            &keypair,
+            QUERY_ID,
+            outcome,
+            Some(Duration::from_secs(5)),
+            Compression::None,
+        )
+        .await;
 
-        assert!(matches!(result, Err(QueryError::NoAllocation)));
-        assert_eq!(retry, None);
-        assert_eq!(worker.calls(), 0);
-        assert_eq!(checker.net_spent(), 0.0);
+        assert_eq!(message.retry_after_ms, Some(5000));
+        assert!(matches!(
+            message.result,
+            Some(query_result::Result::Err(sqd_messages::QueryError {
+                err: Some(query_error::Err::BadRequest(_)),
+            }))
+        ));
+        assert!(matches!(
+            logged,
+            Logged::Err(query_error::Err::BadRequest(_))
+        ));
+    }
+
+    // A result that can't be signed (forced here with a non-UUID query_id) downgrades to
+    // server_error in both the response and the log.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsignable_result_downgrades_response_and_log_together() {
+        let keypair = Keypair::generate_ed25519();
+
+        let (message, logged) =
+            build_delivery(&keypair, "not-a-uuid", ok_result(), None, Compression::None).await;
+
+        assert!(matches!(
+            message.result,
+            Some(query_result::Result::Err(sqd_messages::QueryError {
+                err: Some(query_error::Err::ServerError(_)),
+            }))
+        ));
+        assert!(matches!(
+            logged,
+            Logged::Err(query_error::Err::ServerError(_))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn rate_limited_is_rejected_with_retry() {
-        let retry = Duration::from_secs(2);
-        let checker = MockChecker::new(RateLimitStatus::Paused(retry));
-        let worker = MockWorker::new(ok_result());
+    async fn successful_delivery_logs_a_summary() {
+        let keypair = Keypair::generate_ed25519();
+        let (_message, logged) =
+            build_delivery(&keypair, QUERY_ID, ok_result(), None, Compression::None).await;
+
         let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
-
-        let (result, got_retry) =
-            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
-
-        assert!(matches!(result, Err(QueryError::NoAllocation)));
-        assert_eq!(got_retry, Some(retry));
-        assert_eq!(worker.calls(), 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn no_allocation_is_not_logged() {
-        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
-        let log = generate_log(&Err(QueryError::NoAllocation), query, PeerId::random()).await;
-        assert!(log.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn log_for_success_summarizes_result() {
-        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
-        let log = generate_log(&ok_result(), query, PeerId::random())
-            .await
-            .expect("success should be logged");
+        let log = build_log(query, PeerId::random(), logged);
         match log.result.expect("log should carry a result") {
             query_executed::Result::Ok(summary) => {
                 assert_eq!(summary.last_block, 200);
@@ -1133,17 +1283,18 @@ mod tests {
         }
     }
 
+    // Every admitted query is logged; admission already guaranteed it's billable, so there's no
+    // skip path.
     #[tokio::test(flavor = "multi_thread")]
-    async fn log_for_error_records_the_error() {
+    async fn admitted_error_is_always_logged() {
+        let keypair = Keypair::generate_ed25519();
+        let outcome = Err(QueryError::BadRequest("bad".to_owned()));
+        let (_message, logged) =
+            build_delivery(&keypair, QUERY_ID, outcome, None, Compression::None).await;
+
         let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
-        let log = generate_log(
-            &Err(QueryError::BadRequest("bad".to_owned())),
-            query,
-            PeerId::random(),
-        )
-        .await
-        .expect("errors past the CU bar are logged");
-        match log.result.expect("log should carry a result") {
+        let log = build_log(query, PeerId::random(), logged);
+        match log.result.expect("errors past the CU bar are logged") {
             query_executed::Result::Err(e) => {
                 assert!(matches!(e.err, Some(query_error::Err::BadRequest(_))));
             }
