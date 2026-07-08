@@ -21,8 +21,8 @@ use tracing::{info, instrument, warn, Instrument};
 use crate::{
     cli::Args,
     compute_units::{
-        self,
         allocations_checker::{self, AllocationsChecker},
+        RateLimitStatus,
     },
     controller::worker::QueryType,
     logs_storage::LogsStorage,
@@ -33,6 +33,7 @@ use crate::{
     util::{timestamp_now_ms, UseOnce},
 };
 
+use super::query_deps::{CuChecker, QueryRunner};
 use super::worker::Worker;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -519,7 +520,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let query_id = query.query_id.clone();
         let compression = query.compression();
 
-        let (mut result, retry_after) = self.process_query(peer_id, &query, query_type).await;
+        let (mut result, retry_after) = process_query(
+            &*self.worker,
+            &self.allocations_checker,
+            peer_id,
+            &query,
+            query_type,
+        )
+        .await;
         if let Err(e) = &result {
             warn!("Query {query_id} by {peer_id} execution failed: {e:?}");
         }
@@ -546,7 +554,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             Err(e) => tracing::error!("Couldn't send query result: {e:?}"),
         }
 
-        if let Some(log) = self.generate_log(&result, query, peer_id).await {
+        if let Some(log) = generate_log(&result, query, peer_id).await {
             if log.encoded_len() > MAX_LOGS_SIZE {
                 warn!("Query log is too big: {log:?}");
                 return;
@@ -556,92 +564,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 warn!("Couldn't save query log: {e:?}");
             }
         }
-    }
-
-    /// Returns query result and the time to wait before sending the next query
-    #[instrument(skip_all)]
-    async fn process_query(
-        &self,
-        peer_id: PeerId,
-        query: &Query,
-        query_type: QueryType,
-    ) -> (QueryResult, Option<Duration>) {
-        match query.compression {
-            c if c == sqd_messages::Compression::Gzip as i32
-                || c == sqd_messages::Compression::Zstd as i32
-                || c == sqd_messages::Compression::None as i32 => {}
-            _ => {
-                return (
-                    Err(QueryError::BadRequest(
-                        "Unsupported compression type".to_owned(),
-                    )),
-                    None,
-                );
-            }
-        }
-
-        let Some(block_range) = query
-            .block_range
-            .map(|sqd_messages::Range { begin, end }| (begin, end))
-        else {
-            return (
-                Err(QueryError::BadRequest("block_range is required".to_owned())),
-                None,
-            );
-        };
-
-        let mut allocation_chip = 1.0f32;
-
-        if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
-            let (begin, end) = block_range;
-            let active_len = std::cmp::min(chunk.last_block.into(), end)
-                .saturating_sub(std::cmp::max(chunk.first_block.into(), begin))
-                .max(1);
-            let chunk_len = Into::<u64>::into(chunk.last_block)
-                .saturating_sub(chunk.first_block.into())
-                .max(1);
-            allocation_chip = active_len as f32 / chunk_len as f32;
-        };
-
-        // We claim 1. allocation first and refund unused allocation later. It's done to prevent burst overloading with small requests.
-        let status = match self.allocations_checker.try_spend(peer_id, 1.) {
-            compute_units::RateLimitStatus::NoAllocation => {
-                // This error means that we don't have any allocation for particular peer_id at all (e.g. no allocation on contract)
-                return (Err(QueryError::NoAllocation), None);
-            }
-            compute_units::RateLimitStatus::Paused(retry_after) => {
-                // This error means that we don't have allocation at the moment, but it may be available after retry_after ms
-                return (Err(QueryError::NoAllocation), Some(retry_after));
-            }
-            status => status,
-        };
-        let mut retry_after = status.retry_after();
-
-        let result = self
-            .worker
-            .run_query(
-                &query.query,
-                query.dataset.clone(),
-                block_range,
-                &query.chunk_id,
-                Some(peer_id),
-                query_type,
-            )
-            .await
-            .inspect_err(|err| tracing::error!("error processing query: {err}"));
-
-        if let Err(QueryError::ServiceOverloaded) = result {
-            // Refund everything as we were not able to process request
-            self.allocations_checker.refund(peer_id, 1.);
-            retry_after = Some(DEFAULT_BACKOFF);
-        } else {
-            if allocation_chip < 1. {
-                // We refund unused allocation
-                self.allocations_checker
-                    .refund(peer_id, 1. - allocation_chip);
-            }
-        }
-        (result, retry_after)
     }
 
     #[instrument(skip_all)]
@@ -695,49 +617,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         Ok((compression_duration, signing_duration))
     }
 
-    #[instrument(skip_all)]
-    async fn generate_log(
-        &self,
-        query_result: &QueryResult,
-        query: Query,
-        client_id: PeerId,
-    ) -> Option<QueryExecuted> {
-        use query_executed::Result;
-
-        let result = match query_result {
-            Ok(result) => Result::Ok(sqd_messages::QueryOkSummary {
-                uncompressed_data_size: result.data.len() as u64,
-                data_hash: result.sha3_256().await,
-                last_block: result.last_block,
-            }),
-            Err(QueryError::NoAllocation) => return None,
-            Err(e) => query_error::Err::from(e).into(),
-        };
-
-        let exec_time_report = match query_result {
-            Ok(result) => Some(TimeReport {
-                parsing_time_micros: result.time_report.parsing_time.as_micros() as u32,
-                execution_time_micros: result.time_report.execution_time.as_micros() as u32,
-                compression_time_micros: result.time_report.compression_time.as_micros() as u32,
-                signing_time_micros: result.time_report.signing_time.as_micros() as u32,
-                serialization_time_micros: result.time_report.serialization_time.as_micros() as u32,
-            }),
-            Err(_) => None, // TODO: always measure execution time
-        };
-
-        Some(QueryExecuted {
-            client_id: client_id.to_string(),
-            query: Some(query),
-            exec_time_micros: exec_time_report
-                .as_ref()
-                .map_or(0, |report| report.execution_time_micros),
-            exec_time_report,
-            timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
-            result: Some(result),
-            worker_version: WORKER_VERSION.to_string(),
-        })
-    }
-
     async fn handle_logs_request(
         &self,
         request: LogsRequest,
@@ -775,6 +654,133 @@ async fn wait_for_assignment_applied(
             .expect("assignment_applied sender outlives the status loop"),
         None => std::future::pending::<()>().await,
     }
+}
+
+/// Run a query and account for its compute units: claim one up front, refund the unused chunk
+/// fraction after. Generic over the engine and rate limiter for mock-based tests (see
+/// [`super::query_deps`]).
+#[instrument(skip_all)]
+async fn process_query<W: QueryRunner, A: CuChecker>(
+    worker: &W,
+    allocations_checker: &A,
+    peer_id: PeerId,
+    query: &Query,
+    query_type: QueryType,
+) -> (QueryResult, Option<Duration>) {
+    match query.compression {
+        c if c == sqd_messages::Compression::Gzip as i32
+            || c == sqd_messages::Compression::Zstd as i32
+            || c == sqd_messages::Compression::None as i32 => {}
+        _ => {
+            return (
+                Err(QueryError::BadRequest(
+                    "Unsupported compression type".to_owned(),
+                )),
+                None,
+            );
+        }
+    }
+
+    let Some(block_range) = query
+        .block_range
+        .map(|sqd_messages::Range { begin, end }| (begin, end))
+    else {
+        return (
+            Err(QueryError::BadRequest("block_range is required".to_owned())),
+            None,
+        );
+    };
+
+    let mut allocation_chip = 1.0f32;
+
+    if let Ok(chunk) = query.chunk_id.parse::<DataChunk>() {
+        let (begin, end) = block_range;
+        let active_len = std::cmp::min(chunk.last_block.into(), end)
+            .saturating_sub(std::cmp::max(chunk.first_block.into(), begin))
+            .max(1);
+        let chunk_len = Into::<u64>::into(chunk.last_block)
+            .saturating_sub(chunk.first_block.into())
+            .max(1);
+        allocation_chip = active_len as f32 / chunk_len as f32;
+    };
+
+    // We claim 1. allocation first and refund unused allocation later. It's done to prevent burst overloading with small requests.
+    let status = match allocations_checker.try_spend(peer_id, 1.) {
+        RateLimitStatus::NoAllocation => {
+            // This error means that we don't have any allocation for particular peer_id at all (e.g. no allocation on contract)
+            return (Err(QueryError::NoAllocation), None);
+        }
+        RateLimitStatus::Paused(retry_after) => {
+            // This error means that we don't have allocation at the moment, but it may be available after retry_after ms
+            return (Err(QueryError::NoAllocation), Some(retry_after));
+        }
+        status => status,
+    };
+    let mut retry_after = status.retry_after();
+
+    let result = worker
+        .run_query(
+            &query.query,
+            query.dataset.clone(),
+            block_range,
+            &query.chunk_id,
+            Some(peer_id),
+            query_type,
+        )
+        .await
+        .inspect_err(|err| tracing::error!("error processing query: {err}"));
+
+    if let Err(QueryError::ServiceOverloaded) = result {
+        // Refund everything as we were not able to process request
+        allocations_checker.refund(peer_id, 1.);
+        retry_after = Some(DEFAULT_BACKOFF);
+    } else if allocation_chip < 1. {
+        // We refund unused allocation
+        allocations_checker.refund(peer_id, 1. - allocation_chip);
+    }
+    (result, retry_after)
+}
+
+#[instrument(skip_all)]
+async fn generate_log(
+    query_result: &QueryResult,
+    query: Query,
+    client_id: PeerId,
+) -> Option<QueryExecuted> {
+    use query_executed::Result;
+
+    let result = match query_result {
+        Ok(result) => Result::Ok(sqd_messages::QueryOkSummary {
+            uncompressed_data_size: result.data.len() as u64,
+            data_hash: result.sha3_256().await,
+            last_block: result.last_block,
+        }),
+        Err(QueryError::NoAllocation) => return None,
+        Err(e) => query_error::Err::from(e).into(),
+    };
+
+    let exec_time_report = match query_result {
+        Ok(result) => Some(TimeReport {
+            parsing_time_micros: result.time_report.parsing_time.as_micros() as u32,
+            execution_time_micros: result.time_report.execution_time.as_micros() as u32,
+            compression_time_micros: result.time_report.compression_time.as_micros() as u32,
+            signing_time_micros: result.time_report.signing_time.as_micros() as u32,
+            serialization_time_micros: result.time_report.serialization_time.as_micros() as u32,
+        }),
+        Err(_) => None, // TODO: always measure execution time
+    };
+
+    Some(QueryExecuted {
+        client_id: client_id.to_string(),
+        query: Some(query),
+        exec_time_micros: exec_time_report
+            .as_ref()
+            .map_or(0, |report| report.execution_time_micros),
+        exec_time_report,
+        timestamp_ms: timestamp_now_ms(), // TODO: use time of receiving query
+        result: Some(result),
+        worker_version: WORKER_VERSION.to_string(),
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -890,7 +896,7 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
 }
 
 #[cfg(all(test, feature = "mvcc-chunks"))]
-mod tests {
+mod assignment_tests {
     use super::*;
 
     #[test]
@@ -925,5 +931,179 @@ mod tests {
 
         assert_eq!(skipped, Some(5));
         assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![6]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use sqd_messages::{query_executed, Compression, Range};
+
+    use crate::{
+        controller::query_deps::mocks::{MockChecker, MockWorker},
+        query::result::QueryOk,
+    };
+
+    use super::*;
+
+    // first_block = 100, last_block = 200 → chunk length 100.
+    const CHUNK_ID: &str = "0000000000/0000000100-0000000200-abcde";
+
+    fn query_with(compression: i32, block_range: Option<(u64, u64)>, chunk_id: &str) -> Query {
+        Query {
+            query_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            dataset: "s3://dataset".to_owned(),
+            query: "{}".to_owned(),
+            chunk_id: chunk_id.to_owned(),
+            block_range: block_range.map(|(begin, end)| Range { begin, end }),
+            compression,
+            ..Default::default()
+        }
+    }
+
+    fn ok_result() -> QueryResult {
+        Ok(QueryOk::new(
+            b"hello".to_vec(),
+            1,
+            200,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        ))
+    }
+
+    // An overloaded engine is fully refunded, so the query consumes no compute unit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overloaded_query_consumes_no_cu() {
+        let checker = MockChecker::new(RateLimitStatus::Spent(None));
+        let worker = MockWorker::new(Err(QueryError::ServiceOverloaded));
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+
+        let (result, retry) =
+            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+
+        assert!(matches!(result, Err(QueryError::ServiceOverloaded)));
+        assert_eq!(retry, Some(DEFAULT_BACKOFF));
+        assert_eq!(checker.net_spent(), 0.0);
+        assert_eq!(worker.calls(), 1);
+    }
+
+    // Malformed params are rejected before the CU spend: no retry hint, no charge, engine not run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_query_is_not_charged() {
+        let checker = MockChecker::new(RateLimitStatus::Spent(Some(Duration::from_secs(5))));
+        let worker = MockWorker::new(ok_result());
+        let query = query_with(999, Some((100, 200)), CHUNK_ID);
+
+        let (result, retry) =
+            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+
+        assert!(matches!(result, Err(QueryError::BadRequest(_))));
+        assert_eq!(retry, None);
+        assert_eq!(checker.net_spent(), 0.0);
+        assert_eq!(worker.calls(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_full_chunk_consumes_one_cu() {
+        let checker = MockChecker::new(RateLimitStatus::Spent(None));
+        let worker = MockWorker::new(ok_result());
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+
+        let (result, retry) =
+            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+
+        assert!(result.is_ok());
+        assert_eq!(retry, None);
+        assert_eq!(checker.net_spent(), 1.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn partial_chunk_refunds_unused_fraction() {
+        let checker = MockChecker::new(RateLimitStatus::Spent(None));
+        let worker = MockWorker::new(ok_result());
+        let query = query_with(Compression::None as i32, Some((100, 150)), CHUNK_ID);
+
+        let (result, _) =
+            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+
+        assert!(result.is_ok());
+        assert!(
+            (checker.net_spent() - 0.5).abs() < 1e-6,
+            "expected 0.5 CU, got {}",
+            checker.net_spent()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_allocation_is_rejected_without_running() {
+        let checker = MockChecker::new(RateLimitStatus::NoAllocation);
+        let worker = MockWorker::new(ok_result());
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+
+        let (result, retry) =
+            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+
+        assert!(matches!(result, Err(QueryError::NoAllocation)));
+        assert_eq!(retry, None);
+        assert_eq!(worker.calls(), 0);
+        assert_eq!(checker.net_spent(), 0.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rate_limited_is_rejected_with_retry() {
+        let retry = Duration::from_secs(2);
+        let checker = MockChecker::new(RateLimitStatus::Paused(retry));
+        let worker = MockWorker::new(ok_result());
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+
+        let (result, got_retry) =
+            process_query(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+
+        assert!(matches!(result, Err(QueryError::NoAllocation)));
+        assert_eq!(got_retry, Some(retry));
+        assert_eq!(worker.calls(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_allocation_is_not_logged() {
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+        let log = generate_log(&Err(QueryError::NoAllocation), query, PeerId::random()).await;
+        assert!(log.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn log_for_success_summarizes_result() {
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+        let log = generate_log(&ok_result(), query, PeerId::random())
+            .await
+            .expect("success should be logged");
+        match log.result.expect("log should carry a result") {
+            query_executed::Result::Ok(summary) => {
+                assert_eq!(summary.last_block, 200);
+                assert_eq!(summary.uncompressed_data_size, 5);
+                assert!(!summary.data_hash.is_empty());
+            }
+            other => panic!("expected an Ok summary, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn log_for_error_records_the_error() {
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+        let log = generate_log(
+            &Err(QueryError::BadRequest("bad".to_owned())),
+            query,
+            PeerId::random(),
+        )
+        .await
+        .expect("errors past the CU bar are logged");
+        match log.result.expect("log should carry a result") {
+            query_executed::Result::Err(e) => {
+                assert!(matches!(e.err, Some(query_error::Err::BadRequest(_))));
+            }
+            other => panic!("expected an Err result, got {other:?}"),
+        }
     }
 }
