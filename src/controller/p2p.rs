@@ -55,8 +55,13 @@ const MAX_PENDING_ASSIGNMENTS: usize = 5;
 const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
 
-/// The trailing `Option<Duration>` is the rate-limit backoff hint carried from admission.
-type AdmittedQuery = (PeerId, Query, ResponseSender, Option<Duration>);
+struct AdmittedQuery {
+    peer_id: PeerId,
+    query: Query,
+    resp_chan: ResponseSender,
+    /// Rate-limit backoff hint carried from admission.
+    retry_after: Option<Duration>,
+}
 
 /// What the log records for a served query, built alongside the wire message in [`build_delivery`]
 /// so the two can't diverge — a downgraded (oversized or unsignable) result is `Err` in both.
@@ -214,7 +219,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .take_until(cancellation_token.cancelled_owned())
             .for_each_concurrent(
                 CONCURRENT_QUERY_MESSAGES,
-                |(peer_id, query, resp_chan, retry_after)| {
+                |AdmittedQuery {
+                     peer_id,
+                     query,
+                     resp_chan,
+                     retry_after,
+                 }| {
                     let this = self.clone();
                     tokio::spawn(async move {
                         this.handle_query(
@@ -239,7 +249,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .take_until(cancellation_token.cancelled_owned())
             .for_each_concurrent(
                 CONCURRENT_QUERY_MESSAGES,
-                |(peer_id, query, resp_chan, retry_after)| {
+                |AdmittedQuery {
+                     peer_id,
+                     query,
+                     resp_chan,
+                     retry_after,
+                 }| {
                     let this = self.clone();
                     tokio::spawn(async move {
                         this.handle_query(
@@ -580,7 +595,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 );
             }
             RateLimitStatus::Spent(retry_after) => {
-                permit.send((peer_id, query, resp_chan, retry_after));
+                permit.send(AdmittedQuery {
+                    peer_id,
+                    query,
+                    resp_chan,
+                    retry_after,
+                });
             }
         }
         true
@@ -650,7 +670,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 "timestamp out of allowed range".to_owned(),
             ));
         }
-        // TODO: check rate limits here
         // TODO: check that query_id has not been used before
         Ok(())
     }
