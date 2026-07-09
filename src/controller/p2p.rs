@@ -576,7 +576,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 warn!("{protocol} queue is full. Rejecting query from {peer_id}");
                 self.clone().spawn_error_response(
                     query.query_id,
-                    query_error::Err::TooManyRequests(()),
+                    query_error::Err::ServerOverloaded(()),
                     Some(DEFAULT_BACKOFF),
                     resp_chan,
                 );
