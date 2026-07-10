@@ -77,6 +77,13 @@ impl Worker {
         self.state_manager.current_status().await
     }
 
+    /// Subscribe to the "assignment fully applied" signal, so callers can refresh
+    /// the reported status promptly when last_applied_assignment_id advances.
+    #[cfg(feature = "mvcc-chunks")]
+    pub fn subscribe_assignment_applied(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.state_manager.subscribe_assignment_applied()
+    }
+
     pub async fn run_query(
         &self,
         query_str: &str,

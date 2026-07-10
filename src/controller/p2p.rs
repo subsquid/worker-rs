@@ -370,14 +370,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     ) {
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        IntervalStream::new(timer)
-            .take_until(cancellation_token.cancelled_owned())
-            .for_each(|_| async move {
-                let status =
-                    get_worker_status(&self.worker, self.allocations_checker.current_epoch()).await;
-                *self.worker_status.write() = status;
-            })
-            .await;
+        // Refresh on the periodic timer and, additionally, when an assignment
+        // becomes fully applied (prompt last_applied_assignment_id, via the
+        // existing applied signal). `None` in non-mvcc builds (no applied concept).
+        #[cfg(feature = "mvcc-chunks")]
+        let mut assignment_applied = Some(self.worker.subscribe_assignment_applied());
+        #[cfg(not(feature = "mvcc-chunks"))]
+        let mut assignment_applied: Option<tokio::sync::watch::Receiver<Option<String>>> = None;
+        loop {
+            tokio::select! {
+                _ = timer.tick() => {}
+                _ = wait_for_assignment_applied(&mut assignment_applied) => {}
+                _ = cancellation_token.cancelled() => break,
+            }
+            let status =
+                get_worker_status(&self.worker, self.allocations_checker.current_epoch()).await;
+            *self.worker_status.write() = status;
+        }
         info!("Status update task finished");
     }
 
@@ -750,6 +759,20 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         );
         self.transport_handle.send_logs(msg, resp_chan)?;
         Ok(())
+    }
+}
+
+// Resolves when the current assignment becomes fully applied. `applied` is `None`
+// in non-mvcc builds (no "applied" concept), so it never resolves and the status
+// loop relies on the periodic timer only.
+async fn wait_for_assignment_applied(
+    applied: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
+) {
+    match applied {
+        Some(applied) => {
+            let _ = applied.changed().await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 

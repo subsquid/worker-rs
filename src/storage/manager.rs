@@ -151,6 +151,15 @@ impl StateManager {
         info!("State manager loop finished");
     }
 
+    /// Subscribe to the "assignment fully applied" signal. The receiver observes a
+    /// change each time `last_applied_assignment_id` advances, i.e. when the current
+    /// assignment's chunks are all present. Used to refresh the reported status
+    /// promptly on application instead of waiting for the periodic status timer.
+    #[cfg(feature = "mvcc-chunks")]
+    pub fn subscribe_assignment_applied(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.assignment_applied_tx.subscribe()
+    }
+
     #[instrument(skip_all)]
     pub async fn current_status(&self) -> Status {
         let status = self.state.lock().status();
