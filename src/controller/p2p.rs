@@ -372,7 +372,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Refresh on the periodic timer and, additionally, when an assignment
         // becomes fully applied (prompt last_applied_assignment_id, via the
-        // existing applied signal). `None` in non-mvcc builds (no applied concept).
+        // existing applied signal). 
         #[cfg(feature = "mvcc-chunks")]
         let mut assignment_applied = Some(self.worker.subscribe_assignment_applied());
         #[cfg(not(feature = "mvcc-chunks"))]
