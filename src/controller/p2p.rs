@@ -769,9 +769,10 @@ async fn wait_for_assignment_applied(
     applied: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
 ) {
     match applied {
-        Some(applied) => {
-            let _ = applied.changed().await;
-        }
+        Some(applied) => applied
+            .changed()
+            .await
+            .expect("assignment_applied sender outlives the status loop"),
         None => std::future::pending::<()>().await,
     }
 }
