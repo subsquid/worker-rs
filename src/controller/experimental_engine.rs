@@ -39,16 +39,21 @@ impl QuerySchemaRegistry {
                 "query schemas for the experimental engine have not been loaded yet".to_owned(),
             ));
         }
-        self.schemas.load().get(dataset_type).cloned().ok_or_else(|| {
-            QueryError::BadRequest(format!(
-                "dataset type '{dataset_type}' is not supported by the experimental engine"
-            ))
-        })
+        self.schemas
+            .load()
+            .get(dataset_type)
+            .cloned()
+            .ok_or_else(|| {
+                QueryError::BadRequest(format!(
+                    "dataset type '{dataset_type}' is not supported by the experimental engine"
+                ))
+            })
     }
 
     fn store(&self, schemas: HashMap<String, Arc<DatasetDescription>>) {
         self.schemas.store(Arc::new(schemas));
-        self.loaded.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.loaded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -183,31 +188,212 @@ pub fn execute_query(
     let parse_duration = parse_timer.elapsed();
 
     let exec_timer = std::time::Instant::now();
-    let data = Vec::with_capacity(1024 * 1024);
-    let bytes = sqd_query_engine::output::execute_plan(&plan, schema, Path::new(chunk_path), data)
+    let blocks = sqd_query_engine::output::execute_plan(&plan, schema, Path::new(chunk_path))
         .map_err(QueryError::from)?;
     let exec_duration = exec_timer.elapsed();
+
+    let serialization_timer = std::time::Instant::now();
+    let (bytes, last_block) = if let Some(blocks) = blocks {
+        let last_block = blocks.last_block();
+        (blocks.into_json_lines(), last_block)
+    } else {
+        // No blocks in the output — report the query's upper bound so the portal
+        // can see progress, like the legacy engine does.
+        (Vec::new(), to_block)
+    };
+    let serialization_duration = serialization_timer.elapsed();
 
     if bytes.len() > super::worker::RESPONSE_LIMIT {
         return Err(QueryError::from(anyhow::anyhow!("Response too large")));
     }
 
-    // The engine doesn't report the last processed block, so fall back to the query's
-    // upper bound. Serialization happens during execution, hence zero time reported.
     Ok(QueryOk::new(
         bytes,
         1,
-        to_block,
+        last_block,
         parse_duration,
         exec_duration,
-        Duration::ZERO,
+        serialization_duration,
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use serde_json::json;
+    use std::fs::File;
     use std::future::IntoFuture;
+    use tempfile::TempDir;
+
+    const TEST_SCHEMA: &str = r#"
+name: evm
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [number]
+    columns:
+      number:
+        type: uint64
+  logs:
+    block_number_column: block_number
+    query_name: logs
+    field_name: log
+    item_order_keys: [transaction_index, log_index]
+    sort_key: [block_number, transaction_index, log_index]
+    columns:
+      block_number:
+        type: uint64
+      transaction_index:
+        type: uint32
+      log_index:
+        type: uint32
+      data:
+        type: string
+        json_encoding: hex
+        weight: data_size
+      data_size:
+        type: uint64
+        system: true
+"#;
+
+    fn write_parquet(path: &Path, batch: &RecordBatch) {
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn create_test_chunk() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+
+        let blocks_schema = Arc::new(Schema::new(vec![Field::new(
+            "number",
+            DataType::UInt64,
+            false,
+        )]));
+        let blocks = RecordBatch::try_new(
+            blocks_schema,
+            vec![Arc::new(UInt64Array::from(vec![10, 11, 12])) as ArrayRef],
+        )
+        .unwrap();
+        write_parquet(&dir.path().join("blocks.parquet"), &blocks);
+
+        let logs_schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new("log_index", DataType::UInt32, false),
+            Field::new("data", DataType::Binary, false),
+            Field::new("data_size", DataType::UInt64, false),
+        ]));
+        let logs = RecordBatch::try_new(
+            logs_schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![10, 11, 12])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![0, 0, 0])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![0, 0, 0])) as ArrayRef,
+                Arc::new(BinaryArray::from(vec![
+                    b"a".as_slice(),
+                    b"b".as_slice(),
+                    b"c".as_slice(),
+                ])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![
+                    15 * 1024 * 1024,
+                    15 * 1024 * 1024,
+                    15 * 1024 * 1024,
+                ])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        write_parquet(&dir.path().join("logs.parquet"), &logs);
+
+        dir
+    }
+
+    fn test_schema() -> DatasetDescription {
+        sqd_query_engine::metadata::parse_dataset_description(TEST_SCHEMA).unwrap()
+    }
+
+    #[test]
+    fn execute_query_should_return_one_json_object_per_line() {
+        let chunk = create_test_chunk();
+        let query = json!({
+            "type": "evm",
+            "includeAllBlocks": true,
+            "fields": {"block": {"number": true}}
+        })
+        .to_string();
+
+        let result = execute_query(
+            &query,
+            &test_schema(),
+            (10, 12),
+            chunk.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let blocks: Vec<serde_json::Value> = std::str::from_utf8(&result.data)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(
+            blocks,
+            vec![
+                json!({"header": {"number": 10}}),
+                json!({"header": {"number": 11}}),
+                json!({"header": {"number": 12}}),
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_query_should_report_last_block_selected_by_response_budget() {
+        let chunk = create_test_chunk();
+        let query = json!({
+            "type": "evm",
+            "logs": [{}],
+            "fields": {"log": {"data": true}}
+        })
+        .to_string();
+
+        let result = execute_query(
+            &query,
+            &test_schema(),
+            (10, 12),
+            chunk.path().to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(result.last_block, 10);
+    }
+
+    #[test]
+    fn execute_query_should_report_range_end_when_output_is_empty() {
+        let chunk = create_test_chunk();
+        let query = json!({
+            "type": "evm",
+            "logs": [{}],
+            "fields": {"log": {"data": true}}
+        })
+        .to_string();
+
+        // The chunk holds blocks 10..=12; a range beyond them selects nothing.
+        let result = execute_query(
+            &query,
+            &test_schema(),
+            (100, 200),
+            chunk.path().to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert!(result.data.is_empty());
+        assert_eq!(result.last_block, 200);
+    }
 
     #[test]
     fn extracts_dataset_type() {
@@ -236,8 +422,8 @@ mod tests {
         .unwrap();
         assert_eq!(manifest.schemas.len(), 2);
 
-        let base = Url::parse("https://cdn.subsquid.io/sqd-network/mainnet/query-schemas.yml")
-            .unwrap();
+        let base =
+            Url::parse("https://cdn.subsquid.io/sqd-network/mainnet/query-schemas.yml").unwrap();
         assert_eq!(
             base.join(&manifest.schemas["evm"]).unwrap().as_str(),
             "https://cdn.subsquid.io/sqd-network/query-schemas/evm.yaml"
@@ -297,9 +483,14 @@ tables:
 
         // fetch failure keeps the loaded schemas
         let mut last_manifest = None;
-        refresh_schemas(&registry, "http://127.0.0.1:1/nothing", &client, &mut last_manifest)
-            .await
-            .unwrap_err();
+        refresh_schemas(
+            &registry,
+            "http://127.0.0.1:1/nothing",
+            &client,
+            &mut last_manifest,
+        )
+        .await
+        .unwrap_err();
         assert!(registry.get("evm").is_ok());
     }
 

@@ -215,7 +215,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                      retry_after,
                  }| {
                     let query_type = match query.query_engine() {
-                        sqd_messages::QueryEngine::Experimental => QueryType::ExperimentalQuery,
+                        sqd_messages::QueryEngine::Dynamic => QueryType::ExperimentalQuery,
                         _ => QueryType::PlainQuery,
                     };
                     tokio::spawn(self.handle_query(
@@ -667,6 +667,17 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             return Err(query_error::Err::BadRequest(
                 "timestamp out of allowed range".to_owned(),
             ));
+        }
+        // Reject unknown enum values instead of silently falling back to the default engine.
+        if sqd_messages::QueryEngine::try_from(query.query_engine).is_err() {
+            warn!(
+                "Rejected query with unknown query engine ({}) from {peer_id}",
+                query.query_engine
+            );
+            return Err(query_error::Err::BadRequest(format!(
+                "unknown query engine: {}",
+                query.query_engine
+            )));
         }
         // TODO: check that query_id has not been used before
         Ok(())

@@ -5834,7 +5834,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -5854,7 +5854,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -5874,7 +5874,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -5887,7 +5887,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -7198,7 +7198,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=b7dd1d7#b7dd1d7b287620b9672fb53c7f8042abc04f59ef"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7218,7 +7218,7 @@ dependencies = [
 [[package]]
 name = "sqd-bloom-filter"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 dependencies = [
  "xxhash-rust",
 ]
@@ -7226,7 +7226,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.3.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=b7dd1d7#b7dd1d7b287620b9672fb53c7f8042abc04f59ef"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "async-trait",
  "clap",
@@ -7247,7 +7247,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=b7dd1d7#b7dd1d7b287620b9672fb53c7f8042abc04f59ef"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7263,7 +7263,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=b7dd1d7#b7dd1d7b287620b9672fb53c7f8042abc04f59ef"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7296,7 +7296,7 @@ dependencies = [
 [[package]]
 name = "sqd-polars"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7308,12 +7308,12 @@ dependencies = [
 [[package]]
 name = "sqd-primitives"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 
 [[package]]
 name = "sqd-query"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7338,7 +7338,6 @@ dependencies = [
 [[package]]
 name = "sqd-query-engine"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=feb625b#feb625b383629c76628d63848429af490ace546f"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7364,6 +7363,7 @@ version = "2.13.1"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "arrow",
  "async-compression",
  "async-stream",
  "async-trait",
@@ -7385,6 +7385,7 @@ dependencies = [
  "lazy_static",
  "mimalloc",
  "parking_lot",
+ "parquet",
  "polars",
  "polars-plan",
  "prometheus-client",
@@ -7411,6 +7412,7 @@ dependencies = [
  "sqd-query-engine",
  "sql_query_plan",
  "substrait",
+ "tempfile",
  "thiserror 1.0.65",
  "tokio",
  "tokio-graceful-shutdown",
