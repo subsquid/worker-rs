@@ -24,6 +24,7 @@
 #![cfg_attr(test, allow(clippy::all))]
 
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -35,6 +36,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
 use crate::cli::Args;
+use crate::controller::experimental_engine::QuerySchemaRegistry;
 use crate::controller::p2p::create_p2p_controller;
 use crate::controller::worker::Worker;
 use crate::http_server::Server as HttpServer;
@@ -136,7 +138,8 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
         None
     };
 
-    let worker = Worker::new(state_manager, args.parallel_queries);
+    let query_schemas = Arc::new(QuerySchemaRegistry::default());
+    let worker = Worker::new(state_manager, query_schemas, args.parallel_queries);
 
     let controller = create_p2p_controller(worker, transport_builder, args_clone).await?;
     // Leaked to give the subsystem tasks `&'static` access; lives until process exit anyway

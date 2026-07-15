@@ -45,6 +45,14 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub assignment_url: String,
 
+    /// URL of the query schemas manifest for the experimental query engine
+    /// (defaults to a per-network CDN location)
+    #[clap(long, env, default_value = "")]
+    pub query_schemas_url: String,
+
+    #[clap(env = "QUERY_SCHEMAS_REFRESH_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
+    pub query_schemas_refresh_interval: Duration,
+
     #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,
@@ -132,6 +140,19 @@ impl Args {
                 sqd_contract_client::Network::Tethys => {
                     self.assignment_url =
                         "https://metadata.sqd-datasets.io/network-state-tethys.json".to_owned();
+                }
+            }
+        }
+
+        if self.query_schemas_url.is_empty() {
+            match self.transport.rpc.network {
+                sqd_contract_client::Network::Mainnet => {
+                    self.query_schemas_url =
+                        "https://cdn.subsquid.io/sqd-network/mainnet/query-schemas.yml".to_owned();
+                }
+                sqd_contract_client::Network::Tethys => {
+                    self.query_schemas_url =
+                        "https://cdn.subsquid.io/sqd-network/testnet/query-schemas.yml".to_owned();
                 }
             }
         }

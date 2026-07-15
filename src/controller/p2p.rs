@@ -36,6 +36,7 @@ use crate::{
     util::{timestamp_now_ms, UseOnce},
 };
 
+use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::worker::Worker;
 
@@ -90,6 +91,8 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
+    query_schemas_url: String,
+    query_schemas_refresh_interval: Duration,
     queries_tx: mpsc::Sender<AdmittedQuery>,
     queries_rx: UseOnce<mpsc::Receiver<AdmittedQuery>>,
     sql_queries_tx: mpsc::Sender<AdmittedQuery>,
@@ -139,6 +142,8 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         assignment_url: args.assignment_url,
+        query_schemas_url: args.query_schemas_url,
+        query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
         queries_rx: UseOnce::new(queries_rx),
         sql_queries_tx,
@@ -177,6 +182,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         start_loop(s, "assignments", |t| {
             self.run_assignments_loop(t, self.assignment_check_interval)
         });
+        start_loop(s, "query_schemas", |t| {
+            experimental_engine::run_schemas_refresh_loop(
+                self.worker.query_schemas(),
+                self.query_schemas_url.clone(),
+                self.query_schemas_refresh_interval,
+                self.worker_id,
+                t,
+            )
+        });
         start_loop(s, "logs", |t| self.run_logs_loop(t));
         start_loop(s, "logs_cleanup", |t| {
             self.run_logs_cleanup_loop(t, LOGS_CLEANUP_INTERVAL)
@@ -200,12 +214,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                      resp_chan,
                      retry_after,
                  }| {
+                    let query_type = match query.query_engine() {
+                        sqd_messages::QueryEngine::Experimental => QueryType::ExperimentalQuery,
+                        _ => QueryType::PlainQuery,
+                    };
                     tokio::spawn(self.handle_query(
                         peer_id,
                         query,
                         resp_chan,
                         retry_after,
-                        QueryType::PlainQuery,
+                        query_type,
                     ))
                     .map(|r| r.unwrap())
                 },
