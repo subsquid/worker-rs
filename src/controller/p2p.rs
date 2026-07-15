@@ -17,6 +17,7 @@ use tokio::{
     sync::{mpsc, Semaphore},
     time::MissedTickBehavior,
 };
+use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn, Instrument};
@@ -31,7 +32,6 @@ use crate::{
     logs_storage::LogsStorage,
     metrics,
     query::result::{QueryError, QueryResult},
-    run_all,
     storage::layout::DataChunk,
     util::{timestamp_now_ms, UseOnce},
 };
@@ -76,7 +76,7 @@ enum Logged {
 }
 
 pub struct P2PController<EventStream> {
-    worker: Arc<Worker>,
+    worker: Worker,
     worker_status: RwLock<WorkerStatus>,
     assignment_check_interval: Duration,
     assignment_fetch_timeout: Duration,
@@ -101,7 +101,7 @@ pub struct P2PController<EventStream> {
 }
 
 pub async fn create_p2p_controller(
-    worker: Arc<Worker>,
+    worker: Worker,
     transport_builder: P2PTransportBuilder,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
@@ -149,71 +149,46 @@ pub async fn create_p2p_controller(
     })
 }
 
+/// Runs a cancellable loop as a subsystem; exiting for any reason other than the requested
+/// shutdown is an error.
+fn start_loop<F, Fut>(s: &SubsystemHandle, name: &'static str, run: F)
+where
+    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    s.start(SubsystemBuilder::new(
+        name,
+        async move |sub: &mut SubsystemHandle| {
+            run(sub.create_cancellation_token()).await;
+            if sub.is_shutdown_requested() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("{} exited unexpectedly", sub.name()))
+            }
+        },
+    ));
+}
+
 impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<EventStream> {
-    pub async fn run(self: Arc<Self>, cancellation_token: CancellationToken) {
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let event_task = tokio::spawn(async move { this.run_event_loop(token).await });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let queries_task = tokio::spawn(async move { this.run_queries_loop(token).await });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let sql_queries_task = tokio::spawn(async move { this.run_sql_queries_loop(token).await });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let assignments_task = tokio::spawn(async move {
-            this.run_assignments_loop(token, this.assignment_check_interval)
-                .await
+    pub fn start_subsystems(&'static self, s: &SubsystemHandle) {
+        start_loop(s, "transport_events", |t| self.run_event_loop(t));
+        start_loop(s, "queries", |t| self.run_queries_loop(t));
+        start_loop(s, "sql_queries", |t| self.run_sql_queries_loop(t));
+        start_loop(s, "assignments", |t| {
+            self.run_assignments_loop(t, self.assignment_check_interval)
         });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let logs_task: tokio::task::JoinHandle<()> =
-            tokio::spawn(async move { this.run_logs_loop(token).await });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let logs_cleanup_task: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-            this.run_logs_cleanup_loop(token, LOGS_CLEANUP_INTERVAL)
-                .await
+        start_loop(s, "logs", |t| self.run_logs_loop(t));
+        start_loop(s, "logs_cleanup", |t| {
+            self.run_logs_cleanup_loop(t, LOGS_CLEANUP_INTERVAL)
         });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let status_update_task: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-            this.run_status_update_loop(token, STATUS_UPDATE_INTERVAL)
-                .await
+        start_loop(s, "status_updates", |t| {
+            self.run_status_update_loop(t, STATUS_UPDATE_INTERVAL)
         });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let worker_task: tokio::task::JoinHandle<()> =
-            tokio::spawn(async move { this.worker.run(token).await });
-
-        let this = self.clone();
-        let token = cancellation_token.child_token();
-        let allocations_task: tokio::task::JoinHandle<()> =
-            tokio::spawn(async move { this.allocations_checker.run(token).await });
-
-        let _ = run_all!(
-            cancellation_token,
-            event_task,
-            queries_task,
-            sql_queries_task,
-            assignments_task,
-            logs_task,
-            logs_cleanup_task,
-            status_update_task,
-            worker_task,
-            allocations_task,
-        );
+        start_loop(s, "state_manager", |t| self.worker.run(t));
+        start_loop(s, "allocations", |t| self.allocations_checker.run(t));
     }
 
-    async fn run_queries_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
+    async fn run_queries_loop(&'static self, cancellation_token: CancellationToken) {
         let queries_rx = self.queries_rx.take().unwrap();
         ReceiverStream::new(queries_rx)
             .take_until(cancellation_token.cancelled_owned())
@@ -225,17 +200,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                      resp_chan,
                      retry_after,
                  }| {
-                    let this = self.clone();
-                    tokio::spawn(async move {
-                        this.handle_query(
-                            peer_id,
-                            query,
-                            resp_chan,
-                            retry_after,
-                            QueryType::PlainQuery,
-                        )
-                        .await;
-                    })
+                    tokio::spawn(self.handle_query(
+                        peer_id,
+                        query,
+                        resp_chan,
+                        retry_after,
+                        QueryType::PlainQuery,
+                    ))
                     .map(|r| r.unwrap())
                 },
             )
@@ -243,7 +214,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Query processing task finished");
     }
 
-    async fn run_sql_queries_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
+    async fn run_sql_queries_loop(&'static self, cancellation_token: CancellationToken) {
         let sql_queries_rx = self.sql_queries_rx.take().unwrap();
         ReceiverStream::new(sql_queries_rx)
             .take_until(cancellation_token.cancelled_owned())
@@ -255,17 +226,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                      resp_chan,
                      retry_after,
                  }| {
-                    let this = self.clone();
-                    tokio::spawn(async move {
-                        this.handle_query(
-                            peer_id,
-                            query,
-                            resp_chan,
-                            retry_after,
-                            QueryType::SqlQuery,
-                        )
-                        .await;
-                    })
+                    tokio::spawn(self.handle_query(
+                        peer_id,
+                        query,
+                        resp_chan,
+                        retry_after,
+                        QueryType::SqlQuery,
+                    ))
                     .map(|r| r.unwrap())
                 },
             )
@@ -274,7 +241,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 
     async fn run_assignments_loop(
-        &self,
+        &'static self,
         cancellation_token: CancellationToken,
         assignment_check_interval: Duration,
     ) {
@@ -335,7 +302,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     };
                     tracing::debug!("Downloaded assignment \"{}\"", update.id);
 
-                    let worker = self.worker.clone();
+                    let worker = &self.worker;
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
                     let registered = tokio::task::spawn_blocking(move || {
@@ -469,7 +436,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("Logs cleanup task finished");
     }
 
-    async fn run_event_loop(self: Arc<Self>, cancellation_token: CancellationToken) {
+    async fn run_event_loop(&'static self, cancellation_token: CancellationToken) {
         let event_stream = self
             .raw_event_stream
             .take()
@@ -558,7 +525,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     /// typed error but no log. Reserving before spending guarantees a spent unit always enqueues.
     /// Returns `false` when the receiver is gone, to stop the event loop.
     fn admit_query(
-        self: &Arc<Self>,
+        &'static self,
         peer_id: PeerId,
         query: Query,
         resp_chan: ResponseSender,
@@ -566,15 +533,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         protocol: &str,
     ) -> bool {
         if let Err(err) = self.validate_query(&query, peer_id) {
-            self.clone()
-                .spawn_error_response(query.query_id, err, None, resp_chan);
+            self.spawn_error_response(query.query_id, err, None, resp_chan);
             return true;
         }
         let permit = match queue_tx.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(())) => {
                 warn!("{protocol} queue is full. Rejecting query from {peer_id}");
-                self.clone().spawn_error_response(
+                self.spawn_error_response(
                     query.query_id,
                     query_error::Err::ServerOverloaded(()),
                     Some(DEFAULT_BACKOFF),
@@ -588,7 +554,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         // requests could overload the worker.
         match self.allocations_checker.try_spend(peer_id, 1.) {
             RateLimitStatus::NoAllocation => {
-                self.clone().spawn_error_response(
+                self.spawn_error_response(
                     query.query_id,
                     query_error::Err::TooManyRequests(()),
                     None,
@@ -596,7 +562,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 );
             }
             RateLimitStatus::Paused(retry_after) => {
-                self.clone().spawn_error_response(
+                self.spawn_error_response(
                     query.query_id,
                     query_error::Err::TooManyRequests(()),
                     Some(retry_after),
@@ -642,7 +608,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     /// Run [`Self::send_error_result`] off the event loop so the write can't stall it. `reject_semaphore`
     /// caps in-flight sends; past the limit the response is dropped instead of spawning unbounded tasks.
     fn spawn_error_response(
-        self: Arc<Self>,
+        &'static self,
         query_id: String,
         err: query_error::Err,
         retry_after: Option<Duration>,
@@ -695,7 +661,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         query_type: QueryType,
     ) {
         let outcome = execute(
-            &*self.worker,
+            &self.worker,
             &self.allocations_checker,
             peer_id,
             &query,
