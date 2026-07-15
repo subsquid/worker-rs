@@ -478,8 +478,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             continue;
                         }
                     };
-                    if !self.admit_query(peer_id, query, resp_chan, &self.sql_queries_tx, "SQL query")
-                    {
+                    if !self.admit_query(
+                        peer_id,
+                        query,
+                        resp_chan,
+                        &self.sql_queries_tx,
+                        "SQL query",
+                    ) {
                         break;
                     }
                 }
@@ -669,7 +674,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         )
         .await;
         if let Err(e) = &outcome {
-            warn!("Query {} by {peer_id} execution failed: {e:?}", query.query_id);
+            warn!(
+                "Query {} by {peer_id} execution failed: {e:?}",
+                query.query_id
+            );
         }
         metrics::query_executed(&outcome);
 
@@ -681,8 +689,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         };
 
         let compression = query.compression();
-        let (message, logged) =
-            build_delivery(&self.keypair, &query.query_id, outcome, retry_after, compression).await;
+        let (message, logged) = build_delivery(
+            &self.keypair,
+            &query.query_id,
+            outcome,
+            retry_after,
+            compression,
+        )
+        .await;
 
         // Send before logging: the unit was spent at admission so the log happens regardless, and
         // the SQLite write stays off the response path.
@@ -835,10 +849,9 @@ async fn build_delivery(
 
     let mut msg = sqd_messages::QueryResult {
         query_id: query_id.to_owned(),
-        result: Some(sqd_messages::query_result::Result::Ok(sqd_messages::QueryOk {
-            data,
-            last_block,
-        })),
+        result: Some(sqd_messages::query_result::Result::Ok(
+            sqd_messages::QueryOk { data, last_block },
+        )),
         retry_after_ms,
         signature: Default::default(),
     };
@@ -855,7 +868,10 @@ async fn build_delivery(
         warn!("Couldn't sign query result for {query_id}: {e}");
     }
     if too_large {
-        warn!("Query result for {query_id} is too large: {} bytes", msg.encoded_len());
+        warn!(
+            "Query result for {query_id} is too large: {} bytes",
+            msg.encoded_len()
+        );
     }
     if sign_result.is_err() || too_large {
         let reason = if sign_result.is_err() {
@@ -1143,8 +1159,14 @@ mod tests {
         let worker = MockWorker::new(Err(QueryError::ServiceOverloaded));
         let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
 
-        let outcome =
-            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome = execute(
+            &worker,
+            &checker,
+            PeerId::random(),
+            &query,
+            QueryType::PlainQuery,
+        )
+        .await;
 
         assert!(matches!(outcome, Err(QueryError::ServiceOverloaded)));
         assert_eq!(checker.net_spent(), 1.0);
@@ -1160,8 +1182,14 @@ mod tests {
         let worker = MockWorker::new(ok_result());
         let query = query_with(999, Some((100, 200)), CHUNK_ID);
 
-        let outcome =
-            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome = execute(
+            &worker,
+            &checker,
+            PeerId::random(),
+            &query,
+            QueryType::PlainQuery,
+        )
+        .await;
 
         assert!(matches!(outcome, Err(QueryError::BadRequest(_))));
         assert_eq!(worker.calls(), 0);
@@ -1175,8 +1203,14 @@ mod tests {
         let worker = MockWorker::new(ok_result());
         let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
 
-        let outcome =
-            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome = execute(
+            &worker,
+            &checker,
+            PeerId::random(),
+            &query,
+            QueryType::PlainQuery,
+        )
+        .await;
 
         assert!(outcome.is_ok());
         assert_eq!(checker.net_spent(), 1.0);
@@ -1190,8 +1224,14 @@ mod tests {
         // 30% of [100, 200] — asymmetric, so a flipped fraction would fail.
         let query = query_with(Compression::None as i32, Some((100, 130)), CHUNK_ID);
 
-        let outcome =
-            execute(&worker, &checker, PeerId::random(), &query, QueryType::PlainQuery).await;
+        let outcome = execute(
+            &worker,
+            &checker,
+            PeerId::random(),
+            &query,
+            QueryType::PlainQuery,
+        )
+        .await;
 
         assert!(outcome.is_ok());
         assert!(
@@ -1205,7 +1245,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn bad_request_response_carries_retry_after() {
         let keypair = Keypair::generate_ed25519();
-        let outcome = Err(QueryError::BadRequest("timestamp out of allowed range".to_owned()));
+        let outcome = Err(QueryError::BadRequest(
+            "timestamp out of allowed range".to_owned(),
+        ));
 
         let (message, logged) = build_delivery(
             &keypair,
