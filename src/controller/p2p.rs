@@ -28,7 +28,7 @@ use crate::{
         allocations_checker::{self, AllocationsChecker},
         RateLimitStatus,
     },
-    controller::worker::QueryType,
+    controller::worker::{OutputFormat, QueryType},
     logs_storage::LogsStorage,
     metrics,
     query::result::{QueryError, QueryResult},
@@ -214,8 +214,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                      resp_chan,
                      retry_after,
                  }| {
+                    // Unknown enum values and Arrow-with-legacy are rejected at
+                    // admission, so the accessors yield known, compatible variants.
                     let query_type = match query.query_engine() {
-                        sqd_messages::QueryEngine::Dynamic => QueryType::ExperimentalQuery,
+                        sqd_messages::QueryEngine::Dynamic => QueryType::ExperimentalQuery {
+                            output_format: match query.output_format() {
+                                sqd_messages::OutputFormat::ArrowIpc => OutputFormat::ArrowIpc,
+                                sqd_messages::OutputFormat::Jsonl => OutputFormat::JsonLines,
+                            },
+                        },
                         _ => QueryType::PlainQuery,
                     };
                     tokio::spawn(self.handle_query(
@@ -668,7 +675,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 "timestamp out of allowed range".to_owned(),
             ));
         }
-        // Reject unknown enum values instead of silently falling back to the default engine.
+        // Reject unknown enum values instead of silently falling back to the default.
         if sqd_messages::QueryEngine::try_from(query.query_engine).is_err() {
             warn!(
                 "Rejected query with unknown query engine ({}) from {peer_id}",
@@ -678,6 +685,25 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 "unknown query engine: {}",
                 query.query_engine
             )));
+        }
+        if sqd_messages::OutputFormat::try_from(query.output_format).is_err() {
+            warn!(
+                "Rejected query with unknown output format ({}) from {peer_id}",
+                query.output_format
+            );
+            return Err(query_error::Err::BadRequest(format!(
+                "unknown output format: {}",
+                query.output_format
+            )));
+        }
+        // Arrow IPC output is only produced by the dynamic engine.
+        if query.output_format() == sqd_messages::OutputFormat::ArrowIpc
+            && query.query_engine() != sqd_messages::QueryEngine::Dynamic
+        {
+            warn!("Rejected Arrow IPC query for the legacy engine from {peer_id}");
+            return Err(query_error::Err::BadRequest(
+                "Arrow IPC output is only supported by the dynamic query engine".to_owned(),
+            ));
         }
         // TODO: check that query_id has not been used before
         Ok(())

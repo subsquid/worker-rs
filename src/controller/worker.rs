@@ -36,8 +36,14 @@ pub(crate) const RESPONSE_LIMIT: usize =
 
 pub enum QueryType {
     PlainQuery,
-    ExperimentalQuery,
+    ExperimentalQuery { output_format: OutputFormat },
     SqlQuery,
+}
+
+#[derive(Clone, Copy)]
+pub enum OutputFormat {
+    JsonLines,
+    ArrowIpc,
 }
 
 pub struct Worker {
@@ -125,14 +131,22 @@ impl Worker {
                 .map(|id| id.to_string())
                 .unwrap_or("{unknown}".to_string())
         );
+        // Arrow IPC output is only produced by the dynamic engine; the pairing is
+        // enforced at admission, so it can only reach the experimental path here.
         match query_type {
             QueryType::PlainQuery => {
                 self.execute_query(query_str, dataset, block_range, chunk_id)
                     .await
             }
-            QueryType::ExperimentalQuery => {
-                self.execute_experimental_query(query_str, dataset, block_range, chunk_id)
-                    .await
+            QueryType::ExperimentalQuery { output_format } => {
+                self.execute_experimental_query(
+                    query_str,
+                    dataset,
+                    block_range,
+                    chunk_id,
+                    output_format,
+                )
+                .await
             }
             QueryType::SqlQuery => self.execute_sql_query(query_str, dataset, chunk_id).await,
         }
@@ -227,6 +241,7 @@ impl Worker {
         dataset: Dataset,
         block_range: (u64, u64),
         chunk_id: &str,
+        output_format: OutputFormat,
     ) -> QueryResult {
         let dataset_type = experimental_engine::extract_dataset_type(query_str)?;
         let schema = self.query_schemas.get(&dataset_type)?;
@@ -242,6 +257,7 @@ impl Worker {
                 &schema,
                 block_range,
                 chunk_guard.as_str(),
+                output_format,
             )
         })
         .await

@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::controller::assignments::new_reqwest_client;
+use crate::controller::worker::OutputFormat;
 use crate::query::result::{QueryError, QueryOk, QueryResult};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -174,6 +175,7 @@ pub fn execute_query(
     schema: &DatasetDescription,
     block_range: (u64, u64),
     chunk_path: &str,
+    output_format: OutputFormat,
 ) -> QueryResult {
     let (from_block, to_block) = block_range;
 
@@ -187,21 +189,43 @@ pub fn execute_query(
         .map_err(|e| QueryError::BadRequest(format!("Couldn't compile query: {e:?}")))?;
     let parse_duration = parse_timer.elapsed();
 
+    let chunk_dir = Path::new(chunk_path);
     let exec_timer = std::time::Instant::now();
-    let blocks = sqd_query_engine::output::execute_plan(&plan, schema, Path::new(chunk_path))
-        .map_err(QueryError::from)?;
-    let exec_duration = exec_timer.elapsed();
-
-    let serialization_timer = std::time::Instant::now();
-    let (bytes, last_block) = if let Some(blocks) = blocks {
-        let last_block = blocks.last_block();
-        (blocks.into_json_lines(), last_block)
-    } else {
-        // No blocks in the output — report the query's upper bound so the portal
-        // can see progress, like the legacy engine does.
-        (Vec::new(), to_block)
+    // No blocks in the output → report the query's upper bound so the portal can
+    // see progress, like the legacy engine does.
+    let (bytes, last_block, exec_duration, serialization_duration) = match output_format {
+        OutputFormat::JsonLines => {
+            let blocks = sqd_query_engine::output::execute_plan(&plan, schema, chunk_dir)
+                .map_err(QueryError::from)?;
+            let exec_duration = exec_timer.elapsed();
+            let ser_timer = std::time::Instant::now();
+            let (bytes, last_block) = match blocks {
+                Some(blocks) => {
+                    let last_block = blocks.last_block();
+                    (blocks.into_json_lines(), last_block)
+                }
+                None => (Vec::new(), to_block),
+            };
+            (bytes, last_block, exec_duration, ser_timer.elapsed())
+        }
+        OutputFormat::ArrowIpc => {
+            // The worker compresses the response itself, so leave Arrow's built-in
+            // compression off; `binary` emits raw byte columns instead of hex strings.
+            let output =
+                sqd_query_engine::output::execute_plan_arrow(&plan, schema, chunk_dir, false, true)
+                    .map_err(QueryError::from)?;
+            // Arrow encoding is eager, so it's all execution time, no separate step.
+            let exec_duration = exec_timer.elapsed();
+            let (bytes, last_block) = match output {
+                Some(output) => {
+                    let last_block = output.last_block();
+                    (output.into_data(), last_block)
+                }
+                None => (Vec::new(), to_block),
+            };
+            (bytes, last_block, exec_duration, Duration::ZERO)
+        }
     };
-    let serialization_duration = serialization_timer.elapsed();
 
     if bytes.len() > super::worker::RESPONSE_LIMIT {
         return Err(QueryError::from(anyhow::anyhow!("Response too large")));
@@ -333,6 +357,7 @@ tables:
             &test_schema(),
             (10, 12),
             chunk.path().to_str().unwrap(),
+            OutputFormat::JsonLines,
         )
         .unwrap();
         let blocks: Vec<serde_json::Value> = std::str::from_utf8(&result.data)
@@ -366,6 +391,7 @@ tables:
             &test_schema(),
             (10, 12),
             chunk.path().to_str().unwrap(),
+            OutputFormat::JsonLines,
         )
         .unwrap();
 
@@ -388,11 +414,39 @@ tables:
             &test_schema(),
             (100, 200),
             chunk.path().to_str().unwrap(),
+            OutputFormat::JsonLines,
         )
         .unwrap();
 
         assert!(result.data.is_empty());
         assert_eq!(result.last_block, 200);
+    }
+
+    #[test]
+    fn execute_query_arrow_output_differs_from_json() {
+        let chunk = create_test_chunk();
+        let query = json!({
+            "type": "evm",
+            "includeAllBlocks": true,
+            "fields": {"block": {"number": true}}
+        })
+        .to_string();
+        let path = chunk.path().to_str().unwrap();
+
+        let json = execute_query(&query, &test_schema(), (10, 12), path, OutputFormat::JsonLines)
+            .unwrap();
+        let arrow = execute_query(&query, &test_schema(), (10, 12), path, OutputFormat::ArrowIpc)
+            .unwrap();
+
+        // Same block range reported, but Arrow IPC bytes are a distinct, non-JSON encoding.
+        assert_eq!(arrow.last_block, json.last_block);
+        assert!(!arrow.data.is_empty());
+        assert_ne!(arrow.data, json.data);
+        assert!(std::str::from_utf8(&arrow.data)
+            .ok()
+            .and_then(|s| s.lines().next())
+            .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .is_none());
     }
 
     #[test]
