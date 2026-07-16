@@ -7338,6 +7338,7 @@ dependencies = [
 [[package]]
 name = "sqd-query-engine"
 version = "0.1.0"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=c9a9823#c9a982397bcdd6e5fa8d2bd57cb27e11c39f6b70"
 dependencies = [
  "anyhow",
  "arrow",

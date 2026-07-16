@@ -89,10 +89,6 @@ tempfile = "3"
 [patch.crates-io]
 libp2p-identity = { git = "https://github.com/kalabukdima/rust-libp2p.git", rev = "fac3b0c9" }
 
-# TODO: remove once the QueryOutput interface lands in the published sqd-query-engine
-[patch."https://github.com/subsquid/sqd-query-engine.git"]
-sqd-query-engine = { path = "../sqd-query-engine" }
-
 [profile.release]
 debug = true
 opt-level = 3
