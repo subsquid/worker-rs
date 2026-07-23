@@ -19,7 +19,11 @@ use sqd_network_transport::{Keypair, PeerId};
 use tracing::instrument;
 
 use crate::{
-    controller::{polars_target, sql_request::WorkerChunkStore},
+    controller::{
+        experimental_engine::{self, QuerySchemaRegistry},
+        polars_target,
+        sql_request::WorkerChunkStore,
+    },
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::manager::{self, StateManager},
@@ -27,26 +31,44 @@ use crate::{
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
-const RESPONSE_LIMIT: usize = sqd_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
+pub(crate) const RESPONSE_LIMIT: usize =
+    sqd_network_transport::protocol::MAX_QUERY_RESULT_SIZE as usize;
 
 pub enum QueryType {
     PlainQuery,
+    ExperimentalQuery { output_format: OutputFormat },
     SqlQuery,
+}
+
+#[derive(Clone, Copy)]
+pub enum OutputFormat {
+    JsonLines,
+    ArrowIpc,
 }
 
 pub struct Worker {
     state_manager: Arc<StateManager>,
+    query_schemas: Arc<QuerySchemaRegistry>,
     queries_running: AtomicUsize,
     max_parallel_queries: usize,
 }
 
 impl Worker {
-    pub fn new(state_manager: StateManager, parallel_queries: usize) -> Self {
+    pub fn new(
+        state_manager: StateManager,
+        query_schemas: Arc<QuerySchemaRegistry>,
+        parallel_queries: usize,
+    ) -> Self {
         Self {
             state_manager: Arc::new(state_manager),
+            query_schemas,
             queries_running: 0.into(),
             max_parallel_queries: parallel_queries,
         }
+    }
+
+    pub fn query_schemas(&self) -> Arc<QuerySchemaRegistry> {
+        self.query_schemas.clone()
     }
 
     pub fn register_assignment(
@@ -109,10 +131,22 @@ impl Worker {
                 .map(|id| id.to_string())
                 .unwrap_or("{unknown}".to_string())
         );
+        // Arrow IPC output is only produced by the dynamic engine; the pairing is
+        // enforced at admission, so it can only reach the experimental path here.
         match query_type {
             QueryType::PlainQuery => {
                 self.execute_query(query_str, dataset, block_range, chunk_id)
                     .await
+            }
+            QueryType::ExperimentalQuery { output_format } => {
+                self.execute_experimental_query(
+                    query_str,
+                    dataset,
+                    block_range,
+                    chunk_id,
+                    output_format,
+                )
+                .await
             }
             QueryType::SqlQuery => self.execute_sql_query(query_str, dataset, chunk_id).await,
         }
@@ -198,6 +232,35 @@ impl Worker {
                 "Query processor didn't produce a result"
             )))
         })
+    }
+
+    #[instrument(skip_all)]
+    async fn execute_experimental_query(
+        &self,
+        query_str: &str,
+        dataset: Dataset,
+        block_range: (u64, u64),
+        chunk_id: &str,
+        output_format: OutputFormat,
+    ) -> QueryResult {
+        let dataset_type = experimental_engine::extract_dataset_type(query_str)?;
+        let schema = self.query_schemas.get(&dataset_type)?;
+
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk_id) else {
+            return Err(QueryError::NotFound);
+        };
+
+        let query_str = query_str.to_owned();
+        run_in_pool(move || {
+            experimental_engine::execute_query(
+                &query_str,
+                &schema,
+                block_range,
+                chunk_guard.as_str(),
+                output_format,
+            )
+        })
+        .await
     }
 
     #[instrument(skip_all)]
@@ -296,30 +359,35 @@ impl Worker {
     }
 }
 
+async fn run_in_pool<F>(f: F) -> QueryResult
+where
+    F: FnOnce() -> QueryResult + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sqd_polars::POOL.spawn(move || {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+            });
+        tx.send(result).unwrap_or_else(|_| {
+            tracing::warn!("Query runner didn't wait for the result");
+        })
+    });
+    rx.await.unwrap_or_else(|_| {
+        Err(QueryError::from(anyhow::anyhow!(
+            "Query processor didn't produce a result"
+        )))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn run_in_pool<F>(f: F) -> QueryResult
-    where
-        F: FnOnce() -> QueryResult + Send + 'static,
-    {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sqd_polars::POOL.spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
-                    let msg = panic
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| panic.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "unknown panic".to_string());
-                    Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
-                });
-            tx.send(result).ok();
-        });
-        rx.await
-            .unwrap_or_else(|_| Err(QueryError::from(anyhow::anyhow!("no result"))))
-    }
 
     #[tokio::test]
     async fn pool_panic_is_caught_with_str_message() {

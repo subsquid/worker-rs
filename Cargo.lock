@@ -175,6 +175,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c042108f3ed77fd83760a5fd79b53be043192bb3b9dba91d8c574c0ada7850c8"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "argminmax"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -211,7 +220,10 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-cast",
+ "arrow-csv",
  "arrow-data",
+ "arrow-ipc",
+ "arrow-json",
  "arrow-ord",
  "arrow-row",
  "arrow-schema",
@@ -282,6 +294,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-csv"
+version = "54.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43d3cb0914486a3cae19a5cad2598e44e225d53157926d0ada03c20521191a65"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "chrono",
+ "csv",
+ "csv-core",
+ "lazy_static",
+ "regex",
+]
+
+[[package]]
 name = "arrow-data"
 version = "54.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -304,6 +332,28 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "flatbuffers 24.12.23",
+ "lz4_flex",
+ "zstd 0.13.3",
+]
+
+[[package]]
+name = "arrow-json"
+version = "54.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d03b9340013413eb84868682ace00a1098c81a5ebc96d279f7ebf9a4cac3c0fd"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-data",
+ "arrow-schema",
+ "chrono",
+ "half",
+ "indexmap 2.6.0",
+ "lexical-core",
+ "num",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -337,6 +387,9 @@ name = "arrow-schema"
 version = "54.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85934a9d0261e0fa5d4e2a5295107d743b543a6e0484a835d4b8db2da15306f9"
+dependencies = [
+ "bitflags 2.9.1",
+]
 
 [[package]]
 name = "arrow-select"
@@ -1400,6 +1453,27 @@ dependencies = [
  "salsa20",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -5759,8 +5833,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
- "itertools 0.12.1",
+ "heck 0.4.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -5779,8 +5853,8 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
- "itertools 0.13.0",
+ "heck 0.4.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -5800,7 +5874,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -5813,7 +5887,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -6527,9 +6601,9 @@ dependencies = [
 
 [[package]]
 name = "ryu"
-version = "1.0.18"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3cb5ba0dc43242ce17de99c180e96db90b235b8a9fdc9543c96d2209116bd9f"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salsa20"
@@ -7124,7 +7198,7 @@ dependencies = [
 [[package]]
 name = "sqd-assignments"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=c4b85c1#c4b85c132fe5fa308be284556d539f012c0760b0"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7144,7 +7218,7 @@ dependencies = [
 [[package]]
 name = "sqd-bloom-filter"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 dependencies = [
  "xxhash-rust",
 ]
@@ -7152,7 +7226,7 @@ dependencies = [
 [[package]]
 name = "sqd-contract-client"
 version = "1.3.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=c4b85c1#c4b85c132fe5fa308be284556d539f012c0760b0"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "async-trait",
  "clap",
@@ -7173,7 +7247,7 @@ dependencies = [
 [[package]]
 name = "sqd-messages"
 version = "2.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=c4b85c1#c4b85c132fe5fa308be284556d539f012c0760b0"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -7189,7 +7263,7 @@ dependencies = [
 [[package]]
 name = "sqd-network-transport"
 version = "3.1.0"
-source = "git+https://github.com/subsquid/sqd-network.git?rev=c4b85c1#c4b85c132fe5fa308be284556d539f012c0760b0"
+source = "git+https://github.com/subsquid/sqd-network.git?rev=0633335#063333532d9dae3acfb28728118fa67c9e637486"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7222,7 +7296,7 @@ dependencies = [
 [[package]]
 name = "sqd-polars"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7234,12 +7308,12 @@ dependencies = [
 [[package]]
 name = "sqd-primitives"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 
 [[package]]
 name = "sqd-query"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/data.git?rev=b2c59d9#b2c59d99a8569947175e7babe46d8fdae9b4b75d"
+source = "git+https://github.com/subsquid/data.git?rev=eaa9f86#eaa9f862069390d19a75af13b6f1540800bbae02"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7262,10 +7336,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqd-worker"
-version = "2.13.1"
+name = "sqd-query-engine"
+version = "0.1.0"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=54b9020#54b9020f33f06b2de851cd6ecf202c64567e1fdc"
 dependencies = [
  "anyhow",
+ "arrow",
+ "bytes",
+ "faster-hex",
+ "indexmap 2.6.0",
+ "itoa",
+ "memmap2 0.9.5",
+ "parquet",
+ "rayon",
+ "rustc-hash",
+ "ryu",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tikv-jemallocator",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "sqd-worker"
+version = "2.14.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "arrow",
  "async-compression",
  "async-stream",
  "async-trait",
@@ -7287,6 +7386,7 @@ dependencies = [
  "lazy_static",
  "mimalloc",
  "parking_lot",
+ "parquet",
  "polars",
  "polars-plan",
  "prometheus-client",
@@ -7301,6 +7401,7 @@ dependencies = [
  "serde-rename-rule",
  "serde_json",
  "serde_with",
+ "serde_yaml",
  "sha2",
  "sha3",
  "sqd-assignments",
@@ -7309,8 +7410,10 @@ dependencies = [
  "sqd-network-transport",
  "sqd-polars",
  "sqd-query",
+ "sqd-query-engine",
  "sql_query_plan",
  "substrait",
+ "tempfile",
  "thiserror 1.0.65",
  "tokio",
  "tokio-graceful-shutdown",
@@ -7698,6 +7801,26 @@ dependencies = [
  "byteorder",
  "integer-encoding",
  "ordered-float 2.10.1",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]
@@ -9104,9 +9227,9 @@ dependencies = [
 
 [[package]]
 name = "xxhash-rust"
-version = "0.8.12"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a5cbf750400958819fb6178eaa83bee5cd9c29a26a40cc241df8c70fdd46984"
+checksum = "985eec839aaf2a1270af8f4ebcf63cf9401cfd90f0902f97c28d9f104ffbde72"
 
 [[package]]
 name = "yansi"
