@@ -24,11 +24,11 @@
 #![cfg_attr(test, allow(clippy::all))]
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use tokio_util::sync::CancellationToken;
+use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle, Toplevel};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
@@ -104,25 +104,8 @@ fn setup_sentry(args: &Args, peer_id: String) -> Option<sentry::ClientInitGuard>
     })
 }
 
-fn create_cancellation_token() -> Result<CancellationToken> {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let token = CancellationToken::new();
-    let copy = token.clone();
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sigterm = signal(SignalKind::terminate())?;
-    tokio::spawn(async move {
-        tokio::select!(
-            _ = sigint.recv() => {
-                copy.cancel();
-            },
-            _ = sigterm.recv() => {
-                copy.cancel();
-            },
-        );
-    });
-    Ok(token)
-}
+/// Subsystems that don't finish gracefully within this window get cancelled.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn run(mut args: Args) -> anyhow::Result<()> {
     setup_tracing(&args)?;
@@ -147,32 +130,35 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
-    if args_clone.sentry_is_enabled {
-        let _sentry_guard = setup_sentry(&args_clone, peer_id.to_string());
-    }
-
-    let worker = Arc::new(Worker::new(state_manager, args.parallel_queries));
-
-    let cancellation_token = create_cancellation_token()?;
-    let controller_fut = async {
-        let controller = tokio::select! {
-            controller = create_p2p_controller(worker, transport_builder, args_clone) => Arc::new(controller?),
-            _ = cancellation_token.cancelled() => return Ok(()),
-        };
-        controller.run(cancellation_token.clone()).await;
-        anyhow::Ok(())
+    let _sentry_guard = if args_clone.sentry_is_enabled {
+        setup_sentry(&args_clone, peer_id.to_string())
+    } else {
+        None
     };
 
-    let (controller_result, server_result) = run_all!(
-        cancellation_token,
-        controller_fut,
-        tokio::spawn(
-            HttpServer::new(peer_id, metrics_registry)
-                .run(args.prometheus_port, cancellation_token.child_token())
-        ),
-    );
-    controller_result?;
-    server_result??;
+    let worker = Worker::new(state_manager, args.parallel_queries);
+
+    let controller = create_p2p_controller(worker, transport_builder, args_clone).await?;
+    // Leaked to give the subsystem tasks `&'static` access; lives until process exit anyway
+    let controller = &*Box::leak(Box::new(controller));
+
+    let http_server = HttpServer::new(peer_id, metrics_registry);
+    let prometheus_port = args.prometheus_port;
+
+    Toplevel::new(async move |s: &mut SubsystemHandle| {
+        controller.start_subsystems(s);
+        s.start(SubsystemBuilder::new(
+            "http_server",
+            async move |sub: &mut SubsystemHandle| {
+                http_server
+                    .run(prometheus_port, sub.create_cancellation_token())
+                    .await
+            },
+        ));
+    })
+    .catch_signals()
+    .handle_shutdown_requests(SHUTDOWN_TIMEOUT)
+    .await?;
 
     tracing::info!("Shutting down");
     Ok(())
@@ -184,8 +170,11 @@ fn main() -> anyhow::Result<()> {
 
     init_single_threaded(&args)?;
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(run(args))
+        .build()?;
+    let result = runtime.block_on(run(args));
+    // Don't let stuck spawn_blocking tasks (unabortable) delay the exit
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
 }
