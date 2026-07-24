@@ -67,6 +67,13 @@ impl State {
     }
 
     pub fn take_next_download(&mut self) -> Option<ChunkRef> {
+        // Deletion before download: while any undesired chunk still occupies disk
+        // (present, possibly locked by a running query) or its in-flight download
+        // hasn't been reaped yet, don't start new downloads. Otherwise old and new
+        // data would coexist and the worker could exceed its storage commitment.
+        if self.has_pending_removals() {
+            return None;
+        }
         let chunk_ref = {
             // TODO: use priority queue if it's slow
             let (_dataset, chunks) = self
@@ -80,6 +87,13 @@ impl State {
         self.to_download.remove(&chunk_ref);
         self.downloading.insert(chunk_ref.clone());
         Some(chunk_ref)
+    }
+
+    // Undesired chunks that are still present (locked ones included) or still
+    // being downloaded. While any exist, new downloads are held back.
+    pub fn has_pending_removals(&self) -> bool {
+        self.available.difference(&self.desired).next().is_some()
+            || self.downloading.difference(&self.desired).next().is_some()
     }
 
     pub fn take_removals(&mut self) -> Vec<ChunkRef> {
@@ -146,7 +160,9 @@ impl State {
         }
     }
 
-    pub fn unlock_chunk(&mut self, chunk: &ChunkRef) {
+    /// Returns `true` if this was the last lock on a chunk that awaits removal,
+    /// so the caller can wake the state loop to process it promptly.
+    pub fn unlock_chunk(&mut self, chunk: &ChunkRef) -> bool {
         let remove = self
             .locks
             .get_mut(chunk)
@@ -155,9 +171,11 @@ impl State {
                 *count == 0
             })
             .unwrap_or(false);
-        if remove {
-            self.locks.remove(chunk);
+        if !remove {
+            return false;
         }
+        self.locks.remove(chunk);
+        self.available.contains(chunk) && !self.desired.contains(chunk)
     }
 
     fn lock_chunk(&mut self, chunk: &ChunkRef) {
@@ -187,7 +205,7 @@ mod tests {
 
     use itertools::Itertools;
 
-    use crate::types::state::ChunkRef;
+    use crate::types::state::{ChunkRef, ChunkSet};
 
     use super::State;
 
@@ -214,14 +232,17 @@ mod tests {
 
         state.set_desired_chunks([b.clone(), d.clone()].into_iter().collect());
         assert_eq!(state.get_stale_downloads(), &[c.clone()]);
+        // No new downloads until `a` is removed and the stale download `c` is reaped
+        assert_eq!(state.take_next_download(), None);
         assert_eq!(state.take_removals(), &[a.clone()]);
         assert_eq!(state.take_removals(), &[]);
         assert_eq!(state.get_stale_downloads(), &[c.clone()]);
+        assert_eq!(state.take_next_download(), None);
+        state.complete_download(&c, false);
 
         assert_eq!(state.take_next_download(), Some(d.clone()));
         assert_eq!(state.take_next_download(), None);
         state.complete_download(&d, true);
-        state.complete_download(&c, false);
 
         assert_eq!(
             state.status().available.into_iter().collect_vec(),
@@ -266,6 +287,127 @@ mod tests {
 
         assert_eq!(state.take_removals(), &[a]);
         assert!(state.is_fully_applied());
+    }
+
+    #[test]
+    fn downloads_wait_for_locked_chunk_removal() {
+        let ds = Arc::new("ds".to_owned());
+        let chunk_ref = |x| ChunkRef {
+            dataset: ds.clone(),
+            chunk: Arc::from(format!(
+                "0000000000/000000000{}-000000000{}-00000000",
+                x,
+                x + 1
+            )),
+        };
+        let a = chunk_ref(0);
+        let b = chunk_ref(1);
+        let c = chunk_ref(2);
+
+        let mut state = State::new([a.clone(), b.clone()].into_iter().collect());
+        // A query is using `a` when the new assignment drops it and adds `c`
+        assert!(state
+            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
+            .is_some());
+        state.set_desired_chunks([b.clone(), c.clone()].into_iter().collect());
+
+        // `a` is locked, so it can't be removed yet and downloads must wait
+        assert!(state.has_pending_removals());
+        assert_eq!(state.take_removals(), &[]);
+        assert_eq!(state.take_next_download(), None);
+
+        // Releasing the last lock makes `a` removable and unblocks downloads
+        assert!(state.unlock_chunk(&a));
+        assert_eq!(state.take_removals(), &[a]);
+        assert!(!state.has_pending_removals());
+        assert_eq!(state.take_next_download(), Some(c));
+    }
+
+    #[test]
+    fn unlock_signals_only_the_last_lock_on_an_undesired_chunk() {
+        let ds = Arc::new("ds".to_owned());
+        let a = ChunkRef {
+            dataset: ds.clone(),
+            chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
+        };
+
+        let mut state = State::new([a.clone()].into_iter().collect());
+        assert!(state
+            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
+            .is_some());
+        // Unlocking a still-desired chunk doesn't require a removal pass
+        assert!(!state.unlock_chunk(&a));
+
+        assert!(state
+            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
+            .is_some());
+        assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_some());
+        state.set_desired_chunks(ChunkSet::new());
+        assert!(!state.unlock_chunk(&a), "one lock is still held");
+        assert!(state.unlock_chunk(&a), "the last lock was released");
+    }
+
+    // Known limitation (not yet fixed): a permanently failing download — e.g. a
+    // chunk that was deleted from the bucket and 404s forever — is re-queued on
+    // every failure. There is no retry cap or give-up path, so the assignment
+    // never becomes fully applied and (in mvcc mode) blocks progression to newer
+    // assignments until MAX_PENDING_ASSIGNMENTS of them pile up.
+    #[test]
+    fn permanently_failing_download_is_requeued_forever() {
+        let ds = Arc::new("ds".to_owned());
+        let a = ChunkRef {
+            dataset: ds,
+            chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
+        };
+
+        let mut state = State::new(ChunkSet::new());
+        state.set_desired_chunks([a.clone()].into_iter().collect());
+
+        for _ in 0..100 {
+            assert_eq!(state.take_next_download(), Some(a.clone()));
+            state.complete_download(&a, false);
+            assert!(!state.is_fully_applied());
+        }
+        // Still queued for the 101st attempt — nothing ever gives up
+        assert_eq!(state.take_next_download(), Some(a));
+    }
+
+    // Known limitation (not yet fixed): `get_and_lock_chunk` only checks
+    // availability, so queries arriving after a new assignment can still lock a
+    // chunk that this assignment dropped. A steady stream of such queries defers
+    // the removal indefinitely and, with deletion-before-download, also holds
+    // back all new downloads.
+    #[test]
+    fn undesired_chunk_can_be_relocked_deferring_removal_and_downloads() {
+        let ds = Arc::new("ds".to_owned());
+        let chunk_ref = |x| ChunkRef {
+            dataset: ds.clone(),
+            chunk: Arc::from(format!(
+                "0000000000/000000000{}-000000000{}-00000000",
+                x,
+                x + 1
+            )),
+        };
+        let a = chunk_ref(0);
+        let b = chunk_ref(1);
+
+        let mut state = State::new([a.clone()].into_iter().collect());
+        // The new assignment drops `a` and adds `b`
+        state.set_desired_chunks([b].into_iter().collect());
+
+        // A query arriving *after* the assignment switch can still lock `a`
+        assert!(state
+            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
+            .is_some());
+        // ...which defers both the removal and every new download
+        assert_eq!(state.take_removals(), &[]);
+        assert_eq!(state.take_next_download(), None);
+
+        // Each unlock can be immediately followed by another lock, repeating the cycle
+        assert!(state.unlock_chunk(&a));
+        assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_some());
+        assert_eq!(state.take_removals(), &[]);
+        assert_eq!(state.take_next_download(), None);
     }
 
     #[test]

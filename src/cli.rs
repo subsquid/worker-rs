@@ -30,13 +30,13 @@ pub struct Args {
     #[clap(long, env, default_value_t = 3)]
     pub concurrent_downloads: usize,
 
-    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "60")]
+    #[clap(long, env, hide(true), value_parser=parse_seconds, default_value = "60")]
     pub s3_timeout: Duration,
 
-    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "3")]
+    #[clap(long, env, hide(true), value_parser=parse_seconds, default_value = "3")]
     pub s3_read_timeout: Duration,
 
-    #[clap(env = "DOWNLOADS_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
+    #[clap(long, env = "DOWNLOADS_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
     pub downloads_max_delay: Duration,
 
     #[clap(long, env)]
@@ -50,20 +50,20 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub query_schemas_url: String,
 
-    #[clap(env = "QUERY_SCHEMAS_REFRESH_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
+    #[clap(long, env = "QUERY_SCHEMAS_REFRESH_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
     pub query_schemas_refresh_interval: Duration,
 
-    #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
+    #[clap(long, env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,
 
-    #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
+    #[clap(long, env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
     pub assignment_check_interval: Duration,
 
-    #[clap(env = "ASSIGNMENT_CHECK_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "14400")]
+    #[clap(long, env = "ASSIGNMENT_CHECK_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "14400")]
     pub assignment_fetch_max_delay: Duration,
 
-    #[clap(env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
+    #[clap(long, env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
     pub assignment_fetch_timeout: Duration,
 
     #[clap(long, env, hide(true), default_value_t = false)]
@@ -72,13 +72,16 @@ pub struct Args {
     #[command(flatten)]
     pub transport: TransportArgs,
 
-    #[clap(env, hide(true))]
+    #[clap(long, env, hide(true))]
     pub sentry_dsn: Option<String>,
 
-    #[clap(env, hide(true), default_value_t = 0.001)]
+    #[clap(long, env, hide(true), default_value_t = 0.001)]
     pub sentry_traces_sample_rate: f32,
 
-    #[clap(env, hide(true), default_value_t = true)]
+    // `ArgAction::Set` (rather than the default `SetTrue` for bools) keeps the
+    // value explicit: SENTRY_IS_ENABLED=false must parse as false, not be
+    // treated as "the flag is present".
+    #[clap(long, env, hide(true), default_value_t = true, action = clap::ArgAction::Set)]
     pub sentry_is_enabled: bool,
 }
 

@@ -15,20 +15,39 @@ use super::{datasets_index::RemoteFile, guard::FsGuard, local_fs::add_temp_prefi
 
 const START_DELAY: Duration = Duration::from_millis(100);
 
+/// The subset of [`cli::Args`] the downloader needs. Kept separate so tests
+/// can construct it without going through clap.
+#[derive(Clone, Copy)]
+pub struct DownloadConfig {
+    pub s3_timeout: Duration,
+    pub s3_read_timeout: Duration,
+    pub downloads_max_delay: Duration,
+}
+
+impl From<&cli::Args> for DownloadConfig {
+    fn from(args: &cli::Args) -> Self {
+        Self {
+            s3_timeout: args.s3_timeout,
+            s3_read_timeout: args.s3_read_timeout,
+            downloads_max_delay: args.downloads_max_delay,
+        }
+    }
+}
+
 pub struct ChunkDownloader {
     futures: FuturesUnordered<tokio::task::JoinHandle<(ChunkRef, Result<()>)>>,
     cancel_tokens: HashMap<ChunkRef, CancellationToken>,
     reqwest_client: reqwest::Client,
     current_delay: Duration,
-    args: cli::Args,
+    config: DownloadConfig,
 }
 
 impl ChunkDownloader {
-    pub fn new(peer_id: PeerId, args: cli::Args) -> Self {
+    pub fn new(peer_id: PeerId, config: DownloadConfig) -> Self {
         let client = reqwest::ClientBuilder::new()
             .user_agent(format!("SQD Worker {peer_id}"))
-            .timeout(args.s3_timeout)
-            .read_timeout(args.s3_read_timeout)
+            .timeout(config.s3_timeout)
+            .read_timeout(config.s3_read_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Can't create HTTP client");
@@ -37,7 +56,7 @@ impl ChunkDownloader {
             cancel_tokens: HashMap::default(),
             reqwest_client: client,
             current_delay: Duration::ZERO,
-            args,
+            config,
         }
     }
 }
@@ -62,7 +81,7 @@ impl ChunkDownloader {
         let num_files = files.len();
         let client = self.reqwest_client.clone();
         let current_delay = self.current_delay;
-        let s3_timeout = self.args.s3_timeout;
+        let s3_timeout = self.config.s3_timeout;
         self.futures.push(tokio::spawn(async move {
             if current_delay > Duration::ZERO {
                 let sleep = rand::rng().random_range((current_delay / 2)..current_delay);
@@ -105,7 +124,7 @@ impl ChunkDownloader {
                             } else {
                                 self.current_delay = std::cmp::min(
                                     self.current_delay * 2,
-                                    self.args.downloads_max_delay,
+                                    self.config.downloads_max_delay,
                                 );
                             }
                         }

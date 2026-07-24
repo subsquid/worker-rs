@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    cli::Args,
     metrics,
     types::{
         dataset::{self, Dataset},
@@ -19,7 +18,7 @@ use crate::{
 
 use super::{
     datasets_index::DatasetsIndex,
-    downloader::ChunkDownloader,
+    downloader::{ChunkDownloader, DownloadConfig},
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
     state::{State, UpdateStatus},
@@ -37,7 +36,7 @@ pub struct StateManager {
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
     worker_id: PeerId,
-    args: Args,
+    download_config: DownloadConfig,
 }
 
 pub struct Status {
@@ -62,7 +61,7 @@ impl StateManager {
         workdir: PathBuf,
         concurrent_downloads: usize,
         worker_id: PeerId,
-        args: Args,
+        download_config: DownloadConfig,
     ) -> Result<Self> {
         let fs = LocalFs::new(workdir);
         remove_temps(&fs)?;
@@ -83,12 +82,12 @@ impl StateManager {
             assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
             #[cfg(feature = "mvcc-chunks")]
             assignment_applied_tx,
-            args,
+            download_config,
         })
     }
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
-        let mut downloader = ChunkDownloader::new(self.worker_id, self.args.clone());
+        let mut downloader = ChunkDownloader::new(self.worker_id, self.download_config);
         loop {
             self.state.lock().report_status();
             let stored_bytes = get_directory_size(self.fs.root.clone()).await;
@@ -315,7 +314,13 @@ impl StateManager {
             .lock()
             .get_and_lock_chunk(Arc::new(dataset), Arc::from(chunk_id.to_string()))?;
         let path = self.chunk_path(&chunk);
-        let guard = scopeguard::guard(path, move |_| self.state.lock().unlock_chunk(&chunk));
+        let guard = scopeguard::guard(path, move |_| {
+            if self.state.lock().unlock_chunk(&chunk) {
+                // The last query holding an undesired chunk finished — wake the
+                // state loop so the chunk is removed and downloads can resume.
+                self.notify.notify_one();
+            }
+        });
         Some(guard)
     }
 
@@ -444,7 +449,95 @@ async fn get_directory_size(path: PathBuf) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use camino::Utf8PathBuf as PathBuf;
+    use sqd_network_transport::Keypair;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{DownloadConfig, StateManager};
+    use crate::types::dataset::encode_dataset;
+
+    /// A valid assignment that assigns no chunks to `peer_id`.
+    fn empty_assignment_for(peer_id: sqd_contract_client::PeerId) -> sqd_assignments::Assignment {
+        let mut builder = sqd_assignments::AssignmentBuilder::new("test-secret");
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[]);
+        sqd_assignments::Assignment::from_owned(builder.finish()).unwrap()
+    }
+
+    async fn test_manager(
+        workdir: PathBuf,
+        worker_id: sqd_contract_client::PeerId,
+    ) -> StateManager {
+        let config = DownloadConfig {
+            s3_timeout: Duration::from_secs(1),
+            s3_read_timeout: Duration::from_secs(1),
+            downloads_max_delay: Duration::from_secs(1),
+        };
+        StateManager::new(workdir, 1, worker_id, config)
+            .await
+            .unwrap()
+    }
+
+    // Known limitation (not yet fixed): when registering an assignment fails
+    // (here: the assignment has no entry for this worker), the worker silently
+    // stays on the previous assignment. Combined with the id dedup in the
+    // assignments stream (see `assignment_id_is_consumed_before_the_assignment_
+    // is_known_to_apply` in controller::assignments), the failed assignment is
+    // never offered again — the worker idles on stale data until the network
+    // publishes a *different* assignment id.
+    #[tokio::test]
+    async fn failed_set_assignment_leaves_the_worker_on_the_old_assignment() {
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let manager = test_manager(workdir, worker_id).await;
+
+        assert!(manager.set_assignment(empty_assignment_for(worker_id), "A", &keypair));
+        assert_eq!(
+            manager.current_status().await.assignment_id.as_deref(),
+            Some("A")
+        );
+
+        // Assignment B doesn't include this worker, so registration fails...
+        let other_worker = Keypair::generate_ed25519().public().to_peer_id();
+        assert!(!manager.set_assignment(empty_assignment_for(other_worker), "B", &keypair));
+
+        // ...and the worker keeps reporting A, with no retry path for B
+        assert_eq!(
+            manager.current_status().await.assignment_id.as_deref(),
+            Some("A")
+        );
+    }
+
+    // Known limitation (not yet fixed): a failed chunk removal panics the state
+    // loop — and with it the whole worker — instead of being retried or surfaced
+    // as an error. Any transient FS hiccup during cleanup is fatal.
+    #[tokio::test]
+    #[should_panic(expected = "Couldn't remove chunk")]
+    async fn removal_failure_panics_the_state_loop() {
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+
+        // One chunk is on disk at startup, so it is loaded as available
+        let chunk_dir = workdir
+            .join(encode_dataset("s3://ds"))
+            .join("0000000000/0000000000-0000000001-abcdef");
+        std::fs::create_dir_all(&chunk_dir).unwrap();
+
+        let manager = test_manager(workdir, worker_id).await;
+
+        // The new assignment holds no chunks, scheduling the local one for removal
+        assert!(manager.set_assignment(empty_assignment_for(worker_id), "A", &keypair));
+
+        // Sabotage the removal: the chunk dir vanishes behind the manager's back
+        std::fs::remove_dir_all(&chunk_dir).unwrap();
+
+        manager.run(CancellationToken::new()).await;
+    }
 
     #[test]
     fn test_join_glob() {
