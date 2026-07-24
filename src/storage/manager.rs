@@ -47,13 +47,15 @@ pub struct Status {
     pub last_applied_assignment_id: Option<String>,
 }
 
+// pub(super) so the property-based tests in `super::state_pbt` can drive the
+// check-and-mark critical section directly.
 #[cfg(feature = "mvcc-chunks")]
 #[derive(Debug, Default)]
-struct AssignmentApplicationStatus {
-    current_assignment_id: Option<String>,
+pub(super) struct AssignmentApplicationStatus {
+    pub(super) current_assignment_id: Option<String>,
     // Intentionally remains set while a newer assignment is being applied.
     // This reports the latest fully applied assignment, not the current target.
-    last_applied_assignment_id: Option<String>,
+    pub(super) last_applied_assignment_id: Option<String>,
 }
 
 /// Terminal per-assignment verdict published on the settled channel.
@@ -248,6 +250,16 @@ impl StateManager {
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
         let mut index = self.datasets_index.lock();
+        // The settled-check correlates current_assignment_id with the chunk
+        // state, so the two must be updated atomically with respect to it:
+        // take the application lock before touching the desired chunks and
+        // hold it across both updates (lock order: index → application →
+        // state, same as everywhere else). Otherwise the state loop could
+        // observe the new desired set paired with the old assignment id and
+        // confirm a never-applied assignment based on the new one's chunks —
+        // found by the property test in `super::state_pbt::confirmation`.
+        #[cfg(feature = "mvcc-chunks")]
+        let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
         match state.set_desired_chunks(chunks) {
@@ -258,13 +270,14 @@ impl StateManager {
             }
         }
         *index = Some(datasets_index);
-        drop(state);
-        drop(index);
-
         #[cfg(feature = "mvcc-chunks")]
         {
-            self.assignment_application.lock().current_assignment_id = Some(current_assignment_id);
+            assignment_application.current_assignment_id = Some(current_assignment_id);
         }
+        drop(state);
+        #[cfg(feature = "mvcc-chunks")]
+        drop(assignment_application);
+        drop(index);
 
         #[cfg(feature = "mvcc-chunks")]
         self.mark_current_assignment_settled_if_ready();
@@ -375,7 +388,7 @@ impl StateManager {
 // Free function (rather than a `StateManager` method) so tests can drive the exact
 // check-and-mark critical section without constructing a full `StateManager`.
 #[cfg(feature = "mvcc-chunks")]
-fn mark_assignment_settled_if_ready(
+pub(super) fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
     assignment_application: &Mutex<AssignmentApplicationStatus>,
     assignment_settled_tx: &tokio::sync::watch::Sender<Option<AssignmentSettled>>,

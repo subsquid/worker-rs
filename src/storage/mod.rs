@@ -9,6 +9,8 @@ pub mod layout;
 pub mod local_fs;
 pub mod manager;
 pub mod state;
+#[cfg(test)]
+mod state_pbt;
 
 #[allow(async_fn_in_trait)]
 pub trait Filesystem {

@@ -78,6 +78,7 @@ sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f"
 
 [dev-dependencies]
 arrow = "54.2.1"
+proptest = "1"
 parquet = { version = "54.2.1", features = ["arrow"] }
 sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", features = ["builder"] }
 tempfile = "3"

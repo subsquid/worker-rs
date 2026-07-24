@@ -224,6 +224,62 @@ impl State {
         *self.locks.entry(chunk.clone()).or_insert(0) += 1;
     }
 
+    /// Structural invariants that must hold after every operation. Only used
+    /// by the property-based tests in [`super::state_pbt`].
+    #[cfg(test)]
+    pub(super) fn assert_invariants(&self) {
+        assert!(
+            self.available.is_disjoint(&self.downloading),
+            "available and downloading must not intersect"
+        );
+        let expected_to_download: ChunkSet = self
+            .desired
+            .iter()
+            .filter(|chunk| {
+                !self.available.contains(*chunk)
+                    && !self.downloading.contains(*chunk)
+                    && !self.failed_downloads.contains(*chunk)
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            self.to_download, expected_to_download,
+            "to_download must equal desired − available − downloading − failed_downloads"
+        );
+        assert!(
+            self.failed_downloads
+                .iter()
+                .all(|chunk| self.desired.contains(chunk) && !self.available.contains(chunk)),
+            "given-up chunks must be desired and missing"
+        );
+        assert!(
+            self.locks
+                .keys()
+                .all(|chunk| self.available.contains(chunk)),
+            "locks must only be held on available chunks"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn available(&self) -> &ChunkSet {
+        &self.available
+    }
+
+    #[cfg(test)]
+    pub(super) fn downloading(&self) -> &ChunkSet {
+        &self.downloading
+    }
+
+    #[cfg(test)]
+    pub(super) fn desired(&self) -> &ChunkSet {
+        &self.desired
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_queued_downloads(&self) -> bool {
+        !self.to_download.is_empty()
+    }
+
     pub fn report_status(&self) {
         info!(
             "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}",
