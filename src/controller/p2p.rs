@@ -39,6 +39,8 @@ use crate::{
 use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::worker::Worker;
+#[cfg(feature = "mvcc-chunks")]
+use crate::storage::manager::AssignmentOutcome;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
@@ -286,6 +288,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
         #[cfg(feature = "mvcc-chunks")]
         let mut processing_id: Option<String> = None;
+        // The assignment in `processing_id` stalled: some of its chunks exhausted
+        // their download attempts, so it will never become fully applied.
+        #[cfg(feature = "mvcc-chunks")]
+        let mut processing_stalled = false;
         #[cfg(not(feature = "mvcc-chunks"))]
         let processing_id: Option<String> = None;
 
@@ -340,6 +346,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     #[cfg(feature = "mvcc-chunks")]
                     if registered {
                         processing_id = Some(id);
+                        processing_stalled = false;
                     }
                     #[cfg(not(feature = "mvcc-chunks"))]
                     let _ = registered;
@@ -350,6 +357,33 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
             #[cfg(feature = "mvcc-chunks")]
             match processing_id.clone() {
+                // The current assignment stalled — it can never be fully applied.
+                // Jump over it to the most recent assignment as soon as anything
+                // newer exists; until then only watch the update stream (the
+                // stall is terminal, so there is nothing to wait for in the
+                // state manager).
+                Some(id) if processing_stalled => {
+                    if !pending.is_empty() {
+                        let skipped = keep_only_latest_pending_assignment(&mut pending);
+                        warn!(
+                            assignment_id = %id,
+                            skipped,
+                            "Skipping stalled assignment in favor of the most recent one"
+                        );
+                        processing_id = None;
+                        processing_stalled = false;
+                        continue;
+                    }
+                    tokio::select! {
+                        update = assignments.next() => {
+                            let Some(update) = update else {
+                                break;
+                            };
+                            push_pending_assignment(&mut pending, update);
+                        }
+                        _ = cancellation_token.cancelled() => break,
+                    }
+                }
                 Some(id) => {
                     tokio::select! {
                         update = assignments.next() => {
@@ -361,11 +395,17 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                                 processing_id = None;
                             }
                         }
-                        applied = self.worker.wait_until_assignment_applied(&id, cancellation_token.clone()) => {
-                            if !applied {
-                                break;
+                        settled = self.worker.wait_until_assignment_settled(&id, cancellation_token.clone()) => {
+                            match settled {
+                                None => break,
+                                Some(AssignmentOutcome::Applied) => {
+                                    processing_id = None;
+                                }
+                                Some(AssignmentOutcome::Stalled) => {
+                                    warn!(assignment_id = %id, "Assignment stalled: some chunks exhausted their download attempts");
+                                    processing_stalled = true;
+                                }
                             }
-                            processing_id = None;
                         }
                     }
                 }
@@ -417,16 +457,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Refresh on the periodic timer and, additionally, when an assignment
-        // becomes fully applied (prompt last_applied_assignment_id, via the
-        // existing applied signal).
+        // settles (applied → prompt last_applied_assignment_id; stalled → prompt
+        // missing-chunks bitmap).
         #[cfg(feature = "mvcc-chunks")]
-        let mut assignment_applied = Some(self.worker.subscribe_assignment_applied());
+        let mut assignment_settled = Some(self.worker.subscribe_assignment_settled());
         #[cfg(not(feature = "mvcc-chunks"))]
-        let mut assignment_applied: Option<tokio::sync::watch::Receiver<Option<String>>> = None;
+        let mut assignment_settled: Option<tokio::sync::watch::Receiver<Option<String>>> = None;
         loop {
             tokio::select! {
                 _ = timer.tick() => {}
-                _ = wait_for_assignment_applied(&mut assignment_applied) => {}
+                _ = wait_for_assignment_settled(&mut assignment_settled) => {}
                 _ = cancellation_token.cancelled() => break,
             }
             let status =
@@ -793,17 +833,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 }
 
-// Resolves when the current assignment becomes fully applied. `applied` is `None`
-// in non-mvcc builds (no "applied" concept), so it never resolves and the status
-// loop relies on the periodic timer only.
-async fn wait_for_assignment_applied(
-    applied: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
-) {
-    match applied {
-        Some(applied) => applied
+// Resolves when the current assignment settles (applied or stalled). `settled`
+// is `None` in non-mvcc builds (no settling concept), so it never resolves and
+// the status loop relies on the periodic timer only. Generic because the two
+// builds name different payload types for the never-used `None` receiver.
+async fn wait_for_assignment_settled<T>(settled: &mut Option<tokio::sync::watch::Receiver<T>>) {
+    match settled {
+        Some(settled) => settled
             .changed()
             .await
-            .expect("assignment_applied sender outlives the status loop"),
+            .expect("assignment_settled sender outlives the status loop"),
         None => std::future::pending::<()>().await,
     }
 }

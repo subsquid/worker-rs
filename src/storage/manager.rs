@@ -32,7 +32,7 @@ pub struct StateManager {
     #[cfg(feature = "mvcc-chunks")]
     assignment_application: Mutex<AssignmentApplicationStatus>,
     #[cfg(feature = "mvcc-chunks")]
-    assignment_applied_tx: tokio::sync::watch::Sender<Option<String>>,
+    assignment_settled_tx: tokio::sync::watch::Sender<Option<AssignmentSettled>>,
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
     worker_id: PeerId,
@@ -56,6 +56,25 @@ struct AssignmentApplicationStatus {
     last_applied_assignment_id: Option<String>,
 }
 
+/// Terminal per-assignment verdict published on the settled channel.
+#[cfg(feature = "mvcc-chunks")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentSettled {
+    pub id: String,
+    pub outcome: AssignmentOutcome,
+}
+
+#[cfg(feature = "mvcc-chunks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentOutcome {
+    /// All desired chunks are present.
+    Applied,
+    /// Some chunks exhausted their download attempts and no download work is
+    /// left — this assignment can never become fully applied. The assignment
+    /// loop should jump over it as soon as a newer assignment is available.
+    Stalled,
+}
+
 impl StateManager {
     pub async fn new(
         workdir: PathBuf,
@@ -69,7 +88,7 @@ impl StateManager {
         debug!("Loaded state: {:#?}", existing_chunks);
 
         #[cfg(feature = "mvcc-chunks")]
-        let (assignment_applied_tx, _) = tokio::sync::watch::channel(None);
+        let (assignment_settled_tx, _) = tokio::sync::watch::channel(None);
 
         Ok(Self {
             fs,
@@ -81,7 +100,7 @@ impl StateManager {
             #[cfg(feature = "mvcc-chunks")]
             assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
             #[cfg(feature = "mvcc-chunks")]
-            assignment_applied_tx,
+            assignment_settled_tx,
             download_config,
         })
     }
@@ -144,19 +163,21 @@ impl StateManager {
             }
             #[cfg(feature = "mvcc-chunks")]
             {
-                self.mark_current_assignment_applied_if_ready();
+                self.mark_current_assignment_settled_if_ready();
             }
         }
         info!("State manager loop finished");
     }
 
-    /// Subscribe to the "assignment fully applied" signal. The receiver observes a
-    /// change each time `last_applied_assignment_id` advances, i.e. when the current
-    /// assignment's chunks are all present. Used to refresh the reported status
-    /// promptly on application instead of waiting for the periodic status timer.
+    /// Subscribe to the "assignment settled" signal: an event fires when the
+    /// current assignment becomes fully applied (all chunks present) or stalls
+    /// (some chunks exhausted their download attempts). Used to refresh the
+    /// reported status promptly instead of waiting for the periodic timer.
     #[cfg(feature = "mvcc-chunks")]
-    pub fn subscribe_assignment_applied(&self) -> tokio::sync::watch::Receiver<Option<String>> {
-        self.assignment_applied_tx.subscribe()
+    pub fn subscribe_assignment_settled(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<AssignmentSettled>> {
+        self.assignment_settled_tx.subscribe()
     }
 
     #[instrument(skip_all)]
@@ -246,7 +267,7 @@ impl StateManager {
         }
 
         #[cfg(feature = "mvcc-chunks")]
-        self.mark_current_assignment_applied_if_ready();
+        self.mark_current_assignment_settled_if_ready();
 
         match status {
             sqd_assignments::WorkerStatus::Ok => {
@@ -269,24 +290,24 @@ impl StateManager {
         true
     }
 
+    /// Waits until the given assignment settles — fully applied or stalled.
+    /// Returns `None` when cancelled or the manager is gone.
     #[cfg(feature = "mvcc-chunks")]
-    pub async fn wait_until_assignment_applied(
+    pub async fn wait_until_assignment_settled(
         &self,
         assignment_id: &str,
         cancellation_token: CancellationToken,
-    ) -> bool {
-        let mut assignment_applied_rx = self.assignment_applied_tx.subscribe();
+    ) -> Option<AssignmentOutcome> {
+        let mut assignment_settled_rx = self.assignment_settled_tx.subscribe();
         loop {
-            if assignment_applied_rx.borrow().as_deref() == Some(assignment_id) {
-                return true;
+            if let Some(settled) = assignment_settled_rx.borrow_and_update().as_ref() {
+                if settled.id == assignment_id {
+                    return Some(settled.outcome);
+                }
             }
             tokio::select! {
-                changed = assignment_applied_rx.changed() => {
-                    if changed.is_err() {
-                        return false;
-                    }
-                }
-                _ = cancellation_token.cancelled() => return false,
+                changed = assignment_settled_rx.changed() => changed.ok()?,
+                _ = cancellation_token.cancelled() => return None,
             }
         }
     }
@@ -342,11 +363,11 @@ impl StateManager {
     }
 
     #[cfg(feature = "mvcc-chunks")]
-    fn mark_current_assignment_applied_if_ready(&self) {
-        mark_assignment_applied_if_ready(
+    fn mark_current_assignment_settled_if_ready(&self) {
+        mark_assignment_settled_if_ready(
             &self.state,
             &self.assignment_application,
-            &self.assignment_applied_tx,
+            &self.assignment_settled_tx,
         );
     }
 }
@@ -354,10 +375,10 @@ impl StateManager {
 // Free function (rather than a `StateManager` method) so tests can drive the exact
 // check-and-mark critical section without constructing a full `StateManager`.
 #[cfg(feature = "mvcc-chunks")]
-fn mark_assignment_applied_if_ready(
+fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
     assignment_application: &Mutex<AssignmentApplicationStatus>,
-    assignment_applied_tx: &tokio::sync::watch::Sender<Option<String>>,
+    assignment_settled_tx: &tokio::sync::watch::Sender<Option<AssignmentSettled>>,
 ) {
     let mut assignment_application = assignment_application.lock();
     let Some(current_assignment_id) = assignment_application.current_assignment_id.clone() else {
@@ -368,11 +389,27 @@ fn mark_assignment_applied_if_ready(
     {
         return;
     }
-    if !state.lock().is_fully_applied() {
-        return;
+    let (applied, stalled) = {
+        let state = state.lock();
+        (state.is_fully_applied(), state.is_stalled())
+    };
+    if applied {
+        // Only a full application advances last_applied_assignment_id.
+        assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
+        let _ = assignment_settled_tx.send(Some(AssignmentSettled {
+            id: current_assignment_id,
+            outcome: AssignmentOutcome::Applied,
+        }));
+    } else if stalled {
+        let settled = AssignmentSettled {
+            id: current_assignment_id,
+            outcome: AssignmentOutcome::Stalled,
+        };
+        // watch notifies on every send; don't wake subscribers with duplicates
+        if assignment_settled_tx.borrow().as_ref() != Some(&settled) {
+            let _ = assignment_settled_tx.send(Some(settled));
+        }
     }
-    assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
-    let _ = assignment_applied_tx.send(Some(current_assignment_id));
 }
 
 #[instrument(skip_all)]
@@ -545,9 +582,17 @@ mod tests {
         assert_eq!(PathBuf::from("a/b").join("**/*.c").as_str(), "a/b/**/*.c");
     }
 
+    #[cfg(feature = "mvcc-chunks")]
+    fn settled(id: &str, outcome: super::AssignmentOutcome) -> Option<super::AssignmentSettled> {
+        Some(super::AssignmentSettled {
+            id: id.to_owned(),
+            outcome,
+        })
+    }
+
     // Reproduces one specific interleaving between `set_assignment` and the state
     // loop's periodic check that used to let a not-yet-applied assignment be reported
-    // as applied (see git history of `mark_assignment_applied_if_ready`). It is not an
+    // as applied (see git history of `mark_assignment_settled_if_ready`). It is not an
     // exhaustive test of every possible interleaving, just this one.
     #[cfg(feature = "mvcc-chunks")]
     #[test]
@@ -556,7 +601,9 @@ mod tests {
 
         use parking_lot::Mutex;
 
-        use super::{mark_assignment_applied_if_ready, AssignmentApplicationStatus, State};
+        use super::{
+            mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
+        };
         use crate::types::state::{ChunkRef, ChunkSet};
 
         let chunk = |id: &str| ChunkRef {
@@ -573,8 +620,8 @@ mod tests {
             current_assignment_id: Some("A".to_owned()),
             last_applied_assignment_id: Some("A".to_owned()),
         });
-        let (assignment_applied_tx, assignment_applied_rx) =
-            tokio::sync::watch::channel(Some("A".to_owned()));
+        let (assignment_settled_tx, assignment_settled_rx) =
+            tokio::sync::watch::channel(settled("A", AssignmentOutcome::Applied));
 
         // Step 1: `set_assignment(B)` updates the desired chunks first. B additionally
         // needs `chunk_b`, which isn't available yet, so state stops being fully applied.
@@ -585,7 +632,7 @@ mod tests {
         // Step 2: the state loop's own check races in before `current_assignment_id`
         // has been updated to B. `current_assignment_id` is still A, which is already
         // marked applied, so this must be a no-op.
-        mark_assignment_applied_if_ready(&state, &assignment_application, &assignment_applied_tx);
+        mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
             Some("A".to_owned())
@@ -598,13 +645,16 @@ mod tests {
         // missing, so B must NOT be marked applied here. Before the fix, a
         // `fully_applied` bool captured back in step 1 (still `true`, for A) would
         // have been reused here and wrongly marked B applied.
-        mark_assignment_applied_if_ready(&state, &assignment_application, &assignment_applied_tx);
+        mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
             Some("A".to_owned()),
             "B must not be marked applied while chunk_b is still missing"
         );
-        assert_eq!(*assignment_applied_rx.borrow(), Some("A".to_owned()));
+        assert_eq!(
+            *assignment_settled_rx.borrow(),
+            settled("A", AssignmentOutcome::Applied)
+        );
 
         // Step 5: `chunk_b` finishes downloading, so B genuinely becomes fully applied.
         state.lock().take_next_download();
@@ -612,11 +662,63 @@ mod tests {
         assert!(state.lock().is_fully_applied());
 
         // Step 6: only now should B be marked applied.
-        mark_assignment_applied_if_ready(&state, &assignment_application, &assignment_applied_tx);
+        mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
             Some("B".to_owned())
         );
-        assert_eq!(*assignment_applied_rx.borrow(), Some("B".to_owned()));
+        assert_eq!(
+            *assignment_settled_rx.borrow(),
+            settled("B", AssignmentOutcome::Applied)
+        );
+    }
+
+    // A stalled assignment (chunks exhausted their download attempts) is
+    // published as Stalled on the settled channel but never advances
+    // last_applied_assignment_id — the heartbeat stays honest.
+    #[cfg(feature = "mvcc-chunks")]
+    #[test]
+    fn reports_stalled_assignment_without_marking_it_applied() {
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+
+        use super::{
+            mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
+        };
+        use crate::storage::state::MAX_DOWNLOAD_ATTEMPTS;
+        use crate::types::state::{ChunkRef, ChunkSet};
+
+        let chunk_a = ChunkRef {
+            dataset: Arc::new("ds".to_owned()),
+            chunk: Arc::from("a"),
+        };
+
+        let mut state = State::new(ChunkSet::new());
+        state.set_desired_chunks([chunk_a.clone()].into_iter().collect());
+        for _ in 0..MAX_DOWNLOAD_ATTEMPTS {
+            assert_eq!(state.take_next_download(), Some(chunk_a.clone()));
+            state.complete_download(&chunk_a, false);
+        }
+        assert!(state.is_stalled());
+
+        let state = Mutex::new(state);
+        let assignment_application = Mutex::new(AssignmentApplicationStatus {
+            current_assignment_id: Some("A".to_owned()),
+            last_applied_assignment_id: None,
+        });
+        let (assignment_settled_tx, assignment_settled_rx) = tokio::sync::watch::channel(None);
+
+        mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
+
+        assert_eq!(
+            *assignment_settled_rx.borrow(),
+            settled("A", AssignmentOutcome::Stalled)
+        );
+        assert_eq!(
+            assignment_application.lock().last_applied_assignment_id,
+            None,
+            "a stalled assignment must not be reported as applied"
+        );
     }
 }

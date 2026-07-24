@@ -1,19 +1,27 @@
 use itertools::Itertools;
 use std::collections::HashMap;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use crate::{
     metrics,
     types::state::{ChunkId, ChunkRef, ChunkSet, DatasetId},
 };
 
+/// How many times a chunk download may fail before the worker gives up on it
+/// until the next assignment. Attempts are spaced by the downloader's global
+/// backoff, so the budget is not burned in a tight loop.
+pub const MAX_DOWNLOAD_ATTEMPTS: u32 = 5;
+
 #[derive(Debug, Default)]
 pub struct State {
     available: ChunkSet,
     downloading: ChunkSet, // available and downloading don't intersect
     desired: ChunkSet,
-    to_download: ChunkSet, // to_download is always equal to desired.diff(available).diff(downloading)
+    to_download: ChunkSet, // always equal to desired.diff(available).diff(downloading).diff(failed_downloads)
     locks: HashMap<ChunkRef, u8>, // stores ref count for each chunk
+    // Both reset on every new assignment — each assignment gets a fresh download budget
+    download_attempts: HashMap<ChunkRef, u32>, // failed attempts per desired chunk
+    failed_downloads: ChunkSet, // desired chunks that exhausted their download attempts
 }
 
 #[derive(Debug)]
@@ -45,6 +53,11 @@ impl State {
         };
 
         self.desired = desired;
+        // Fresh download budget: chunks that exhausted their attempts under the
+        // previous assignment are retried under the new one, which may carry
+        // fixed URLs or credentials.
+        self.download_attempts.clear();
+        self.failed_downloads.clear();
         self.to_download = self
             .desired
             .iter()
@@ -124,9 +137,24 @@ impl State {
             .take(chunk)
             .unwrap_or_else(|| panic!("Completing download of unknown chunk: {chunk}"));
         if success {
+            self.download_attempts.remove(&chunk);
+            self.failed_downloads.remove(&chunk);
             self.available.insert(chunk);
         } else if self.desired.contains(&chunk) {
-            self.to_download.insert(chunk);
+            let attempts = self.download_attempts.entry(chunk.clone()).or_insert(0);
+            *attempts += 1;
+            if *attempts >= MAX_DOWNLOAD_ATTEMPTS {
+                // Give up until the next assignment. The chunk keeps being
+                // reported as missing; if nothing else is left to download,
+                // the assignment counts as stalled.
+                warn!("Giving up on chunk {chunk} after {MAX_DOWNLOAD_ATTEMPTS} download attempts");
+                self.download_attempts.remove(&chunk);
+                self.failed_downloads.insert(chunk);
+            } else {
+                self.to_download.insert(chunk);
+            }
+        } else {
+            self.download_attempts.remove(&chunk);
         }
     }
 
@@ -140,6 +168,16 @@ impl State {
                 .desired
                 .iter()
                 .all(|chunk| self.available.contains(chunk))
+    }
+
+    /// No download work is left, but some desired chunks were given up on after
+    /// exhausting their attempts — this assignment can never become fully
+    /// applied. Terminal until the next assignment resets the budget.
+    #[cfg(any(feature = "mvcc-chunks", test))]
+    pub fn is_stalled(&self) -> bool {
+        !self.failed_downloads.is_empty()
+            && self.to_download.is_empty()
+            && self.downloading.iter().all(|c| !self.desired.contains(c))
     }
 
     pub fn get_and_lock_chunk(&mut self, dataset: DatasetId, chunk: ChunkId) -> Option<ChunkRef> {
@@ -188,10 +226,11 @@ impl State {
 
     pub fn report_status(&self) {
         info!(
-            "Chunks available: {}, downloading: {}, pending downloads: {}",
+            "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}",
             self.available.len(),
             self.downloading.len(),
-            self.to_download.len()
+            self.to_download.len(),
+            self.failed_downloads.len()
         );
         metrics::CHUNKS_AVAILABLE.set(self.available.len() as i64);
         metrics::CHUNKS_DOWNLOADING.set(self.downloading.len() as i64);
@@ -207,7 +246,7 @@ mod tests {
 
     use crate::types::state::{ChunkRef, ChunkSet};
 
-    use super::State;
+    use super::{State, MAX_DOWNLOAD_ATTEMPTS};
 
     #[test]
     fn test_state() {
@@ -347,13 +386,13 @@ mod tests {
         assert!(state.unlock_chunk(&a), "the last lock was released");
     }
 
-    // Known limitation (not yet fixed): a permanently failing download — e.g. a
-    // chunk that was deleted from the bucket and 404s forever — is re-queued on
-    // every failure. There is no retry cap or give-up path, so the assignment
-    // never becomes fully applied and (in mvcc mode) blocks progression to newer
-    // assignments until MAX_PENDING_ASSIGNMENTS of them pile up.
+    // A permanently failing download — e.g. a chunk deleted from the bucket —
+    // is given up on after MAX_DOWNLOAD_ATTEMPTS instead of being re-queued
+    // forever, and the assignment becomes stalled (never fully applied) so the
+    // assignment loop can jump over it. The budget is per assignment: the next
+    // one retries the chunk from scratch.
     #[test]
-    fn permanently_failing_download_is_requeued_forever() {
+    fn failing_download_is_given_up_after_attempt_cap() {
         let ds = Arc::new("ds".to_owned());
         let a = ChunkRef {
             dataset: ds,
@@ -363,13 +402,26 @@ mod tests {
         let mut state = State::new(ChunkSet::new());
         state.set_desired_chunks([a.clone()].into_iter().collect());
 
-        for _ in 0..100 {
+        for _ in 0..MAX_DOWNLOAD_ATTEMPTS {
             assert_eq!(state.take_next_download(), Some(a.clone()));
+            assert!(!state.is_stalled(), "still work in progress");
             state.complete_download(&a, false);
-            assert!(!state.is_fully_applied());
         }
-        // Still queued for the 101st attempt — nothing ever gives up
-        assert_eq!(state.take_next_download(), Some(a));
+
+        // Given up: no more retries; not applied, but stalled
+        assert_eq!(state.take_next_download(), None);
+        assert!(!state.is_fully_applied());
+        assert!(state.is_stalled());
+
+        // A new assignment resets the budget and retries the chunk
+        state.set_desired_chunks([a.clone()].into_iter().collect());
+        assert!(!state.is_stalled());
+        assert_eq!(state.take_next_download(), Some(a.clone()));
+
+        // A success clears the failure bookkeeping entirely
+        state.complete_download(&a, true);
+        assert!(state.is_fully_applied());
+        assert!(!state.is_stalled());
     }
 
     // Known limitation (not yet fixed): `get_and_lock_chunk` only checks

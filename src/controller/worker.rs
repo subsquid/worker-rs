@@ -80,14 +80,16 @@ impl Worker {
         self.state_manager.set_assignment(assignment, id, key)
     }
 
+    /// Waits until the given assignment settles — fully applied or stalled.
+    /// Returns `None` when cancelled.
     #[cfg(feature = "mvcc-chunks")]
-    pub async fn wait_until_assignment_applied(
+    pub async fn wait_until_assignment_settled(
         &self,
         assignment_id: &str,
         cancellation_token: CancellationToken,
-    ) -> bool {
+    ) -> Option<manager::AssignmentOutcome> {
         self.state_manager
-            .wait_until_assignment_applied(assignment_id, cancellation_token)
+            .wait_until_assignment_settled(assignment_id, cancellation_token)
             .await
     }
 
@@ -99,11 +101,13 @@ impl Worker {
         self.state_manager.current_status().await
     }
 
-    /// Subscribe to the "assignment fully applied" signal, so callers can refresh
-    /// the reported status promptly when last_applied_assignment_id advances.
+    /// Subscribe to the "assignment settled" signal (applied or stalled), so
+    /// callers can refresh the reported status promptly.
     #[cfg(feature = "mvcc-chunks")]
-    pub fn subscribe_assignment_applied(&self) -> tokio::sync::watch::Receiver<Option<String>> {
-        self.state_manager.subscribe_assignment_applied()
+    pub fn subscribe_assignment_settled(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<manager::AssignmentSettled>> {
+        self.state_manager.subscribe_assignment_settled()
     }
 
     pub async fn run_query(
