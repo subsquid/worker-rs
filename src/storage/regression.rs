@@ -20,38 +20,6 @@ use super::manager::{
 use super::state::State;
 use crate::types::state::{ChunkRef, ChunkSet};
 
-fn chunk() -> ChunkRef {
-    ChunkRef {
-        dataset: Arc::new("ds".to_owned()),
-        chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
-    }
-}
-
-struct Pipeline {
-    state: Mutex<State>,
-    application: Mutex<AssignmentApplicationStatus>,
-    settled_tx: tokio::sync::watch::Sender<Option<AssignmentSettled>>,
-}
-
-impl Pipeline {
-    fn new() -> Self {
-        let (settled_tx, _) = tokio::sync::watch::channel(None);
-        Self {
-            state: Mutex::new(State::new(ChunkSet::new())),
-            application: Mutex::new(AssignmentApplicationStatus::default()),
-            settled_tx,
-        }
-    }
-
-    fn mark(&self) {
-        mark_assignment_settled_if_ready(&self.state, &self.application, &self.settled_tx);
-    }
-
-    fn last_applied(&self) -> Option<String> {
-        self.application.lock().last_applied_assignment_id.clone()
-    }
-}
-
 // The counterexample replayed verbatim, driving the settled-check with the
 // mixed observation directly. The wrong confirmation DOES happen here: the
 // mark function cannot detect the inconsistency by itself — the guarantee is
@@ -120,4 +88,36 @@ fn atomic_registration_never_confirms_the_undownloaded_assignment() {
             outcome: AssignmentOutcome::Applied,
         })
     );
+}
+
+struct Pipeline {
+    state: Mutex<State>,
+    application: Mutex<AssignmentApplicationStatus>,
+    settled_tx: tokio::sync::watch::Sender<Option<AssignmentSettled>>,
+}
+
+impl Pipeline {
+    fn new() -> Self {
+        let (settled_tx, _) = tokio::sync::watch::channel(None);
+        Self {
+            state: Mutex::new(State::new(ChunkSet::new())),
+            application: Mutex::new(AssignmentApplicationStatus::default()),
+            settled_tx,
+        }
+    }
+
+    fn mark(&self) {
+        mark_assignment_settled_if_ready(&self.state, &self.application, &self.settled_tx);
+    }
+
+    fn last_applied(&self) -> Option<String> {
+        self.application.lock().last_applied_assignment_id.clone()
+    }
+}
+
+fn chunk() -> ChunkRef {
+    ChunkRef {
+        dataset: Arc::new("ds".to_owned()),
+        chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
+    }
 }

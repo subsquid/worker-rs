@@ -24,21 +24,62 @@ const UNIVERSE: usize = 8;
 /// pending work, so hitting it means the state machine is wedged.
 const DRAIN_STEP_LIMIT: usize = 10_000;
 
-fn chunk(i: usize) -> ChunkRef {
-    // Two datasets so the per-dataset download scheduling is exercised too
-    let dataset = if i < UNIVERSE / 2 { "ds0" } else { "ds1" };
-    ChunkRef {
-        dataset: Arc::new(dataset.to_owned()),
-        chunk: Arc::from(format!(
-            "0000000000/000000000{}-000000000{}-00000000",
-            i,
-            i + 1
-        )),
-    }
-}
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
 
-fn chunk_set(indexes: &[usize]) -> ChunkSet {
-    indexes.iter().map(|&i| chunk(i)).collect()
+    #[test]
+    fn random_op_sequences_uphold_ordering_liveness_and_bookkeeping(
+        ops in prop::collection::vec(arb_op(), 1..200),
+    ) {
+        let mut state = State::new(ChunkSet::new());
+        let mut shadow = Shadow::default();
+
+        for op in &ops {
+            apply_op(&mut state, &mut shadow, op);
+            state.assert_invariants();
+        }
+        drain(&mut state, &mut shadow);
+    }
+
+    // The attempt cap in isolation: however the failures are interleaved with
+    // other work, a chunk is offered at most MAX_DOWNLOAD_ATTEMPTS times per
+    // assignment when every attempt fails.
+    #[test]
+    fn a_chunk_is_never_attempted_more_than_the_cap_per_assignment(
+        target in 0..UNIVERSE,
+        ops in prop::collection::vec(arb_op(), 1..100),
+    ) {
+        let mut state = State::new(ChunkSet::new());
+        let mut shadow = Shadow::default();
+        let mut attempts_since_assignment = 0u32;
+        let target = chunk(target);
+
+        for op in &ops {
+            if matches!(op, Op::NewAssignment(_)) {
+                attempts_since_assignment = 0;
+            }
+            // Force every download of the target chunk to fail immediately
+            if matches!(op, Op::TakeDownload) {
+                if let Some(chunk) = state.take_next_download() {
+                    assert_no_overcommit(&state);
+                    if chunk == target {
+                        attempts_since_assignment += 1;
+                        prop_assert!(
+                            attempts_since_assignment <= MAX_DOWNLOAD_ATTEMPTS,
+                            "chunk retried past the attempt cap within one assignment"
+                        );
+                        state.complete_download(&chunk, false);
+                    } else {
+                        shadow.in_flight.push(chunk);
+                    }
+                }
+                state.assert_invariants();
+                continue;
+            }
+            apply_op(&mut state, &mut shadow, op);
+            state.assert_invariants();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,8 +90,9 @@ enum Op {
     TakeDownload,
     /// An in-flight download finishes; `pick` selects which one.
     CompleteDownload { pick: usize, success: bool },
-    /// A query locks the given chunk (no-op if it isn't available).
-    Lock(usize),
+    /// A query locks the chunk with the given universe index (no-op if it
+    /// isn't available).
+    Lock { target: usize },
     /// A query finishes, releasing one outstanding lock; `pick` selects which.
     Unlock { pick: usize },
     /// The manager loop collects removable chunks.
@@ -63,7 +105,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         4 => Just(Op::TakeDownload),
         4 => (0..UNIVERSE, any::<bool>())
             .prop_map(|(pick, success)| Op::CompleteDownload { pick, success }),
-        2 => (0..UNIVERSE).prop_map(Op::Lock),
+        2 => (0..UNIVERSE).prop_map(|target| Op::Lock { target }),
         2 => (0..UNIVERSE).prop_map(|pick| Op::Unlock { pick }),
         2 => Just(Op::TakeRemovals),
     ]
@@ -79,20 +121,6 @@ struct Shadow {
     locks_held: Vec<ChunkRef>,
 }
 
-/// Guarantee 1 — deletion before download. Checked at the only moment it can
-/// be violated: when a download is handed out, everything on disk and in
-/// flight must belong to the current assignment.
-fn assert_no_overcommit(state: &State) {
-    assert!(
-        state.available().is_subset(state.desired()),
-        "download handed out while an undesired chunk is still on disk"
-    );
-    assert!(
-        state.downloading().is_subset(state.desired()),
-        "download handed out while an undesired chunk is still in flight"
-    );
-}
-
 fn apply_op(state: &mut State, shadow: &mut Shadow, op: &Op) {
     match op {
         Op::NewAssignment(indexes) => {
@@ -106,8 +134,8 @@ fn apply_op(state: &mut State, shadow: &mut Shadow, op: &Op) {
             let chunk = shadow.in_flight.swap_remove(pick % shadow.in_flight.len());
             state.complete_download(&chunk, *success);
         }
-        Op::Lock(i) => {
-            let target = chunk(*i);
+        Op::Lock { target } => {
+            let target = chunk(*target);
             if let Some(locked) =
                 state.get_and_lock_chunk(target.dataset.clone(), target.chunk.clone())
             {
@@ -195,77 +223,101 @@ fn drain(state: &mut State, shadow: &mut Shadow) {
     panic!("state machine did not reach quiescence within {DRAIN_STEP_LIMIT} steps");
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+/// Guarantee 1 — deletion before download. Checked at the only moment it can
+/// be violated: when a download is handed out, everything on disk and in
+/// flight must belong to the current assignment.
+fn assert_no_overcommit(state: &State) {
+    assert!(
+        state.available().is_subset(state.desired()),
+        "download handed out while an undesired chunk is still on disk"
+    );
+    assert!(
+        state.downloading().is_subset(state.desired()),
+        "download handed out while an undesired chunk is still in flight"
+    );
+}
 
-    #[test]
-    fn random_op_sequences_uphold_ordering_liveness_and_bookkeeping(
-        ops in prop::collection::vec(arb_op(), 1..200),
-    ) {
-        let mut state = State::new(ChunkSet::new());
-        let mut shadow = Shadow::default();
-
-        for op in &ops {
-            apply_op(&mut state, &mut shadow, op);
-            state.assert_invariants();
-        }
-        drain(&mut state, &mut shadow);
+fn chunk(i: usize) -> ChunkRef {
+    // Two datasets so the per-dataset download scheduling is exercised too
+    let dataset = if i < UNIVERSE / 2 { "ds0" } else { "ds1" };
+    ChunkRef {
+        dataset: Arc::new(dataset.to_owned()),
+        chunk: Arc::from(format!(
+            "0000000000/000000000{}-000000000{}-00000000",
+            i,
+            i + 1
+        )),
     }
+}
 
-    // The attempt cap in isolation: however the failures are interleaved with
-    // other work, a chunk is offered at most MAX_DOWNLOAD_ATTEMPTS times per
-    // assignment when every attempt fails.
-    #[test]
-    fn a_chunk_is_never_attempted_more_than_the_cap_per_assignment(
-        target in 0..UNIVERSE,
-        ops in prop::collection::vec(arb_op(), 1..100),
-    ) {
-        let mut state = State::new(ChunkSet::new());
-        let mut shadow = Shadow::default();
-        let mut attempts_since_assignment = 0u32;
-        let target = chunk(target);
-
-        for op in &ops {
-            if matches!(op, Op::NewAssignment(_)) {
-                attempts_since_assignment = 0;
-            }
-            // Force every download of the target chunk to fail immediately
-            if matches!(op, Op::TakeDownload) {
-                if let Some(chunk) = state.take_next_download() {
-                    assert_no_overcommit(&state);
-                    if chunk == target {
-                        attempts_since_assignment += 1;
-                        prop_assert!(
-                            attempts_since_assignment <= MAX_DOWNLOAD_ATTEMPTS,
-                            "chunk retried past the attempt cap within one assignment"
-                        );
-                        state.complete_download(&chunk, false);
-                    } else {
-                        shadow.in_flight.push(chunk);
-                    }
-                }
-                state.assert_invariants();
-                continue;
-            }
-            apply_op(&mut state, &mut shadow, op);
-            state.assert_invariants();
-        }
-    }
+fn chunk_set(indexes: &[usize]) -> ChunkSet {
+    indexes.iter().map(|&i| chunk(i)).collect()
 }
 
 /// Guarantee 3 — confirmation correctness, tested against the real
 /// check-and-mark critical section under randomized interleavings of the
-/// assignment pipeline (`set_desired` → … → `current_assignment_id` → …) with
-/// the state loop's own mark and download-progress steps. Generalizes the
-/// hand-written race test in `super::manager`.
+/// assignment pipeline with the state loop's own mark and download-progress
+/// steps. Generalizes the hand-written race test in `super::manager`.
 #[cfg(feature = "mvcc-chunks")]
 mod confirmation {
     use parking_lot::Mutex;
 
     use super::super::manager::{
         mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome,
+        AssignmentSettled,
     };
     use super::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn only_genuinely_applied_assignments_are_confirmed(scripts in arb_scripts()) {
+            let (settled_tx, _settled_rx) = tokio::sync::watch::channel(None);
+            let mut pipeline = Pipeline {
+                state: Mutex::new(State::new(ChunkSet::new())),
+                application: Mutex::new(AssignmentApplicationStatus::default()),
+                settled_tx,
+                chunk_sets: Vec::with_capacity(scripts.len()),
+            };
+
+            for (i, (subset, after)) in scripts.iter().enumerate() {
+                let chunks = chunk_set(subset);
+                pipeline.chunk_sets.push(chunks.clone());
+                // Mirrors `set_assignment`: the desired chunks and the current
+                // id are updated under one critical section w.r.t. the
+                // settled-check, followed by its own mark call.
+                {
+                    let mut application = pipeline.application.lock();
+                    pipeline.state.lock().set_desired_chunks(chunks);
+                    application.current_assignment_id = Some(format!("A{i}"));
+                }
+                pipeline.mark()?;
+                for op in after {
+                    pipeline.run(op)?;
+                }
+            }
+        }
+    }
+
+    /// One assignment: its chunk subset and the ops that run after it is
+    /// registered. The desired chunks and `current_assignment_id` are updated
+    /// atomically w.r.t. the settled-check (`set_assignment` holds the
+    /// application lock across both), so no ops can interleave between them —
+    /// an earlier version of this model allowed such interleavings and caught
+    /// a real misattribution race, fixed by extending that critical section
+    /// (pinned in `super::super::regression`).
+    type Script = (Vec<usize>, Vec<MidOp>);
+
+    fn arb_scripts() -> impl Strategy<Value = Vec<Script>> {
+        prop::collection::vec(
+            (
+                prop::collection::vec(0..UNIVERSE, 0..=UNIVERSE),
+                prop::collection::vec(arb_mid(), 0..8),
+            ),
+            1..5,
+        )
+    }
 
     #[derive(Debug, Clone)]
     enum MidOp {
@@ -282,33 +334,23 @@ mod confirmation {
         ]
     }
 
-    /// One assignment: its chunk subset and the ops that run after it is
-    /// registered. The desired chunks and `current_assignment_id` are updated
-    /// atomically w.r.t. the settled-check (`set_assignment` holds the
-    /// application lock across both), so no ops can interleave between them —
-    /// an earlier version of this model allowed such interleavings and caught
-    /// a real misattribution race, fixed by extending that critical section.
-    type Script = (Vec<usize>, Vec<MidOp>);
-
-    fn arb_scripts() -> impl Strategy<Value = Vec<Script>> {
-        prop::collection::vec(
-            (
-                prop::collection::vec(0..UNIVERSE, 0..=UNIVERSE),
-                prop::collection::vec(arb_mid(), 0..8),
-            ),
-            1..5,
-        )
-    }
-
     struct Pipeline {
         state: Mutex<State>,
         application: Mutex<AssignmentApplicationStatus>,
-        settled_tx: tokio::sync::watch::Sender<Option<super::super::manager::AssignmentSettled>>,
+        settled_tx: tokio::sync::watch::Sender<Option<AssignmentSettled>>,
         /// The chunk set each registered assignment id desires.
         chunk_sets: Vec<ChunkSet>,
     }
 
     impl Pipeline {
+        fn run(&self, op: &MidOp) -> Result<(), TestCaseError> {
+            match op {
+                MidOp::Mark => self.mark()?,
+                MidOp::Progress(success) => self.progress(*success),
+            }
+            Ok(())
+        }
+
         fn mark(&self) -> Result<(), TestCaseError> {
             let before = self.application.lock().last_applied_assignment_id.clone();
             mark_assignment_settled_if_ready(&self.state, &self.application, &self.settled_tx);
@@ -340,46 +382,6 @@ mod confirmation {
             let mut state = self.state.lock();
             if let Some(chunk) = state.take_next_download() {
                 state.complete_download(&chunk, success);
-            }
-        }
-
-        fn run(&self, op: &MidOp) -> Result<(), TestCaseError> {
-            match op {
-                MidOp::Mark => self.mark()?,
-                MidOp::Progress(success) => self.progress(*success),
-            }
-            Ok(())
-        }
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(512))]
-
-        #[test]
-        fn only_genuinely_applied_assignments_are_confirmed(scripts in arb_scripts()) {
-            let (settled_tx, _settled_rx) = tokio::sync::watch::channel(None);
-            let mut pipeline = Pipeline {
-                state: Mutex::new(State::new(ChunkSet::new())),
-                application: Mutex::new(AssignmentApplicationStatus::default()),
-                settled_tx,
-                chunk_sets: Vec::with_capacity(scripts.len()),
-            };
-
-            for (i, (subset, after)) in scripts.iter().enumerate() {
-                let chunks = chunk_set(subset);
-                pipeline.chunk_sets.push(chunks.clone());
-                // Mirrors `set_assignment`: the desired chunks and the current
-                // id are updated under one critical section w.r.t. the
-                // settled-check, followed by its own mark call.
-                {
-                    let mut application = pipeline.application.lock();
-                    pipeline.state.lock().set_desired_chunks(chunks);
-                    application.current_assignment_id = Some(format!("A{i}"));
-                }
-                pipeline.mark()?;
-                for op in after {
-                    pipeline.run(op)?;
-                }
             }
         }
     }

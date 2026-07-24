@@ -224,9 +224,25 @@ impl State {
         *self.locks.entry(chunk.clone()).or_insert(0) += 1;
     }
 
-    /// Structural invariants that must hold after every operation. Only used
-    /// by the property-based tests in [`super::state_pbt`].
-    #[cfg(test)]
+    pub fn report_status(&self) {
+        info!(
+            "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}",
+            self.available.len(),
+            self.downloading.len(),
+            self.to_download.len(),
+            self.failed_downloads.len()
+        );
+        metrics::CHUNKS_AVAILABLE.set(self.available.len() as i64);
+        metrics::CHUNKS_DOWNLOADING.set(self.downloading.len() as i64);
+        metrics::CHUNKS_PENDING.set(self.to_download.len() as i64);
+    }
+}
+
+/// Test-only introspection for the property-based tests in
+/// [`super::state_pbt`], kept out of the production API surface.
+#[cfg(test)]
+impl State {
+    /// Structural invariants that must hold after every operation.
     pub(super) fn assert_invariants(&self) {
         assert!(
             self.available.is_disjoint(&self.downloading),
@@ -260,37 +276,20 @@ impl State {
         );
     }
 
-    #[cfg(test)]
     pub(super) fn available(&self) -> &ChunkSet {
         &self.available
     }
 
-    #[cfg(test)]
     pub(super) fn downloading(&self) -> &ChunkSet {
         &self.downloading
     }
 
-    #[cfg(test)]
     pub(super) fn desired(&self) -> &ChunkSet {
         &self.desired
     }
 
-    #[cfg(test)]
     pub(super) fn has_queued_downloads(&self) -> bool {
         !self.to_download.is_empty()
-    }
-
-    pub fn report_status(&self) {
-        info!(
-            "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}",
-            self.available.len(),
-            self.downloading.len(),
-            self.to_download.len(),
-            self.failed_downloads.len()
-        );
-        metrics::CHUNKS_AVAILABLE.set(self.available.len() as i64);
-        metrics::CHUNKS_DOWNLOADING.set(self.downloading.len() as i64);
-        metrics::CHUNKS_PENDING.set(self.to_download.len() as i64);
     }
 }
 
