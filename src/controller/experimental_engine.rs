@@ -433,10 +433,22 @@ tables:
         .to_string();
         let path = chunk.path().to_str().unwrap();
 
-        let json = execute_query(&query, &test_schema(), (10, 12), path, OutputFormat::JsonLines)
-            .unwrap();
-        let arrow = execute_query(&query, &test_schema(), (10, 12), path, OutputFormat::ArrowIpc)
-            .unwrap();
+        let json = execute_query(
+            &query,
+            &test_schema(),
+            (10, 12),
+            path,
+            OutputFormat::JsonLines,
+        )
+        .unwrap();
+        let arrow = execute_query(
+            &query,
+            &test_schema(),
+            (10, 12),
+            path,
+            OutputFormat::ArrowIpc,
+        )
+        .unwrap();
 
         // Same block range reported, but Arrow IPC bytes are a distinct, non-JSON encoding.
         assert_eq!(arrow.last_block, json.last_block);
