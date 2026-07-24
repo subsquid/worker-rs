@@ -8,6 +8,8 @@ pub mod guard;
 pub mod layout;
 pub mod local_fs;
 pub mod manager;
+#[cfg(all(test, feature = "mvcc-chunks"))]
+mod regression;
 pub mod state;
 #[cfg(test)]
 mod state_pbt;

@@ -406,10 +406,13 @@ pub(super) fn mark_assignment_settled_if_ready(
         let state = state.lock();
         (state.is_fully_applied(), state.is_stalled())
     };
+    // send_replace, not send: a plain send stores nothing when no receiver is
+    // subscribed yet, and the guards above never re-send a verdict — the event
+    // would be lost forever, leaving waiters hanging.
     if applied {
         // Only a full application advances last_applied_assignment_id.
         assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
-        let _ = assignment_settled_tx.send(Some(AssignmentSettled {
+        assignment_settled_tx.send_replace(Some(AssignmentSettled {
             id: current_assignment_id,
             outcome: AssignmentOutcome::Applied,
         }));
@@ -420,7 +423,7 @@ pub(super) fn mark_assignment_settled_if_ready(
         };
         // watch notifies on every send; don't wake subscribers with duplicates
         if assignment_settled_tx.borrow().as_ref() != Some(&settled) {
-            let _ = assignment_settled_tx.send(Some(settled));
+            assignment_settled_tx.send_replace(Some(settled));
         }
     }
 }
