@@ -2,7 +2,7 @@
 
 Home doc for `FM`. Bands: FM-1..3 global requirements · FM-10..14 assignment-side ·
 FM-20..24 origin-side · FM-30..35 storage & process · FM-40..44 client-side ·
-FM-50..54 operator & auxiliary dependencies.
+FM-50..55 operator & auxiliary dependencies.
 
 Response verbs, used in every table:
 
@@ -69,7 +69,7 @@ budget → that operator (INV-35); one assignment document → intake of that do
 | # | Fault | Required response |
 |---|---|---|
 | FM-40 | malformed/unparseable query bytes | fail-safe: no response (nothing to bind a signed reply to), no CU, no log (RP-20) |
-| FM-41 | authenticated-but-invalid query (bad signature fields, stale timestamp, illegal envelope) | fail-safe: typed `bad_request`, pre-admission (RP-1) |
+| FM-41 | authenticated-but-invalid query (bad signature fields, illegal envelope) | fail-safe: typed `bad_request`, pre-admission (RP-1, INV-26); stale timestamps are FM-55, not a client fault |
 | FM-42 | query flood beyond capacity | degrade: typed `server_overloaded` up to P-REJECT-CONC, then connection drops (ADR-9); recover per LIV-8 |
 | FM-43 | replayed query id | ⚠ currently re-executed and re-charged; intended: fail-safe reject within P-TS-WINDOW (GAP-12) |
 | FM-44 | client disconnects mid-execution | mask: abandon response at transport timeout; SHOULD cancel execution (RP-5). [No cancellation today — GAP-8] |
@@ -83,6 +83,7 @@ budget → that operator (INV-35); one assignment document → intake of that do
 | FM-52 | chain-registry unreachable or erroring | degrade: serve with last-known allocations/epoch; alarm past P-STALL-MAX. [Startup registry error is fatal today — GAP-2 register entry] |
 | FM-53 | schema-registry unreachable or malformed manifest | degrade: keep previously loaded schemas; dynamic-engine queries fail typed `server_error` until first load |
 | FM-54 | worker absent from the on-chain registry at startup | degrade by design: poll the registry and serve nothing until listed; the wait is a visible lifecycle phase (OB-10) with an alarm past P-STALL-MAX (OB-12). [The wait is externally invisible today — GAP-28] |
+| FM-55 | worker clock skewed beyond P-TS-WINDOW tolerance (drift, operator error) | degrade + alarm: freshness rejections surface as `server_error`, never `bad_request` (RP-20 freshness verdict — a stale sender and own skew are indistinguishable here, ADR-20); rejection rate and skew estimate observable (OB-15); alarm past P-SKEW-ALARM. [Misclassified and invisible today — GAP-33] |
 
 ## Fault → property → test class
 
@@ -94,4 +95,4 @@ budget → that operator (INV-35); one assignment document → intake of that do
 | FM-35 | FM-1, CN-6, RP-22 | CT-4 (log-store fault corpus) |
 | FM-33..34 | CN-3..6, INV-40..43 | CT-2 (kill-point matrix) |
 | FM-40..44 | RP-1..5, INV-20/36, LIV-8 | CT-4, CT-9 (fuzz), CT-6 (storm) |
-| FM-50..54 | CN-9, LIV-12, FM-1 | CT-2 (startup corpus), CT-5 |
+| FM-50..55 | CN-9, LIV-12, FM-1, INV-26 | CT-2 (startup corpus), CT-4, CT-5 |

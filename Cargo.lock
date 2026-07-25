@@ -7385,6 +7385,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "mimalloc",
+ "num-rational",
  "parking_lot",
  "parquet",
  "polars",

@@ -24,6 +24,16 @@ Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-07-25**
 (OB-11) and all OB-1 gauges identical across two scrapes ≥ P-QUIESCE-GAP ⚠ apart. The
 ledger in HC-2 makes served bytes the provenance oracle for INV-13/21.
 
+**SUT boundary, as built.** The diagram is the target. Today the SUT is the production
+subsystems assembled in-process and driven through the production entry points, not a
+spawned binary: the input side (IB-40/41/42/43/44) really is over HTTP and really is a
+black box, but the query surface is entered below the transport, at
+`p2p::{validate_query, execute, build_delivery, build_log}`. So IB-1/2 and the
+`P2PController` intake — queue capacity (RP-1 step 4), reject fan-out, the assignment
+pending queue — are *not* under test. Closing that needs HC-7-style process spawning plus
+a libp2p client; until then `harness::UNCOVERED` carries the list and no row in the matrix
+below may claim those properties.
+
 ## Reference model (normative pseudocode)
 
 The oracle for CT-1/CT-2/CT-3. Concurrency model: transitions are atomic and
@@ -61,7 +71,8 @@ recover():                                    # WP-15  (crash may precede)
     assert wellformed(S) and no_residue()                # INV-40..42
 
 query(q):                                     # RP path — the read operation
-    if not (sig_ok(q) and fresh(q) and envelope_ok(q)):  return bad_request     # no CU
+    if not (sig_ok(q) and envelope_ok(q)):               return bad_request     # no CU
+    if not fresh(q):     return server_error             # no CU, no record — worker-fault (ADR-20, INV-26)
     if no_capacity():                                    return server_overloaded
     if not spend(buckets[op(q)], 1.0):                   return too_many_requests
     # ---- admitted: exactly one log record from here (INV-32) ----
@@ -112,25 +123,30 @@ ones-count consistent (INV-30) · gauges nonnegative and consistent with set alg
 
 ## Traceability matrix (as of 2026-07-25)
 
-Statuses reflect the actual test inventory at `42d9aa1` (39 inline unit tests, 4 of
-them `mvcc-chunks`-gated; no integration tests). WP/RP/CN/RS rows are enforced through the INV/LIV rows that encode
-them (see 07 §reading the catalog).
+Statuses reflect the actual test inventory: 39 inline unit tests (4 `mvcc-chunks`-gated)
+plus the Phase 0 conformance tier in `tests/conformance.rs` — 5 tests over the harness in
+`tests/harness/`, and 1 quarantined gap test. WP/RP/CN/RS rows are enforced through the
+INV/LIV rows that encode them (see 07 §reading the catalog).
+
+A Phase 0 row reads **P** only where the smoke path actually asserts the property; the
+harness's own `UNCOVERED` and `validators::MISSING` lists name what it still cannot see,
+and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here.
 
 ### Requirements
 
 | ID | CT | Status | Note |
 |---|---|---|---|
-| REQ-1 | CT-1/5 | P | engine-level output tests exist (dynamic engine: format, budget, empty-range); no end-to-end signed-query test |
-| REQ-2 | CT-1/2 | U | no download-pipeline or atomicity test exists |
+| REQ-1 | CT-1/5 | P | engine-level output tests, plus an end-to-end signed query over a downloaded chunk (dynamic engine, JSONL only) |
+| REQ-2 | CT-1/2 | P | smoke drives fetch→commit and compares committed bytes against HC-2's ledger; atomicity under interruption still untested (needs HC-7) |
 | REQ-3 | CT-1/3 | P | set-algebra bookkeeping unit-tested; no eviction-under-load test |
 | REQ-4 | CT-1 | P | last_block semantics unit-tested per engine; resumption equivalence untested |
-| REQ-10 | CT-4 | U | assignment intake wholly untested |
+| REQ-10 | CT-4 | P | happy-path intake driven end-to-end (IB-40 poll → IB-41 fetch → WP-2 apply); the controller's pending queue is outside the harness, and the fault corpus is unwritten |
 | REQ-11 | CT-3 | U⊘ | coherence known-violated (GAP-11) |
-| REQ-12 | CT-5 | P | log store ordering/pagination/cleanup unit-tested in memory; durability & reconciliation untested |
+| REQ-12 | CT-5 | P | ordering/pagination/cleanup unit-tested in memory; smoke adds a file-backed write-then-read with the RP-22 lag observed; durability across restart untested (HC-7) |
 | REQ-13 | CT-5 | U⊘ | known liars: GAP-1 gauge, GAP-17 |
-| REQ-20 | CT-5 | U | the security boundary has zero tests |
+| REQ-20 | CT-5 | P | RP-1 step 1 covered: an unverifiable signature is rejected with no CU and no log record. Freshness, envelope and replay untested |
 | REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
-| REQ-22 | CT-6 | U⊘ | concurrency cap inert (GAP-1) |
+| REQ-22 | CT-6 | U⊘ | concurrency cap inert (GAP-1); its failing test exists and is quarantined |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
 | REQ-24 | CT-4/9 | U⊘ | known-violated (GAP-2, GAP-4) |
 | REQ-25 | CT-4 | U⊘ | no floor exists (GAP-3) |
@@ -147,7 +163,7 @@ them (see 07 §reading the catalog).
 | INV-10 | CT-1 | U | no quiescence test |
 | INV-11 | CT-2 | U | |
 | INV-12 | CT-1/3 | P | retain-if-locked unit-tested; never raced |
-| INV-13 | CT-1 | U⊘ | no payload verification exists (GAP-5) |
+| INV-13 | CT-1 | P⊘ | smoke compares committed bytes against HC-2's ledger on the happy path; refusing corrupt origin bytes still doesn't exist (GAP-5) |
 | INV-14 | CT-3 | P | one hand-built interleaving test (feature-gated, not in shipped config — OQ-3) |
 | INV-15 | CT-1/5 | P | unit-tested (charge, refund, overload-keep, fractional put); chip-parse hole GAP-13 |
 | INV-20 | CT-5 | U | |
@@ -155,10 +171,11 @@ them (see 07 §reading the catalog).
 | INV-22 | CT-1 | P | engine unit tests cover truncation/empty cases; boundary emission unpinned (GAP-32) |
 | INV-23 | CT-5 | P | downgrade-agreement + log-summary unit tests |
 | INV-24 | CT-4/6 | U | boundary corpus absent |
-| INV-25 | CT-5 | U | signing untested |
-| INV-30 | CT-3 | U⊘ | known-violated (GAP-11) |
-| INV-31 | CT-1/6 | U⊘ | known-violated (GAP-1, GAP-17) |
-| INV-32 | CT-5/7 | P⊘ | admitted-always-logged unit-tested; duplicate/oversize drop known (GAP-12/14) |
+| INV-25 | CT-5 | P | HC-5 verifies the response signature on every response it sees, success and error alike |
+| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness) |
+| INV-30 | CT-3 | U⊘ | known-violated (GAP-11). HC-5 checks map length and ones-count per read, but tearing needs a racing test |
+| INV-31 | CT-1/6 | U⊘ | known-violated (GAP-1, GAP-17); the gauge half is asserted by GAP-1's quarantined test |
+| INV-32 | CT-5/7 | P⊘ | admitted-always-logged unit-tested and now end-to-end (admitted → exactly one record; pre-admission → none); duplicate/oversize drop known (GAP-12/14) |
 | INV-35 | CT-8 | U | |
 | INV-36 | CT-4 | P | panic-containment unit tests (str/String/assert payloads) |
 | INV-37 | CT-3/6 | U | |
@@ -172,12 +189,12 @@ them (see 07 §reading the catalog).
 | LIV-4 | CT-1/3 | U⊘ | wake-up gap (GAP-6) |
 | LIV-5 | CT-2/6 | U | |
 | LIV-6 | CT-3/6 | U? | at risk from store walks (GAP-15) |
-| LIV-7 | CT-5/7 | P | pagination/resumption unit-tested in memory |
+| LIV-7 | CT-5/7 | P | pagination/resumption unit-tested in memory; smoke adds one file-backed page read |
 | LIV-8 | CT-6/8 | U | client-side cooldown coupling under flood shed: HZ-15 |
 | LIV-9 | CT-7 | U | no stall alarm exists (OB-11/12 partial — GAP-17) |
 | LIV-10 | CT-2 | U | shutdown untested since the subsystem-tree rewrite |
 | LIV-11 | CT-8 | U⊘ | global backoff (GAP-7) |
-| LIV-12 | CT-5 | U | cold-start window known (GAP-25) |
+| LIV-12 | CT-5 | U | cold-start window known (GAP-25). The harness waits the window out before serving, so no test measures it yet |
 | LIV-13 | CT-4/7 | U | |
 | LIV-14 | CT-7 | U⊘ | log-store reclamation broken (GAP-10) |
 | FM-1 | CT-4/9 | U⊘ | known-violated (GAP-2) |
@@ -205,6 +222,7 @@ them (see 07 §reading the catalog).
 | FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
 | FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
+| FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
 ## Gap register (as of 2026-07-25)
@@ -214,7 +232,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | GAP | Statement | Violates | Pri | First test |
 |---|---|---|---|---|
-| GAP-1 | Query concurrency cap is inert (guard dropped at declaration), so P-Q-PAR is unenforced, the real ceiling is the transport's message-handler product, and the running-query gauge always reads ~0 | RP-4, INV-31, REQ-22, PF-1 | P0 | drive P-Q-PAR+10 slow queries; expect ≥1 `server_overloaded` and a nonzero gauge |
+| GAP-1 | Query concurrency cap is inert (guard dropped at declaration), so P-Q-PAR is unenforced, the real ceiling is the transport's message-handler product, and the running-query gauge always reads ~0 | RP-4, INV-31, REQ-22, PF-1 | P0 | **written**: `conformance::gap_1_concurrency_cap_is_enforced` (quarantined `#[ignore]`) drives P-Q-PAR+10 slow queries and expects ≥1 `server_overloaded` plus a nonzero gauge. Verified to fail on the defect and pass on the one-token fix (`let _` → `let _guard`) |
 | GAP-2 | Externally supplied content can terminate the process: a malformed file address in an assignment panics the reconciler; a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic | FM-1, FM-11, FM-52, REQ-24 | P0 | HC-1 assignment containing one bad URL: worker must survive, alarm, and keep serving |
 | GAP-3 | No reconciliation deletion floor: one empty/short assignment wipes the whole store next pass | REQ-25, FM-13, RS-2 | P0 | publish an assignment with zero chunks for the worker: store must survive with an alarm |
 | GAP-4 | Assignment intake is unverified and unbounded: unvalidated binary document parsed unsafely; decompression size uncapped | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
@@ -237,7 +255,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 | GAP-24 | The SQL surface bypasses the result-size budget (whole result materialized), reports last_block = 0, echoes full query text into error strings, and ignores the message's `block_range` entirely | RP-14 (margin), IB-12 | P2 | SQL query with a large result: memory bound and typed downgrade |
 | GAP-25 | Metering cold start: until the first registry poll completes, every query is rejected no-allocation with no retry hint | LIV-12 | P2 | first admitted query per operator within LIV-12's bound after start |
 | GAP-18 | Pin refcount is a narrow fixed-width counter (HZ-11); beyond ~255 concurrent pins of one chunk it wraps and un-protects the chunk (latent; reachable only via misconfiguration once GAP-1 is fixed) | INV-4 | P3 | saturation probe at the configured ceiling |
-| GAP-19 | No machine-readable subcodes: `not_found` collapses never-assigned / not-yet-fetched / evicted, and `bad_request` collapses attempt-scoped causes (signature, freshness) with request-scoped ones — portals treat every `bad_request` as a terminal client error, so worker clock skew beyond P-TS-WINDOW surfaces as client-visible rejects with no reroute | RP-20 | P2 | subcode conformance once designed; interim: skewed-clock worker in the harness must not convert valid client queries into terminal errors |
+| GAP-19 | No machine-readable subcodes: `not_found` collapses never-assigned / not-yet-fetched / evicted, and `bad_request` collapses signature and envelope causes; diagnosis rides unstable message strings (the freshness misattribution is split out as GAP-33) | RP-20 | P2 | subcode conformance once designed (OQ-7) |
 | GAP-21 | Metering bucket: division-by-zero latent at astronomically high allocations; an inverted predicate name invites future inversion bugs; an operator address shared by two clusters has its bucket reset to zero tokens on refresh | INV-15 (margin) | P3 | unit boundary test at the allocation ceiling |
 | GAP-26 | Advisory merge gates (MG-2..6) must be promoted to blocking as their HC capabilities land | MG-2..6 | P2 | per-gate: flip to blocking in the same change that completes its HC row |
 | GAP-27 | A corrupt/undecodable log-store record panics log delivery, and the fail-fast tree (ADR-14) turns that into process termination | FM-1, FM-35, INV-43 (margin) | P2 | plant a malformed row in the log store; a logs pull must skip-and-alarm with the process alive |
@@ -246,14 +264,19 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 | GAP-30 | The anchor-mismatch verdict (stale continuation parent hash) — load-bearing for portal fork recovery — is carried only in the legacy engine's `server_error` message text, which RP-20 declares unstable; portals parse the exact string, so any wording change silently converts client-side conflict recovery into terminal errors | RP-20 (anchor verdict), OQ-7 | P1 | CT-5: a stale-anchor query yields a machine-distinguishable verdict; interim regression pins the exact string (IB-13) |
 | GAP-31 | The two oversize paths emit divergent `server_error` strings (`Response too large` at the engine's uncompressed cap vs `query result too large` at the encoded-message downgrade); portals special-case only the former, so the latter degrades to a terminal generic failure client-side | RP-14, IB-13 | P2 | drive both oversize paths; assert one verdict surface |
 | GAP-32 | Boundary emission (RP-11) is provided by the legacy engine's weight-0 pinning but is unverified for the dynamic engine; if the dynamic engine returns zero records for an evaluated-but-unmatched range, portal-side client resumption breaks the moment portals adopt it | RP-11 (boundary emission) | P1 | both engines: a selective query matching nothing over an evaluated range returns the boundary records, last record = coverage cursor |
+| GAP-33 | Freshness rejections blame the client: a timestamp outside P-TS-WINDOW — a verdict whose reference input is the worker's own clock — is typed `bad_request`, which routing clients treat as terminal, so one skewed worker converts valid queries into client-visible terminal errors with no reroute; no skew signal or alarm exists | INV-26, RP-20 (freshness verdict), FM-55, OB-15 | P1 | CT-4: skew the SUT clock past P-TS-WINDOW; a valid signed query must yield `server_error` (never `bad_request`), OB-15 signals must move, alarm past P-SKEW-ALARM |
 
 ## Build order
 
-1. **Phase 0 — harness skeleton**: HC-1/2/3/8 stubs + HC-5 validators + HC-12 seeding;
-   one end-to-end smoke (assign → download → query → verify → logs pull). Unblocks
-   every U row above.
+1. ~~**Phase 0 — harness skeleton**~~ **done**: HC-1/2/3/8 stubs + HC-5 validators +
+   HC-12 seeding; one end-to-end smoke (assign → download → query → verify → logs pull).
+   Lives in `tests/harness/` behind `tests/conformance.rs`; the crate grew a library
+   target so the tier can reach it. The SUT is assembled from the production subsystems
+   and driven through the production functions, but the libp2p transport and the
+   `P2PController` event loops are outside it — `harness::UNCOVERED` is the standing list.
 2. **Phase 1 — P0 gaps**: failing tests for GAP-1/2/3, then fixes. MG-4 becomes
-   meaningful here.
+   meaningful here. GAP-1's test is written and quarantined; GAP-2 and GAP-3 have their
+   HC-1 fault knobs (`UnparseableFileUrl`, `NoChunksForWorker`) but no tests yet.
 3. **Phase 2 — correctness core**: HC-4 reference model; CT-1 property runs; CT-2
    kill-point matrix (HC-7); CT-5 accounting reconciliation. Burn P1 gaps.
 4. **Phase 3 — robustness**: CT-3 swarms, CT-4 full corpus, CT-9 fuzz; P2 gaps.
@@ -278,17 +301,17 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41) | CT-1..4, CT-8/9, MG-4/5 | U | |
-| HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | U | ledger = provenance oracle |
-| HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | U | inline mock seams exist for controller unit tests; not a driver |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) — the rest are unwritten |
+| HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
+| HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |
-| HC-5 | structural validators (§validators) | CT-1..5, MG-4 | U | |
+| HC-5 | structural validators (§validators) | CT-1..5, MG-4 | **P** | `tests/harness/validators.rs`: query response, log page, status. `validators::MISSING` names the two it can't yet do (INV-1 gauges, cross-restart INV-5) |
 | HC-6 | observability scraper + quiescence gate | CT-5..7 | U | |
 | HC-7 | kill/restart harness with kill-point + power-loss emulation | CT-2, CT-7, MG-5 | U | |
-| HC-8 | chain-registry stub: epochs, allocations (IB-43) | CT-1, CT-5, CT-8 | U | |
+| HC-8 | chain-registry stub: epochs, allocations (IB-43) | CT-1, CT-5, CT-8 | **C** | `tests/harness/registry.rs`: a programmable `sqd_contract_client::Client` — epoch advance, allocation change, read failure |
 | HC-9 | load/swarm driver | CT-3, CT-6..8, MG-5 | U | |
 | HC-10 | benchmark runner, committed baselines, noise band | CT-6, MG-6 | U | bench-branch harness exists off-mainline; not wired |
 | HC-11 | coverage instrumentation in CI | MG-3 | U | |
-| HC-12 | deterministic seeding; seed recorded on failure | CT-1, CT-3, CT-9 | U | |
+| HC-12 | deterministic seeding; seed recorded on failure | CT-1, CT-3, CT-9 | **C** | `tests/harness/seed.rs`: labelled streams off one root seed (`SQD_CONFORMANCE_SEED`), printed on panic; `corpus.rs` generates chunks rather than checking them in |
 | HC-13 | spec linter (`tools/check_spec.py`) wired in CI | MG-1, MG-2 | **C** | this suite's standing gate |
 | HC-14 | static CI toolchain: build, unit tests, formatter, pinned lint level | MG-7, MG-8 | **C** | exists on the default branch |
