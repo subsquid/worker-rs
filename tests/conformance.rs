@@ -5,7 +5,7 @@
 
 mod harness;
 
-use harness::{corpus, validators, Config, Harness};
+use harness::{corpus, validators, Harness};
 use sqd_messages::query_result;
 
 /// Phase 0's end-to-end smoke: assign → download → query → verify → logs pull.
@@ -185,70 +185,6 @@ async fn bad_signature_is_rejected_pre_admission() {
     assert!(
         page.queries_executed.is_empty(),
         "RP-1: pre-admission failures produce no log record"
-    );
-}
-
-/// GAP-1 (P0) — the register's first test: with the cap at N, driving more than N
-/// concurrent queries must produce at least one `server_overloaded` and a non-zero
-/// running-query gauge.
-///
-/// Currently fails: `Worker::run_query`'s scopeguard is bound to `_`, so it drops at the
-/// end of the `let` statement and the counter is decremented before the query runs. The
-/// cap is inert and the gauge reads ~0.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "GAP-1: concurrency cap is inert; unignore with the fix (spec/13 gap register)"]
-async fn gap_1_concurrency_cap_is_enforced() {
-    const CAP: usize = 2;
-
-    let mut h = Harness::with_config(Config {
-        parallel_queries: CAP,
-        ..Config::default()
-    })
-    .await;
-
-    // A wide range with heavy rows makes each query slow enough to overlap the others.
-    let chunk = corpus::chunk(4_000, 4_400, 64 * 1024);
-    let placement = h.host_chunk(&chunk);
-    h.publish_and_apply("assignment-1", &[placement]).await;
-    h.await_all_chunks_available().await;
-
-    let queries: Vec<_> = (0..CAP + 10)
-        .map(|_| h.all_blocks_query(&chunk.id, (4_000, 4_400)))
-        .collect();
-
-    let gauge = tokio::spawn(async {
-        let mut peak = 0;
-        for _ in 0..200 {
-            peak = peak.max(sqd_worker::metrics::RUNNING_QUERIES.get());
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        peak
-    });
-
-    let results = futures::future::join_all(queries.into_iter().map(|q| h.serve(q))).await;
-    let peak = gauge.await.unwrap();
-
-    let overloaded = results
-        .iter()
-        .filter(|served| {
-            matches!(
-                served.response().result.as_ref().unwrap(),
-                query_result::Result::Err(e)
-                    if matches!(e.err, Some(sqd_messages::query_error::Err::ServerOverloaded(_)))
-            )
-        })
-        .count();
-
-    assert!(
-        overloaded >= 1,
-        "RP-4/REQ-22: {} concurrent queries against a cap of {CAP} produced no \
-         server_overloaded rejection",
-        CAP + 10
-    );
-    assert!(
-        peak > 0,
-        "INV-31/OB-6: running_queries gauge never rose above zero while {} queries ran",
-        CAP + 10
     );
 }
 

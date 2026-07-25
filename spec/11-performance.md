@@ -42,8 +42,7 @@ run replaces every "unknown").
 configuration: P-MEM-CEIL ⚠ ≈ base + (concurrent queries × the RP-24 per-query multiple
 of P-RESP-MAX) + assignment-document size + fetch buffers. No unbounded queue contributes
 (the execution-queue depth, reject fan-out, and intake queues are all P-bounded; the
-post-admission execution backlog MUST be bounded by P-Q-PAR — GAP-1's fix is a
-precondition).
+post-admission execution backlog is bounded by P-Q-PAR).
 
 **PF-2 — End-to-end backpressure.** [MUST] Every producer-consumer edge is bounded:
 transport intake buffers (P-Q-ACCEPT-BUF, P-Q-REQ-BUF, and the lossy shared event queue

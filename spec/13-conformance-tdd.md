@@ -124,8 +124,10 @@ ones-count consistent (INV-30) · gauges nonnegative and consistent with set alg
 ## Traceability matrix (as of 2026-07-25)
 
 Statuses reflect the actual test inventory: 39 inline unit tests (4 `mvcc-chunks`-gated)
-plus the Phase 0 conformance tier in `tests/conformance.rs` — 5 tests over the harness in
-`tests/harness/`, and 1 quarantined gap test. WP/RP/CN/RS rows are enforced through the
+plus the conformance tier over the harness in `tests/harness/`: 5 tests in
+`tests/conformance.rs` and 1 in `tests/conformance_metrics.rs` (its own binary — the OB
+signals are process-global, so a gauge assertion cannot share a process with other
+query-running tests). WP/RP/CN/RS rows are enforced through the
 INV/LIV rows that encode them (see 07 §reading the catalog).
 
 A Phase 0 row reads **P** only where the smoke path actually asserts the property; the
@@ -143,10 +145,10 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-10 | CT-4 | P | happy-path intake driven end-to-end (IB-40 poll → IB-41 fetch → WP-2 apply); the controller's pending queue is outside the harness, and the fault corpus is unwritten |
 | REQ-11 | CT-3 | U⊘ | coherence known-violated (GAP-11) |
 | REQ-12 | CT-5 | P | ordering/pagination/cleanup unit-tested in memory; smoke adds a file-backed write-then-read with the RP-22 lag observed; durability across restart untested (HC-7) |
-| REQ-13 | CT-5 | U⊘ | known liars: GAP-1 gauge, GAP-17 |
+| REQ-13 | CT-5 | P⊘ | the running-query gauge is now CT-6-checked (rises under load, bounded by the cap, returns to zero); the GAP-17 liars remain |
 | REQ-20 | CT-5 | P | RP-1 step 1 covered: an unverifiable signature is rejected with no CU and no log record. Freshness, envelope and replay untested |
 | REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
-| REQ-22 | CT-6 | U⊘ | concurrency cap inert (GAP-1); its failing test exists and is quarantined |
+| REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `conformance_metrics`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
 | REQ-24 | CT-4/9 | U⊘ | known-violated (GAP-2, GAP-4) |
 | REQ-25 | CT-4 | U⊘ | no floor exists (GAP-3) |
@@ -174,7 +176,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-25 | CT-5 | P | HC-5 verifies the response signature on every response it sees, success and error alike |
 | INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness) |
 | INV-30 | CT-3 | U⊘ | known-violated (GAP-11). HC-5 checks map length and ones-count per read, but tearing needs a racing test |
-| INV-31 | CT-1/6 | U⊘ | known-violated (GAP-1, GAP-17); the gauge half is asserted by GAP-1's quarantined test |
+| INV-31 | CT-1/6 | P⊘ | running-query gauge covered; the remaining counters are still known-violated (GAP-17) |
 | INV-32 | CT-5/7 | P⊘ | admitted-always-logged unit-tested and now end-to-end (admitted → exactly one record; pre-admission → none); duplicate/oversize drop known (GAP-12/14) |
 | INV-35 | CT-8 | U | |
 | INV-36 | CT-4 | P | panic-containment unit tests (str/String/assert payloads) |
@@ -232,7 +234,6 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | GAP | Statement | Violates | Pri | First test |
 |---|---|---|---|---|
-| GAP-1 | Query concurrency cap is inert (guard dropped at declaration), so P-Q-PAR is unenforced, the real ceiling is the transport's message-handler product, and the running-query gauge always reads ~0 | RP-4, INV-31, REQ-22, PF-1 | P0 | **written**: `conformance::gap_1_concurrency_cap_is_enforced` (quarantined `#[ignore]`) drives P-Q-PAR+10 slow queries and expects ≥1 `server_overloaded` plus a nonzero gauge. Verified to fail on the defect and pass on the one-token fix (`let _` → `let _guard`) |
 | GAP-2 | Externally supplied content can terminate the process: a malformed file address in an assignment panics the reconciler; a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic | FM-1, FM-11, FM-52, REQ-24 | P0 | HC-1 assignment containing one bad URL: worker must survive, alarm, and keep serving |
 | GAP-3 | No reconciliation deletion floor: one empty/short assignment wipes the whole store next pass | REQ-25, FM-13, RS-2 | P0 | publish an assignment with zero chunks for the worker: store must survive with an alarm |
 | GAP-4 | Assignment intake is unverified and unbounded: unvalidated binary document parsed unsafely; decompression size uncapped | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
@@ -254,7 +255,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 | GAP-23 | No assignment-age observable: a worker silently dropped from assignments serves stale data indefinitely with no alarm | OB-13, FM-14 | P2 | freeze HC-1: alarm level must rise within P-STALL-MAX |
 | GAP-24 | The SQL surface bypasses the result-size budget (whole result materialized), reports last_block = 0, echoes full query text into error strings, and ignores the message's `block_range` entirely | RP-14 (margin), IB-12 | P2 | SQL query with a large result: memory bound and typed downgrade |
 | GAP-25 | Metering cold start: until the first registry poll completes, every query is rejected no-allocation with no retry hint | LIV-12 | P2 | first admitted query per operator within LIV-12's bound after start |
-| GAP-18 | Pin refcount is a narrow fixed-width counter (HZ-11); beyond ~255 concurrent pins of one chunk it wraps and un-protects the chunk (latent; reachable only via misconfiguration once GAP-1 is fixed) | INV-4 | P3 | saturation probe at the configured ceiling |
+| GAP-18 | Pin refcount is a narrow fixed-width counter (HZ-11); beyond ~255 concurrent pins of one chunk it wraps and un-protects the chunk (latent: now that P-Q-PAR is enforced, only a misconfigured cap above ~255 can reach it) | INV-4 | P3 | saturation probe at the configured ceiling |
 | GAP-19 | No machine-readable subcodes: `not_found` collapses never-assigned / not-yet-fetched / evicted, and `bad_request` collapses signature and envelope causes; diagnosis rides unstable message strings (the freshness misattribution is split out as GAP-33) | RP-20 | P2 | subcode conformance once designed (OQ-7) |
 | GAP-21 | Metering bucket: division-by-zero latent at astronomically high allocations; an inverted predicate name invites future inversion bugs; an operator address shared by two clusters has its bucket reset to zero tokens on refresh | INV-15 (margin) | P3 | unit boundary test at the allocation ceiling |
 | GAP-26 | Advisory merge gates (MG-2..6) must be promoted to blocking as their HC capabilities land | MG-2..6 | P2 | per-gate: flip to blocking in the same change that completes its HC row |
@@ -274,9 +275,11 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
    target so the tier can reach it. The SUT is assembled from the production subsystems
    and driven through the production functions, but the libp2p transport and the
    `P2PController` event loops are outside it — `harness::UNCOVERED` is the standing list.
-2. **Phase 1 — P0 gaps**: failing tests for GAP-1/2/3, then fixes. MG-4 becomes
-   meaningful here. GAP-1's test is written and quarantined; GAP-2 and GAP-3 have their
-   HC-1 fault knobs (`UnparseableFileUrl`, `NoChunksForWorker`) but no tests yet.
+2. **Phase 1 — P0 gaps**: a failing test per gap, then the fix. MG-4 becomes meaningful
+   here. The query-concurrency gap is closed (test first, then a one-token fix; the
+   register row is gone and RP-4/REQ-22/INV-31/PF-1 no longer carry the exception).
+   GAP-2 and GAP-3 remain: their HC-1 fault knobs (`UnparseableFileUrl`,
+   `NoChunksForWorker`) exist, but no tests drive them yet.
 3. **Phase 2 — correctness core**: HC-4 reference model; CT-1 property runs; CT-2
    kill-point matrix (HC-7); CT-5 accounting reconciliation. Burn P1 gaps.
 4. **Phase 3 — robustness**: CT-3 swarms, CT-4 full corpus, CT-9 fuzz; P2 gaps.

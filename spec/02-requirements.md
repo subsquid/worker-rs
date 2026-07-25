@@ -107,8 +107,7 @@ cost 1; rejections before admission cost 0.
 **REQ-22 — Overload rejection, not collapse.** [MUST]
 Beyond declared concurrency bounds (P-Q-QUEUE, P-Q-PAR, P-REJECT-CONC), the worker sheds
 load with typed, retryable rejections carrying a P-RETRY-HINT, and recovers full service
-when pressure subsides. Resource use under flood is bounded. [P-Q-PAR enforcement is
-intent, currently violated: GAP-1.]
+when pressure subsides. Resource use under flood is bounded.
 *Acceptance:* a query storm at W-QPS-STORM yields only typed rejections (no stream
 resets below the reject fan-out bound, no process death, memory below P-MEM-CEIL);
 service latency recovers to the S1 SLO within LIV-8's bound after the storm.

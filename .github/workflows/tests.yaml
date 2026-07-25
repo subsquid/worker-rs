@@ -85,10 +85,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run conformance suite
         run: cargo test --test conformance --all-features
-      # Gap tests are ignored until their fix lands (MG-8: failing-test-first, never a
-      # silent skip). Listing them keeps the quarantine visible in the job log.
+      # Separate binary: the OB signals are process-global, so gauge assertions cannot
+      # share a process with other query-running tests.
+      - name: Run metrics conformance suite
+        run: cargo test --test conformance_metrics --all-features
+      # A gap test stays ignored until its fix lands (MG-8: failing-test-first, never a
+      # silent skip). Listing them keeps any quarantine visible in the job log.
       - name: List quarantined gap tests
-        run: cargo test --test conformance --all-features -- --ignored --list
+        run: |
+          cargo test --test conformance --all-features -- --ignored --list
+          cargo test --test conformance_metrics --all-features -- --ignored --list
 
   fmt:
     name: Rustfmt
