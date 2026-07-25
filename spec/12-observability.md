@@ -1,6 +1,6 @@
 # 12 — Observability
 
-Home doc for `OB`. Band: OB-1..14. Signals are named abstractly; the concrete metric
+Home doc for `OB`. Band: OB-1..15. Signals are named abstractly; the concrete metric
 names, types, and endpoints are IB-30/31. Every signal is pull-readable by the operator
 surface; cardinality is bounded (OB-14).
 
@@ -27,7 +27,8 @@ and of the log store (RS-7's witness ⚠ — the latter does not exist today, GA
 
 **OB-7 — Query outcome counters.** [MUST] Admitted-query count by outcome class
 (RP-20), plus pre-admission rejection counters by cause (overload, no-allocation,
-bucket-empty, invalid) ⚠ — pre-admission causes are invisible today (GAP-17).
+bucket-empty, freshness — OB-15, invalid) ⚠ — pre-admission causes are invisible today
+(GAP-17).
 
 **OB-8 — Result-size distribution.** [MUST] Histogram of uncompressed result sizes with
 usable buckets ⚠ [today's histograms have no buckets — GAP-17].
@@ -48,8 +49,8 @@ P-STALL-MAX" from exported signals alone.
 **OB-12 — Alarm states.** [MUST] Reason-coded, level-readable alarm signals (plus edge
 events in logs) for at least: assessed worker state (DEF-32), assignment intake failing
 (FM-10/12), fetch quarantine (FM-22), eviction/reclamation failure (FM-31), store
-integrity refusal (FM-32), deletion-floor hold (REQ-25). One current-state read answers
-"is anything wrong, and why".
+integrity refusal (FM-32), deletion-floor hold (REQ-25), sustained clock-skew
+suspicion (FM-55). One current-state read answers "is anything wrong, and why".
 
 **OB-13 — Assignment age.** [MUST ⚠ — does not exist today: GAP-23] Time since the last
 successfully applied assignment, so a silently-dropped worker is externally detectable
@@ -58,6 +59,12 @@ successfully applied assignment, so a silently-dropped worker is externally dete
 **OB-14 — Bounded cardinality.** [MUST] No signal's label space grows with untrusted
 input (per-client or per-chunk labels are forbidden; per-outcome-class and per-dataset
 are the ceiling).
+
+**OB-15 — Clock-skew visibility.** [MUST ⚠ — does not exist today: GAP-33] A
+freshness-rejection counter (the OB-7 breakdown) and a gauge estimating the
+worker-clock offset from authenticated queries' timestamps, so a skewed worker is
+diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12) has
+a level-readable witness. Scalar signals only (OB-14).
 
 ## Property → observable mapping
 

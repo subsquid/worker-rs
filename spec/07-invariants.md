@@ -142,6 +142,20 @@ signed payload binds the query id (and for successes, content hash and `last_blo
 *Why:* unforgeable provenance is the network's trust anchor for served data.
 *Check:* CT-5 — verify every response in every suite run.
 
+**INV-26 — Fault attribution.** [response]
+`bad_request` is returned only for defects decidable as a pure function of the request
+bytes and network-public data (signature, envelope, query text). A rejection whose
+verdict depends on worker-local state — capacity (RP-4), store content or integrity
+(FM-32), clock freshness (RP-20 freshness verdict) — surfaces in a worker-fault class,
+never as a client error (ADR-20). [Known-violated: freshness — GAP-33; store
+corruption — GAP-5 (FM-32).]
+*Why:* clients treat client-fault classes as terminal and do not reroute;
+misattribution converts one worker's local condition into unrecoverable client-visible
+failures.
+*Check:* CT-4 — induce each worker-local condition (skewed clock, corrupt store,
+saturated capacity) against valid queries; assert the outcome class is never
+`bad_request`.
+
 ## Reporting
 
 **INV-30 — Status coherence.** [response]

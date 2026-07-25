@@ -95,6 +95,10 @@ verdict, RP-20 — portals convert it into their fork-recovery conflict) and
 `Response too large` (the engine-level oversize verdict — portals convert it into a
 narrow-the-query rejection).
 
+⚠ The freshness rejection (RP-20 freshness verdict) is typed `err.bad_request` today;
+intent is `err.server_error` (ADR-20, GAP-33). Its message text stays advisory — a
+parsed staleness contract would repeat GAP-30; the machine-readable form awaits OQ-7.
+
 ## Logs and status surface
 
 **IB-20 — `LogsRequest`.** `{from_timestamp_ms, last_received_query_id?}` — the DEF-14

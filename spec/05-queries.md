@@ -17,7 +17,7 @@ RP-20..29 status and log reads, error taxonomy.
 **RP-1 — Admission sequence.** [MUST] A query passes, in order: (1) authentication —
 signature verifies against the sender's identity and binds this worker's identity;
 (2) freshness — timestamp within P-TS-WINDOW of the worker clock (clock discipline:
-CN-8); (3) envelope
+CN-8; rejection class: the RP-20 freshness verdict); (3) envelope
 validation — recognized engine and output-format selectors, and a legal
 engine/format pairing; (4) capacity — a queue slot is reserved (else `server_overloaded`
 with a P-RETRY-HINT); (5) metering — 1.0 CU is spent from the sending portal's (DEF-20) operator bucket
@@ -115,17 +115,26 @@ class exists; message strings are advisory and unstable; classes are stable surf
 
 | Class | Trigger | CU | Logged | Retryable |
 |---|---|---|---|---|
-| `bad_request` | authentication, freshness, envelope, unparseable/uncompilable query, unknown table/column | pre-admission: 0 · post: 1·chip | pre: no · post: yes | no (fix and resend; freshness: yes with new timestamp) |
+| `bad_request` | authentication, envelope, unparseable/uncompilable query, unknown table/column | pre-admission: 0 · post: 1·chip | pre: no · post: yes | no (fix and resend) |
 | `not_found` | chunk not available (never assigned, not yet fetched, or evicted) | full refundable chip path | yes | yes — reroute, or retry after the availability map shows the chunk |
 | `too_many_requests` | operator bucket empty or no allocation | 0 | no | yes after hint; without allocation, only after on-chain change |
 | `server_overloaded` | capacity exhausted (queue or concurrency) | pre-admission: 0 · post-admission: 1 (ADR-6) | post only | yes after P-RETRY-HINT |
-| `server_error` | execution failure, downgrade (RP-14), signing failure, internal fault | 1·chip | yes | unknown; safe to retry (idempotent reads) |
+| `server_error` | execution failure, downgrade (RP-14), signing failure, internal fault, freshness rejection (pre-admission — verdict below) | 1·chip (freshness: 0) | yes (freshness: no) | unknown; safe to retry (idempotent reads; freshness: with a fresh timestamp) |
 | *(no response)* | undecodable request, reject fan-out exhausted, transport limits | 0 | no | yes (treat as transient) |
 
 Errors never carry result data (INV-20). A `not_found` does not distinguish its three
 causes (GAP-19 tracks adding machine-readable subcodes); the availability map (RP-21) is
 the sanctioned disambiguator for status consumers (the scheduler) — query clients
 reroute on `not_found` without reading it.
+
+**Freshness verdict.** [MUST — intent, currently violated: GAP-33] A rejection whose
+only cause is timestamp freshness (RP-1 step 2) is a worker-fault outcome: it surfaces
+as `server_error`, never `bad_request`, because its reference input is the worker's own
+clock and the worker cannot tell a stale sender from its own skew (INV-26, FM-55,
+ADR-20). Accounting keeps the pre-admission rule: no CU, no log record (ADR-7). Clients
+retry with a fresh timestamp; systematic freshness rejections are the worker's own
+alarm signal (OB-15), never grounds to blame the requester. A machine-readable
+staleness verdict awaits the OQ-7 surface revision.
 
 **Anchor-mismatch verdict.** [MUST — intent, currently violated: GAP-30] A query whose
 body carries a continuation anchor (the expected parent hash of the first selected

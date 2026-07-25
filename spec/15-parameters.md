@@ -45,6 +45,7 @@ batch unless stated).
 | P-RESP-BUDGET | engine early-stop result budget (RP-13) | 20 MiB | same |
 | P-RETRY-HINT | retry-after on overload rejections (RP-4) | 1 000 ms | same |
 | P-TS-WINDOW | query timestamp freshness window (RP-1) | 60 s | same |
+| P-SKEW-ALARM | estimated clock-offset magnitude raising the FM-55 alarm (OB-15) | no signal exists — GAP-33 | P-TS-WINDOW / 2 ⚠ (ADR-20) |
 | P-STREAM-TIMEOUT | transport stream read/write timeout (IB-2) | 20 s | same |
 | P-MEM-CEIL | process memory ceiling, derivable per PF-1 | unmeasured; per-query peak ≈ 3 × result size (HZ-4) | formula ratified with ADR-19 ⚠ |
 

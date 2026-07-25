@@ -50,6 +50,46 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
+  # MG-4: the PR conformance subset, kept as its own job so its wall clock is visible
+  # against P-GATE-PR-TIME instead of hiding inside the unit-test run.
+  conformance:
+    name: Conformance (spec/13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # P-GATE-PR-TIME
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    steps:
+      - name: Cache protoc
+        id: cache-protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/protoc
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.arch }}
+
+      - name: Install protoc (if not cached)
+        if: steps.cache-protoc.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.local/protoc
+          curl -L -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${ARCH}.zip"
+          unzip -q /tmp/protoc.zip -d ~/.local/protoc
+
+      - name: Add protoc to PATH
+        run: echo "$HOME/.local/protoc/bin" >> "$GITHUB_PATH"
+
+      # The conformance corpus is generated, so LFS is not needed here.
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Run conformance suite
+        run: cargo test --test conformance --all-features
+      # Gap tests are ignored until their fix lands (MG-8: failing-test-first, never a
+      # silent skip). Listing them keeps the quarantine visible in the job log.
+      - name: List quarantined gap tests
+        run: cargo test --test conformance --all-features -- --ignored --list
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
