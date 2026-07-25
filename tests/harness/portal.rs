@@ -1,9 +1,7 @@
 //! HC-3 — portal driver: identity keys and signed queries (IB-10).
 //!
-//! The driver produces genuinely signed `Query` messages bound to the worker under test,
-//! so the harness exercises RP-1's real authentication rather than bypassing it. Every
-//! deviation a test wants (stale timestamp, foreign worker, unknown enum value) is a
-//! knob here, not a hand-built message elsewhere.
+//! Genuinely signed messages, so RP-1's real authentication runs. Every deviation a test
+//! wants is a knob here, not a hand-built message elsewhere.
 
 use sqd_messages::{Compression, OutputFormat, Query, QueryEngine};
 use sqd_network_transport::{Keypair, PeerId};

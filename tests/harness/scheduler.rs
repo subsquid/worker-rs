@@ -1,9 +1,8 @@
 //! HC-1 — scheduler simulator: the network-state document (IB-40) and the assignment
 //! document (IB-41), served over HTTP exactly where the worker looks for them.
 //!
-//! Assignments are built with the real `sqd-assignments` builder, so the worker parses the
-//! same FlatBuffers layout production emits, including crypto-box-encrypted per-worker
-//! headers. The fault knobs deliberately corrupt *inputs*, never the encoder.
+//! Built with the real `sqd-assignments` builder, so the worker parses the layout production
+//! emits, encrypted headers included. Fault knobs corrupt *inputs*, never the encoder.
 
 use std::io::Write;
 
@@ -151,8 +150,7 @@ impl Scheduler {
         placements: &[ChunkPlacement],
         fault: AssignmentFault,
     ) -> Vec<u8> {
-        // The builder needs a `rand_core` 0.6 CSPRNG; ours is seeded, so a run's assignment
-        // bytes — nonces included — are reproducible.
+        // Seeded `rand_core` 0.6 CSPRNG, so assignment bytes — nonces included — replay.
         let mut builder = AssignmentBuilder::new_with_rng(STORAGE_SECRET, self.rng.clone())
             .check_continuity(false);
 

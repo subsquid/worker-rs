@@ -58,23 +58,37 @@ mod tests {
     use crate::storage::Filesystem;
     use crate::util::tests::tests_data;
 
+    /// `ls` returns entries verbatim; every production caller filters by name shape
+    /// (`list_top_dirs`, `list_chunks`, `load_state`). Drop the OS's leftovers — a Finder
+    /// visit to `tests/data` should not turn this red.
+    fn visible(entries: Vec<camino::Utf8PathBuf>) -> Vec<camino::Utf8PathBuf> {
+        entries
+            .into_iter()
+            .filter(|p| !p.file_name().is_some_and(|n| n.starts_with('.')))
+            .collect()
+    }
+
     #[tokio::test]
     async fn test_fs() {
         let tests_data = tests_data();
         let fs = LocalFs::new(tests_data.clone());
-        assert_eq!(fs.ls_root().await.unwrap(), [tests_data.join("0017881390")]);
         assert_eq!(
-            fs.ls("0017881390").await.unwrap(),
+            visible(fs.ls_root().await.unwrap()),
+            [tests_data.join("0017881390")]
+        );
+        assert_eq!(
+            visible(fs.ls("0017881390").await.unwrap()),
             [tests_data.join("0017881390/0017881390-0017882786-32ee9457")]
         );
-        let mut listed = fs
-            .cd("0017881390")
-            .ls("0017881390-0017882786-32ee9457")
-            .await
-            .unwrap()
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string())
-            .collect::<Vec<_>>();
+        let mut listed = visible(
+            fs.cd("0017881390")
+                .ls("0017881390-0017882786-32ee9457")
+                .await
+                .unwrap(),
+        )
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string())
+        .collect::<Vec<_>>();
         listed.sort();
         assert_eq!(
             listed,

@@ -78,9 +78,7 @@ pub struct Args {
     #[clap(env, hide(true), default_value_t = 0.001)]
     pub sentry_traces_sample_rate: f32,
 
-    // Explicit action: like its env-only siblings this is a positional, and a bare `bool`
-    // would default to a flag action, which clap rejects for positionals — a debug_assert
-    // that aborted every debug-build invocation, `--help` included.
+    // A bare `bool` positional defaults to a flag action, which clap rejects.
     #[clap(env, hide(true), action = clap::ArgAction::Set, default_value_t = true)]
     pub sentry_is_enabled: bool,
 }

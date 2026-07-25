@@ -117,8 +117,7 @@ impl Worker {
     ) -> QueryResult {
         let before = self.queries_running.fetch_add(1, Ordering::SeqCst);
         metrics::RUNNING_QUERIES.inc();
-        // Must be bound to a named local: `let _ = ...` drops the guard at the end of this
-        // statement, which would release the slot before the query even runs.
+        // Named binding: `let _` would drop the guard here, freeing the slot immediately.
         let _guard = scopeguard::guard((), |_| {
             self.queries_running.fetch_sub(1, Ordering::SeqCst);
             metrics::RUNNING_QUERIES.dec();
