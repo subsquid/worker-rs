@@ -39,7 +39,7 @@ and are logged (ADR-7 draws the billable line at admission, and the test-pinned 
 is that malformed-but-admitted queries pay).
 
 **RP-4 — Concurrency and overload.** [MUST] At most P-Q-PAR queries execute
-concurrently [enforcement is intent, currently violated: GAP-1]; the intake queue holds
+concurrently; the intake queue holds
 P-Q-QUEUE per protocol surface with P-Q-STREAMS concurrent message handlers; excess
 yields `server_overloaded` + P-RETRY-HINT. An overload rejection after admission keeps
 the CU (ADR-6). Rejection responses themselves are bounded by P-REJECT-CONC concurrent

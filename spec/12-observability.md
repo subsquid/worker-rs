@@ -23,7 +23,6 @@ GAP-17), chunks evicted.
 and of the log store (RS-7's witness ⚠ — the latter does not exist today, GAP-17).
 
 **OB-6 — Query concurrency gauge.** [MUST] Currently executing admitted queries.
-[Known-lying today: reads ~0 — GAP-1.]
 
 **OB-7 — Query outcome counters.** [MUST] Admitted-query count by outcome class
 (RP-20), plus pre-admission rejection counters by cause (overload, no-allocation,
@@ -91,5 +90,5 @@ For the harness, an incorrect signal is a failure of the same severity as an inc
 response: CT runs cross-check every OB gauge/counter against harness-known ground truth
 (injected load, ledger state, model state) and fail on divergence beyond one update
 interval. A metric that cannot be cross-checked is a spec bug — extend the signal or
-the harness until it can. (Current known liars are registered: GAP-1's gauge, GAP-17's
+the harness until it can. (Current known liars are registered: GAP-17's
 dead counter and bucketless histograms.)

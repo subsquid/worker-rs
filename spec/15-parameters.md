@@ -30,7 +30,7 @@ batch unless stated).
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| P-Q-PAR | concurrent executing queries (RP-4) | 20 configured, **not enforced** — GAP-1; effective ceiling = 2 × P-Q-STREAMS | 20, enforced ⚠ |
+| P-Q-PAR | concurrent executing queries (RP-4) | 20, enforced | same |
 | P-Q-QUEUE | intake queue depth per protocol surface (RP-4) | 16 | same |
 | P-Q-STREAMS | concurrent message handlers per protocol surface (RP-4) | 32 | same |
 | P-Q-ACCEPT-BUF | transport accept buffer per protocol surface (IB-2) | 128 | same |

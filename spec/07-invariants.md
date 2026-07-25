@@ -170,8 +170,9 @@ cross-check.
 **INV-31 — Metrics honesty.** [state]
 Every OB gauge equals its model quantity at observation (within one update interval):
 available/downloading/pending counts match the sets; the running-query gauge matches
-in-flight admitted queries; counters count what their names claim. [Known-violated: the
-running-query gauge reads ~0 — GAP-1.]
+in-flight admitted queries; counters count what their names claim. [Partially violated:
+the pre-admission and outcome counters still misreport — GAP-17. The running-query gauge
+is now honest and CT-6-checked.]
 *Why:* operators act on these numbers; a lying gauge converts incidents into mysteries.
 *Check:* CT-1/CT-6 — scraper cross-checks gauges against harness-known state
 (12 §lying-metrics rule).
