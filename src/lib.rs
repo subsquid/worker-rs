@@ -14,9 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The worker as a library. `src/main.rs` is a thin binary over this; the conformance
-//! harness in `tests/` drives the same subsystems the binary wires together
-//! (spec/13 §harness architecture).
+//! The worker as a library; `src/main.rs` is a thin binary over it.
 
 #![warn(clippy::correctness)]
 #![warn(clippy::suspicious)]

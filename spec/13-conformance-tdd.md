@@ -124,11 +124,12 @@ ones-count consistent (INV-30) · gauges nonnegative and consistent with set alg
 ## Traceability matrix (as of 2026-07-25)
 
 Statuses reflect the actual test inventory: 39 inline unit tests (4 `mvcc-chunks`-gated)
-plus the conformance tier over the harness in `tests/harness/`: 5 tests in
-`tests/conformance.rs` and 1 in `tests/conformance_metrics.rs` (its own binary — the OB
-signals are process-global, so a gauge assertion cannot share a process with other
-query-running tests). WP/RP/CN/RS rows are enforced through the
-INV/LIV rows that encode them (see 07 §reading the catalog).
+plus the conformance tier over the harness in `tests/harness/`: one binary per subject —
+`e2e` (the smoke path), `query_surface` (admission outcomes and the RP-20 taxonomy) and
+`query_concurrency` (separate by necessity, not topic: the OB signals are process-global,
+so a gauge assertion cannot share a process with other query-running tests).
+WP/RP/CN/RS rows are enforced through the INV/LIV rows that encode them
+(see 07 §reading the catalog).
 
 A Phase 0 row reads **P** only where the smoke path actually asserts the property; the
 harness's own `UNCOVERED` and `validators::MISSING` lists name what it still cannot see,
@@ -148,7 +149,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-13 | CT-5 | P⊘ | the running-query gauge is now CT-6-checked (rises under load, bounded by the cap, returns to zero); the GAP-17 liars remain |
 | REQ-20 | CT-5 | P | RP-1 step 1 covered: an unverifiable signature is rejected with no CU and no log record. Freshness, envelope and replay untested |
 | REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
-| REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `conformance_metrics`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
+| REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `query_concurrency`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
 | REQ-24 | CT-4/9 | U⊘ | known-violated (GAP-2, GAP-4) |
 | REQ-25 | CT-4 | U⊘ | no floor exists (GAP-3) |
@@ -271,8 +272,8 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 1. ~~**Phase 0 — harness skeleton**~~ **done**: HC-1/2/3/8 stubs + HC-5 validators +
    HC-12 seeding; one end-to-end smoke (assign → download → query → verify → logs pull).
-   Lives in `tests/harness/` behind `tests/conformance.rs`; the crate grew a library
-   target so the tier can reach it. The SUT is assembled from the production subsystems
+   Lives in `tests/harness/`, driven by one test binary per subject; the crate grew a
+   library target so the tier can reach it. The SUT is assembled from the production subsystems
    and driven through the production functions, but the libp2p transport and the
    `P2PController` event loops are outside it — `harness::UNCOVERED` is the standing list.
 2. **Phase 1 — P0 gaps**: a failing test per gap, then the fix. MG-4 becomes meaningful

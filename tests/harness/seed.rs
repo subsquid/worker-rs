@@ -77,12 +77,9 @@ impl Drop for SeedReporter {
     }
 }
 
-/// SplitMix64. Deterministic and dependency-free; implements the `rand_core` 0.6 traits
-/// that `sqd-assignments`' builder requires (via `crypto_box`), which the workspace's
-/// `rand` 0.9 does not.
-///
-/// `CryptoRng` here is a compatibility claim, not a security one: it only ever seeds
-/// stub-side key material inside tests.
+/// SplitMix64, implementing the `rand_core` 0.6 traits `sqd-assignments`' builder needs and
+/// the workspace's `rand` 0.9 doesn't. `CryptoRng` is a compatibility claim, not a security
+/// one — it only seeds stub-side key material.
 #[derive(Clone, Debug)]
 pub struct SplitMix64(u64);
 

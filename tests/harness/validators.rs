@@ -1,12 +1,8 @@
 //! HC-5 — structural validators (spec/13 §structural validators).
 //!
-//! Kind-agnostic: these run against *every* response the harness sees, with no knowledge of
-//! what the query asked for. They encode the parts of the contract that hold unconditionally,
-//! so a test that forgets to assert something still catches a violation of it.
-//!
-//! Each check names the property it enforces. Checks that need capabilities Phase 0 doesn't
-//! have (HC-6's scrapes for the INV-1 gauge algebra) are absent rather than stubbed — see
-//! `MISSING` below, which the harness capability register mirrors.
+//! Kind-agnostic: these hold for every response regardless of what was asked, so a test
+//! that forgets to assert something still catches a violation. Checks Phase 0 can't do are
+//! listed in `MISSING` rather than stubbed.
 
 use sqd_messages::{query_result, Compression, Query, QueryLogs, QueryResult, WorkerStatus};
 use sqd_network_transport::PeerId;
@@ -67,7 +63,13 @@ pub fn query_response(response: &QueryResult, request: &Query, worker_id: PeerId
 
     match result {
         query_result::Result::Ok(ok) => {
-            let range = request.block_range.expect("caller sent a block range");
+            // A missing range is itself the violation — `execute` owes a `bad_request` for it.
+            let Some(range) = request.block_range else {
+                v.check(false, "RP-10", || {
+                    "success for a query with no block_range".to_owned()
+                });
+                return v;
+            };
             v.check(ok.last_block <= range.end, "RP-11", || {
                 format!("last_block {} > range.end {}", ok.last_block, range.end)
             });
@@ -82,8 +84,7 @@ pub fn query_response(response: &QueryResult, request: &Query, worker_id: PeerId
                 }
             };
 
-            // Only JSONL is self-describing enough to check structurally; Arrow IPC block
-            // ordering needs a decoder the harness doesn't carry yet.
+            // Arrow IPC ordering needs a decoder the harness doesn't carry yet.
             if request.output_format() == sqd_messages::OutputFormat::Jsonl {
                 jsonl_body(&mut v, &data, range.begin, ok.last_block, range.end);
             }
@@ -92,8 +93,7 @@ pub fn query_response(response: &QueryResult, request: &Query, worker_id: PeerId
             v.check(err.err.is_some(), "RP-20", || {
                 "error response carries no class".to_owned()
             });
-            // INV-20 is structural here: the error variant has no data field at all, so the
-            // check that matters is that a failed query didn't come back as `ok`.
+            // INV-20 holds by construction: the error variant has no data field.
         }
     }
 
@@ -145,15 +145,14 @@ fn jsonl_body(v: &mut Violations, data: &[u8], begin: u64, last_block: u64, end:
         previous = Some(number);
     }
 
-    // RP-11 boundary emission: an evaluated range never yields zero records. The one
-    // structurally decidable case is `last_block < end` — the result claims it stopped
-    // early, so it evaluated something and owes at least the boundary records. When
-    // `last_block == end` an empty body is legal (the disjoint-range case), and no
-    // structural check can separate that from a missing boundary record; pinning that
-    // needs the reference model (HC-4). GAP-32 is the open question there.
+    // RP-11 boundary emission. Only `last_block < end` is structurally decidable: the result
+    // claims early stop, so it evaluated something and owes boundary records. At
+    // `last_block == end` an empty body is legal (disjoint range) — separating that from a
+    // missing boundary record needs HC-4 (GAP-32).
     v.check(count > 0 || last_block >= end, "RP-11", || {
         format!(
-            "result stopped early at {last_block} (range end {end}) yet emitted no records              from [{begin}, {last_block}]"
+            "result stopped early at {last_block} (range end {end}) \
+             yet emitted no records from [{begin}, {last_block}]"
         )
     });
 }

@@ -1,11 +1,11 @@
-//! Conformance tests that read process-global metrics (spec/12 OB, INV-31).
+//! Query concurrency: the RP-4 cap and the OB-6 gauge that reports it.
 //!
-//! Separate test binary on purpose. The OB counters and gauges are `lazy_static`s shared
-//! by the whole process, so a test that asserts on `running_queries` cannot share a
-//! process with tests that run queries for other reasons — cargo would run them on
-//! parallel threads and the reading would be somebody else's traffic. One test per
-//! process-global signal; if this file grows a second gauge test, they need
-//! `--test-threads=1` or their own binary in turn.
+//! Its own binary because the OB signals are process-global: beside other query-running
+//! tests, cargo's parallel threads would make the gauge read somebody else's traffic. Any
+//! other process-global assertion needs the same — its own binary, or `--test-threads=1`.
+//!
+//! Part of the conformance tier (spec/13). A failure prints the run seed; replay with
+//! `SQD_CONFORMANCE_SEED=0x…`.
 
 mod harness;
 
@@ -19,9 +19,8 @@ use sqd_messages::{query_error, query_result};
 /// RP-4 / REQ-22 / INV-31: at most P-Q-PAR queries execute concurrently, excess yields
 /// `server_overloaded`, and the running-query gauge reflects the queries in flight.
 ///
-/// This was GAP-1. The cap was inert because `run_query`'s scopeguard was bound to `_`,
-/// so it dropped at the end of its own `let` statement — the slot was released before the
-/// query ran, and the gauge fell back to zero immediately after rising.
+/// Was GAP-1: `run_query`'s scopeguard was bound to `_`, so it dropped at the end of its
+/// own statement and the slot was freed before the query ran.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrency_cap_is_enforced_and_gauge_tracks_it() {
     const CAP: usize = 2;
@@ -50,8 +49,7 @@ async fn concurrency_cap_is_enforced_and_gauge_tracks_it() {
         .map(|_| h.all_blocks_query(&chunk.id, (4_000, 4_400)))
         .collect();
 
-    // Sampled from a separate task rather than a fixed sleep: the peak must be observed
-    // while the queries are in flight, and how long that is depends on the machine.
+    // Sampled from a task, not a fixed sleep: how long the queries run is machine-dependent.
     let done = Arc::new(AtomicBool::new(false));
     let sampler = tokio::spawn({
         let done = done.clone();
@@ -96,8 +94,7 @@ async fn concurrency_cap_is_enforced_and_gauge_tracks_it() {
         "RP-4: running_queries peaked at {peak}, above the configured cap of {CAP}"
     );
 
-    // The slot is released on every path, including the overload early return, so the
-    // gauge must come back down (INV-31: it tracks a set, it does not drift).
+    // Released on every path, overload early return included, so the gauge must fall back.
     h.await_condition("running_queries returns to zero", || async {
         sqd_worker::metrics::RUNNING_QUERIES.get() == 0
     })

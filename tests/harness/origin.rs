@@ -1,8 +1,7 @@
 //! HC-2 — data origin with a byte ledger (IB-42).
 //!
-//! Every file the worker downloads is served from here and recorded. The ledger is the
-//! provenance oracle: what ends up committed on disk must equal what this stub says it
-//! sent, which is what makes INV-13 (no corrupt commit) checkable at all.
+//! The ledger is the provenance oracle: what lands on disk must equal what this stub sent,
+//! which is what makes INV-13 checkable at all.
 
 use super::corpus::Chunk;
 use super::stub::{Fault, HttpStub, Served};

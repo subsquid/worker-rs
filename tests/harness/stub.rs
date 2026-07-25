@@ -1,9 +1,7 @@
 //! Shared HTTP stub: static content, a per-path fault injector, and a request ledger.
 //!
-//! HC-1 (IB-40/41), HC-2 (IB-42) and the schema registry (IB-44) are all instances of this
-//! with different content — the worker reaches every one of them over real HTTP through its
-//! production `reqwest` clients, so headers, status handling and timeouts are exercised for
-//! real rather than stubbed at a Rust seam.
+//! HC-1 (IB-40/41), HC-2 (IB-42) and the schema registry (IB-44) are instances of this. The
+//! worker reaches all three over real HTTP with its production clients, not at a Rust seam.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

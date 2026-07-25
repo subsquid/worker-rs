@@ -1,9 +1,7 @@
 //! Deterministic chunk corpus (HC-12's data half).
 //!
-//! Chunks are generated, not checked in: a few kilobytes of parquet per chunk keeps the
-//! PR gate inside P-GATE-PR-TIME, and the generator is the only place that knows the
-//! schema, so HC-4's future reference evaluation can share it. `tests/data/` stays the
-//! home of the large real-world chunk used by the layout unit tests.
+//! Generated, not checked in: kilobytes per chunk keeps the PR gate inside P-GATE-PR-TIME,
+//! and HC-4 can later share the generator. `tests/data/` keeps the large real-world chunk.
 
 use std::sync::Arc;
 

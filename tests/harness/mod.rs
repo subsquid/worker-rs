@@ -8,11 +8,8 @@
 //!                 HC-5 structural validators ◀── responses, logs ───────┘
 //! ```
 //!
-//! The SUT is assembled from the same subsystems `src/main.rs` wires together —
-//! `StateManager`, `Worker`, `LogsStorage`, `AllocationsChecker` — and reached through the
-//! production functions (`controller::assignments`, `controller::p2p::{validate_query,
-//! execute, build_delivery, build_log}`). What is *not* in the loop is the libp2p transport
-//! and the `P2PController` event loops; see `UNCOVERED`.
+//! The SUT is the production subsystems, reached through the production functions. The
+//! libp2p transport and the `P2PController` event loops are not in the loop; see `UNCOVERED`.
 
 #![allow(dead_code)] // Capabilities land before the tests that consume them.
 
@@ -50,8 +47,7 @@ use scheduler::{Assignment, AssignmentFault, ChunkPlacement, Scheduler};
 use seed::{Seed, SeedReporter};
 use stub::HttpStub;
 
-/// What this harness does **not** exercise, so an absent test is never read as a passing one.
-/// Each line is a capability gap the register in spec/13 tracks.
+/// What this harness does **not** exercise, so an absent test is never read as a pass.
 pub const UNCOVERED: &[&str] = &[
     "libp2p transport: IB-1/2 message limits, stream timeouts, the P-EVENT-QUEUE drop path",
     "P2PController intake: P-Q-QUEUE capacity (RP-1 step 4), reject fan-out (ADR-9), \
@@ -70,9 +66,7 @@ const SCHEMA_PATH: &str = "/schemas/evm.yaml";
 pub const DATASET: &str = "s3://conformance-evm";
 
 /// Outcome of driving one query through the admission and delivery path.
-// Variants differ in size because `QueryResult` carries the payload; this is a test
-// type built once per query, so the copy cost is irrelevant.
-#[allow(clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant)] // built once per query; size is irrelevant
 pub enum Served {
     /// Rejected at RP-1 steps 1–3 or 5: no compute unit spent, no log record.
     PreAdmission {
@@ -142,12 +136,9 @@ impl Default for Config {
         Self {
             parallel_queries: 20,
             concurrent_downloads: 3,
-            // A bucket refills at epoch_length / CUs (P-CU-BURST caps it at 3 tokens). A
-            // generous allocation keeps that interval ~1 ms so tests aren't paced by it;
-            // a test about rate limiting lowers this.
+            // Refill interval is epoch_length / CUs; keep it ~1 ms so tests aren't paced by it.
             compute_units: 1_000_000,
-            // Shipped defaults are 300 s / 60 s; a test that provokes a failure must not
-            // then wait minutes for the retry.
+            // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
         }
@@ -263,8 +254,6 @@ impl Harness {
         harness
     }
 
-    // ---- HC-1 drive: assignment intake -------------------------------------------------
-
     /// Generates a chunk, hosts it on HC-2, and returns its placement for `publish`.
     pub fn host_chunk(&self, chunk: &corpus::Chunk) -> ChunkPlacement {
         self.origin.host(chunk);
@@ -322,13 +311,9 @@ impl Harness {
         .await;
     }
 
-    // ---- HC-3 drive: queries ------------------------------------------------------------
-
     /// Runs a query through the production admission sequence (RP-1) and delivery path,
-    /// then stores the log record exactly as `handle_query` does.
-    ///
-    /// The RP-1 step-4 queue-capacity gate lives in the transport controller and is not in
-    /// this path (see `UNCOVERED`); the post-admission concurrency gate in `Worker` is.
+    /// then stores the log record as `handle_query` does. RP-1's step-4 queue gate lives in
+    /// the controller and is not covered; the concurrency gate in `Worker` is.
     pub async fn serve(&self, query: Query) -> Served {
         let peer_id = self.portal.peer_id();
 
@@ -364,7 +349,7 @@ impl Harness {
             outcome,
             Err(sqd_worker::query::result::QueryError::ServiceOverloaded)
         ) {
-            Some(Duration::from_secs(1))
+            Some(p2p::DEFAULT_BACKOFF)
         } else {
             retry_after
         };
@@ -403,24 +388,9 @@ impl Harness {
             .sign()
     }
 
-    // ---- reads --------------------------------------------------------------------------
-
-    /// The status report as `get_worker_status` would build it (IB-22). Kept in step with
-    /// that function by hand — it takes a `&Worker` the harness can't reach past the
-    /// controller, so a divergence here is a real risk worth watching.
+    /// The status report as the worker really builds it (IB-22).
     pub async fn status(&self) -> sqd_messages::WorkerStatus {
-        let status = self.worker.status().await;
-        sqd_messages::WorkerStatus {
-            assignment_id: status.assignment_id.unwrap_or_default(),
-            missing_chunks: Some(sqd_messages::BitString::new(&status.unavailability_map)),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            stored_bytes: Some(status.stored_bytes),
-            current_epoch: self.allocations.current_epoch(),
-            #[cfg(feature = "mvcc-chunks")]
-            last_applied_assignment_id: status.last_applied_assignment_id,
-            #[cfg(not(feature = "mvcc-chunks"))]
-            last_applied_assignment_id: None,
-        }
+        p2p::get_worker_status(&self.worker, self.allocations.current_epoch()).await
     }
 
     /// Reads a log page the way `handle_logs_request` does — including RP-22's serving lag,
@@ -441,16 +411,19 @@ impl Harness {
             None => (0, None),
         };
         self.logs
-            .get_logs(from_ts, to_timestamp_ms, from_id, 10 * 1024 * 1024)
+            .get_logs(from_ts, to_timestamp_ms, from_id, p2p::MAX_LOGS_SIZE)
             .await
             .expect("log store answers")
+    }
+
+    /// The page-size budget the worker serves logs under — RP-22's bound for validators.
+    pub fn logs_page_budget() -> usize {
+        p2p::MAX_LOGS_SIZE
     }
 
     pub fn logs_lag() -> Duration {
         protocol::MAX_TIME_LAG
     }
-
-    // ---- helpers -------------------------------------------------------------------------
 
     fn sign_error(
         &self,
@@ -468,11 +441,8 @@ impl Harness {
         msg
     }
 
-    /// Waits until the portal's bucket holds a token.
-    ///
-    /// This deliberately steps over the cold-start window — until the first registry poll
-    /// lands, every query is rejected `too_many_requests` with no hint. That window is
-    /// LIV-12's subject (and GAP-25's); tests about anything else must not race it.
+    /// Waits until the portal's bucket holds a token, stepping over the cold-start window
+    /// (LIV-12, GAP-25) so tests about anything else don't race it.
     async fn await_metering_ready(&self) {
         let portal = self.portal.peer_id();
         self.await_condition("metering bucket funded (LIV-12)", || async move {
@@ -570,9 +540,8 @@ fn build_args(
 ) -> Args {
     use clap::Parser;
 
-    // Parsed rather than constructed: `TransportArgs`/`RpcArgs` have private fields, and going
-    // through the CLI means the harness configures the SUT the way IB-32 says an operator does.
-    // The transport and RPC settings are inert here — no transport is built.
+    // Parsed, not constructed: `TransportArgs`/`RpcArgs` have private fields, and the CLI is
+    // how IB-32 says an operator configures this. Transport/RPC settings are inert here.
     let mut args = Args::parse_from([
         "sqd-worker",
         "--data-dir",
@@ -620,4 +589,38 @@ fn keypair_from(rng: &mut seed::SplitMix64) -> Keypair {
     let mut secret = [0u8; 32];
     rng.fill_bytes(&mut secret);
     Keypair::ed25519_from_bytes(secret).expect("32 bytes is a valid ed25519 key")
+}
+
+/// Every declared gap must name the spec identifier it defers to, or the lists decay into
+/// prose nobody can reconcile against the capability register (spec/13 MG-8).
+///
+/// Lives here, not in one binary: it guards the harness, so it holds wherever it is used.
+#[test]
+fn declared_gaps_cite_the_spec() {
+    for line in UNCOVERED.iter().chain(validators::MISSING) {
+        assert!(
+            cites_a_spec_id(line),
+            "declared gap names no spec identifier: {line:?}"
+        );
+    }
+    // The checker must be able to fail, or the loop above proves nothing.
+    assert!(!cites_a_spec_id("no identifiers here, just prose"));
+    assert!(cites_a_spec_id("blocked on GAP-32"));
+    // Prefix and number must belong to one token, or any capitalised word near a digit passes.
+    assert!(!cites_a_spec_id("ABC- 1x"));
+    assert!(!cites_a_spec_id("head-of-line blocking"));
+    assert!(cites_a_spec_id("covers IB-40/41 but not the rest"));
+}
+
+/// True if the text contains a `PREFIX-<digits>` token — the suite's identifier shape.
+fn cites_a_spec_id(text: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .any(|token| {
+            token.match_indices('-').any(|(dash, _)| {
+                let (prefix, rest) = (&token[..dash], &token[dash + 1..]);
+                !prefix.is_empty()
+                    && prefix.chars().all(|c| c.is_ascii_uppercase() || c == '-')
+                    && rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+            })
+        })
 }

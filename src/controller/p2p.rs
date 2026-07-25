@@ -44,7 +44,7 @@ const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
-const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
+pub const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 /// Caps concurrent reject sends. Past this, the response is dropped — a cheap stream reset — rather
 /// than spawning unbounded signing tasks under a flood.
 const MAX_CONCURRENT_REJECTS: usize = 64;
@@ -53,7 +53,7 @@ const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
 // TODO: find out why the margin is required
-const MAX_LOGS_SIZE: usize =
+pub const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
 
 struct AdmittedQuery {
@@ -740,8 +740,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 }
 
 /// Checks the signature and timestamp freshness; the `Err` is the response to send back.
-/// Free-standing (rather than a `P2PController` method) so the conformance harness can drive
-/// RP-1 steps 1–3 without a transport.
+/// Free-standing so the harness can drive RP-1 steps 1–3 without a transport.
 #[instrument(skip_all)]
 pub fn validate_query(
     query: &Query,
@@ -1018,8 +1017,10 @@ pub fn build_log(query: Query, client_id: PeerId, logged: Logged) -> QueryExecut
     }
 }
 
+/// Public so the harness asserts against the status the worker really reports, rather than a
+/// copy of this function.
 #[tracing::instrument(skip_all)]
-async fn get_worker_status(
+pub async fn get_worker_status(
     worker: &Worker,
     current_epoch: Option<u32>,
 ) -> sqd_messages::WorkerStatus {
