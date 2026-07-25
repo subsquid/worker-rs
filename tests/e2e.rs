@@ -101,3 +101,77 @@ async fn smoke_assign_download_query_verify_logs() {
         "IB-21: the record carries the original query"
     );
 }
+
+/// WP-2 / DEF-13: the worker fetches the chunks its own slice names and no others.
+///
+/// Guards the harness too — a placement that named this worker regardless of `assigned` would
+/// leave both the flag and `AssignmentFault::NoChunksForWorker` inert.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_assigned_chunks_are_fetched() {
+    let mut h = Harness::start().await;
+
+    let mine = corpus::chunk(1_000, 1_009, 1);
+    let theirs = corpus::chunk(1_010, 1_019, 1);
+    let placements = [
+        h.host_chunk_for(&mine, true),
+        h.host_chunk_for(&theirs, false),
+    ];
+
+    h.publish_and_apply("assignment-1", &placements).await;
+    h.await_all_chunks_available().await;
+
+    // The slice is one chunk wide, though the document describes two.
+    let status = h.status().await;
+    validators::status(&status, 1).assert_none("status with an unassigned chunk present");
+
+    // HC-2's ledger is the proof: the unassigned chunk was reachable and never requested.
+    for (name, _) in &theirs.files {
+        assert_eq!(
+            h.origin.fetch_count(&theirs.id, name),
+            0,
+            "WP-2: fetched {name} of a chunk this worker was not assigned"
+        );
+    }
+    assert!(
+        h.origin.fetch_count(&mine.id, "blocks.parquet") > 0,
+        "WP-11: the assigned chunk should have been fetched"
+    );
+}
+
+/// The GAP-3 fault input: a worker in the roster holding no chunks at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_slice_assigns_nothing() {
+    use harness::scheduler::AssignmentFault;
+
+    let mut h = Harness::start().await;
+
+    let chunk = corpus::chunk(3_000, 3_009, 1);
+    let placement = h.host_chunk(&chunk);
+    h.publish(
+        "assignment-1",
+        &[placement],
+        AssignmentFault::NoChunksForWorker,
+    );
+    assert!(
+        h.poll_and_apply().await,
+        "the document itself is well-formed"
+    );
+
+    let status = h.status().await;
+    assert_eq!(
+        status
+            .missing_chunks
+            .as_ref()
+            .unwrap()
+            .to_vec()
+            .unwrap()
+            .len(),
+        0,
+        "DEF-13: an empty slice must leave the availability map empty"
+    );
+    assert_eq!(
+        h.origin.fetch_count(&chunk.id, "blocks.parquet"),
+        0,
+        "no chunk is assigned, so nothing may be fetched"
+    );
+}

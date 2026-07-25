@@ -11,7 +11,6 @@ mod harness;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use harness::{corpus, Config, Harness};
 use sqd_messages::{query_error, query_result};
@@ -23,11 +22,17 @@ use sqd_messages::{query_error, query_result};
 /// own statement and the slot was freed before the query ran.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrency_cap_is_enforced_and_gauge_tracks_it() {
-    const CAP: usize = 2;
+    // Two caps: asserting against one only shows some ceiling holds, not the configured one.
+    for cap in [2, 3] {
+        cap_is_honoured(cap).await;
+    }
+}
+
+async fn cap_is_honoured(cap: usize) {
     const EXCESS: usize = 10;
 
     let mut h = Harness::with_config(Config {
-        parallel_queries: CAP,
+        parallel_queries: cap,
         ..Config::default()
     })
     .await;
@@ -45,27 +50,30 @@ async fn concurrency_cap_is_enforced_and_gauge_tracks_it() {
          another test in this process is interfering"
     );
 
-    let queries: Vec<_> = (0..CAP + EXCESS)
+    let queries: Vec<_> = (0..cap + EXCESS)
         .map(|_| h.all_blocks_query(&chunk.id, (4_000, 4_400)))
         .collect();
 
-    // Sampled from a task, not a fixed sleep: how long the queries run is machine-dependent.
+    // Spins: a slot taken before its check is visible for a few instructions, and a 1 ms
+    // sampler steps straight over it.
     let done = Arc::new(AtomicBool::new(false));
-    let sampler = tokio::spawn({
+    let sampler = std::thread::spawn({
         let done = done.clone();
-        async move {
+        move || {
             let mut peak = 0;
             while !done.load(Ordering::Relaxed) {
                 peak = peak.max(sqd_worker::metrics::RUNNING_QUERIES.get());
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                std::hint::spin_loop();
             }
             peak
         }
     });
 
+    // One task, so every admission check runs in one burst and the cap is certainly contended.
+    // A task per query lets early ones finish first and the rejection stops being guaranteed.
     let results = futures::future::join_all(queries.into_iter().map(|q| h.serve(q))).await;
     done.store(true, Ordering::Relaxed);
-    let peak = sampler.await.expect("sampler task");
+    let peak = sampler.join().expect("sampler thread");
 
     let overloaded = results
         .iter()
@@ -80,18 +88,14 @@ async fn concurrency_cap_is_enforced_and_gauge_tracks_it() {
 
     assert!(
         overloaded >= 1,
-        "RP-4/REQ-22: {} concurrent queries against a cap of {CAP} produced no \
+        "RP-4/REQ-22: {} concurrent queries against a cap of {cap} produced no \
          server_overloaded rejection — the cap is not being enforced",
-        CAP + EXCESS
+        cap + EXCESS
     );
-    assert!(
-        peak > 0,
-        "INV-31/OB-6: running_queries never rose above zero while {} queries ran",
-        CAP + EXCESS
-    );
-    assert!(
-        peak <= CAP as i64,
-        "RP-4: running_queries peaked at {peak}, above the configured cap of {CAP}"
+    // Equality, not a bound: `peak <= cap` also passes an implementation stuck at one slot.
+    assert_eq!(
+        peak, cap as i64,
+        "RP-4/INV-31: running_queries peaked at {peak} against a configured cap of {cap}"
     );
 
     // Released on every path, overload early return included, so the gauge must fall back.

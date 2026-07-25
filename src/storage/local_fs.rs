@@ -58,9 +58,8 @@ mod tests {
     use crate::storage::Filesystem;
     use crate::util::tests::tests_data;
 
-    /// `ls` returns entries verbatim; every production caller filters by name shape
-    /// (`list_top_dirs`, `list_chunks`, `load_state`). Drop the OS's leftovers — a Finder
-    /// visit to `tests/data` should not turn this red.
+    /// `ls` returns entries verbatim; every production caller filters by name shape, so a
+    /// stray `.DS_Store` is only ever this assertion's problem.
     fn visible(entries: Vec<camino::Utf8PathBuf>) -> Vec<camino::Utf8PathBuf> {
         entries
             .into_iter()

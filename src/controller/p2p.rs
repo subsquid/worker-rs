@@ -1017,8 +1017,7 @@ pub fn build_log(query: Query, client_id: PeerId, logged: Logged) -> QueryExecut
     }
 }
 
-/// Public so the harness asserts against the status the worker really reports, rather than a
-/// copy of this function.
+/// Public so the harness asserts against the real status, not a copy of this function.
 #[tracing::instrument(skip_all)]
 pub async fn get_worker_status(
     worker: &Worker,

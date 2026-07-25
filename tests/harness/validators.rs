@@ -63,7 +63,7 @@ pub fn query_response(response: &QueryResult, request: &Query, worker_id: PeerId
 
     match result {
         query_result::Result::Ok(ok) => {
-            // A missing range is itself the violation — `execute` owes a `bad_request` for it.
+            // The missing range is itself the violation: `execute` owes a `bad_request`.
             let Some(range) = request.block_range else {
                 v.check(false, "RP-10", || {
                     "success for a query with no block_range".to_owned()

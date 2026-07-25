@@ -115,16 +115,23 @@ impl Worker {
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult {
-        let before = self.queries_running.fetch_add(1, Ordering::SeqCst);
+        // `fetch_add` then compare would let concurrent rejections carry the count past the cap
+        // until their guards ran, inflating the gauge (INV-31) and shedding queries that fit.
+        if self
+            .queries_running
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
+                (running < self.max_parallel_queries).then_some(running + 1)
+            })
+            .is_err()
+        {
+            return Err(QueryError::ServiceOverloaded);
+        }
         metrics::RUNNING_QUERIES.inc();
         // Named binding: `let _` would drop the guard here, freeing the slot immediately.
         let _guard = scopeguard::guard((), |_| {
             self.queries_running.fetch_sub(1, Ordering::SeqCst);
             metrics::RUNNING_QUERIES.dec();
         });
-        if before >= self.max_parallel_queries {
-            return Err(QueryError::ServiceOverloaded);
-        }
 
         tracing::debug!(
             "Running query from {}",

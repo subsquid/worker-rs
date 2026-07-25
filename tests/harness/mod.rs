@@ -256,8 +256,14 @@ impl Harness {
 
     /// Generates a chunk, hosts it on HC-2, and returns its placement for `publish`.
     pub fn host_chunk(&self, chunk: &corpus::Chunk) -> ChunkPlacement {
+        self.host_chunk_for(chunk, true)
+    }
+
+    /// Same, but `assigned` decides whether this worker's slice names the chunk (DEF-13). An
+    /// unassigned chunk is still in the document and still reachable.
+    pub fn host_chunk_for(&self, chunk: &corpus::Chunk, assigned: bool) -> ChunkPlacement {
         self.origin.host(chunk);
-        Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, true)
+        Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, assigned)
     }
 
     /// Publishes an assignment on HC-1 and drives the worker's real intake path
@@ -591,36 +597,97 @@ fn keypair_from(rng: &mut seed::SplitMix64) -> Keypair {
     Keypair::ed25519_from_bytes(secret).expect("32 bytes is a valid ed25519 key")
 }
 
-/// Every declared gap must name the spec identifier it defers to, or the lists decay into
-/// prose nobody can reconcile against the capability register (spec/13 MG-8).
+/// Every declared gap must name identifiers the spec defines, or the lists decay into prose
+/// nobody can reconcile against the capability register (spec/13 MG-8). Shape alone is not
+/// enough — a renumbered id keeps the shape and stops pointing at anything.
 ///
 /// Lives here, not in one binary: it guards the harness, so it holds wherever it is used.
 #[test]
 fn declared_gaps_cite_the_spec() {
+    let defined = spec_identifiers();
+    // An inventory that failed to load would make everything below vacuous.
+    assert!(
+        defined.len() > 100 && defined.contains("GAP-3") && defined.contains("INV-31"),
+        "spec inventory looks wrong — {} identifiers parsed out of spec/",
+        defined.len()
+    );
+
     for line in UNCOVERED.iter().chain(validators::MISSING) {
+        let cited = cited_ids(line);
         assert!(
-            cites_a_spec_id(line),
+            !cited.is_empty(),
             "declared gap names no spec identifier: {line:?}"
         );
+        for id in cited {
+            assert!(
+                defined.contains(&id),
+                "declared gap cites {id}, which no spec doc defines: {line:?}"
+            );
+        }
     }
+
     // The checker must be able to fail, or the loop above proves nothing.
-    assert!(!cites_a_spec_id("no identifiers here, just prose"));
-    assert!(cites_a_spec_id("blocked on GAP-32"));
-    // Prefix and number must belong to one token, or any capitalised word near a digit passes.
-    assert!(!cites_a_spec_id("ABC- 1x"));
-    assert!(!cites_a_spec_id("head-of-line blocking"));
-    assert!(cites_a_spec_id("covers IB-40/41 but not the rest"));
+    assert!(cited_ids("no identifiers here, just prose").is_empty());
+    assert!(cited_ids("head-of-line blocking").is_empty());
+    // Prefix and number must share a token, else any capitalised word near a digit passes.
+    assert!(cited_ids("ABC- 1x").is_empty());
+    // A mistyped suffix is not silently truncated to the id it resembles.
+    assert!(cited_ids("GAP-3x").is_empty());
+    assert_eq!(cited_ids("blocked on GAP-32"), ["GAP-32"]);
+    assert!(!defined.contains("NOTREAL-999"));
+    assert!(!defined.contains("ABC-1"));
 }
 
-/// True if the text contains a `PREFIX-<digits>` token — the suite's identifier shape.
-fn cites_a_spec_id(text: &str) -> bool {
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .any(|token| {
-            token.match_indices('-').any(|(dash, _)| {
-                let (prefix, rest) = (&token[..dash], &token[dash + 1..]);
-                !prefix.is_empty()
-                    && prefix.chars().all(|c| c.is_ascii_uppercase() || c == '-')
-                    && rest.chars().next().is_some_and(|c| c.is_ascii_digit())
-            })
-        })
+/// The `PREFIX-<digits>` tokens in `text`. The digits must run to the end of the token, so a
+/// mistyped `GAP-3x` is not read as `GAP-3`. A bare continuation — the `2` of `IB-1/2` — carries
+/// no prefix and is not checked.
+fn cited_ids(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for token in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+        for (dash, _) in token.match_indices('-') {
+            let (prefix, number) = (&token[..dash], &token[dash + 1..]);
+            if !prefix.is_empty()
+                && prefix.chars().all(|c| c.is_ascii_uppercase())
+                && !number.is_empty()
+                && number.chars().all(|c| c.is_ascii_digit())
+            {
+                ids.push(format!("{prefix}-{number}"));
+            }
+        }
+    }
+    ids
+}
+
+/// Identifiers the suite defines, by the three shapes `spec/tools/check_spec.py` recognises:
+/// a bolded `**ID —`, an `ID —` heading, and a leading table cell.
+fn spec_identifiers() -> std::collections::HashSet<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("spec");
+    let patterns = [
+        regex::Regex::new(r"\*\*([A-Z]+)-(\d+)\s+—").unwrap(),
+        regex::Regex::new(r"(?m)^#{1,6}\s+([A-Z]+)-(\d+)\s+—").unwrap(),
+        regex::Regex::new(r"(?m)^\|\s*([A-Z]+)-(\d+)\b").unwrap(),
+    ];
+
+    let mut ids = std::collections::HashSet::new();
+    let mut pending = vec![root.clone()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("conformance harness cannot read {}: {e}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                let text = std::fs::read_to_string(&path).expect("spec doc is UTF-8");
+                for pattern in &patterns {
+                    ids.extend(
+                        pattern
+                            .captures_iter(&text)
+                            .map(|c| format!("{}-{}", &c[1], &c[2])),
+                    );
+                }
+            }
+        }
+    }
+    ids
 }

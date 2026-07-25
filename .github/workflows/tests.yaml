@@ -12,8 +12,7 @@ env:
   CARGO_TERM_COLOR: always
   PROTOC_VERSION: 33.3
   ARCH: linux-x86_64
-  # Nothing in CI reads a backtrace, and DWARF for the polars/arrow monomorphisations is the
-  # bulk of every binary here. The `test` profile inherits this.
+  # Nothing here reads a backtrace, and DWARF is the bulk of every binary. `test` inherits it.
   CARGO_PROFILE_DEV_DEBUG: "0"
 
 concurrency:
@@ -25,9 +24,8 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || !github.event.pull_request.draft
-    # Each target here links ~300 MB of polars/arrow monomorphisations. Four codegen units
-    # at once exhausts a 16 GB runner: the agent dies with SIGTERM and no rustc error, only
-    # "the runner has received a shutdown signal".
+    # Every target links ~300 MB of polars/arrow. Four at once exhausts a 16 GB runner, and
+    # the agent dies with SIGTERM and no rustc error.
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
@@ -55,18 +53,28 @@ jobs:
           lfs: true
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
-      # Unit tier only; the conformance binaries are the `conformance` job's, and building
-      # them in both jobs doubles the heaviest link work for no extra coverage.
+      # Unit tier only — building the conformance binaries here too would double the
+      # heaviest link work for no extra coverage.
       - name: Run tests
         run: cargo test --all-features --lib --bins
 
   # MG-4: the PR conformance subset, kept as its own job so its wall clock is visible
   # against P-GATE-PR-TIME instead of hiding inside the unit-test run.
   conformance:
-    name: Conformance (spec/13)
+    name: Conformance (spec/13, ${{ matrix.config }})
     runs-on: ubuntu-latest
     timeout-minutes: 10 # P-GATE-PR-TIME
     if: github.event_name == 'push' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        # The image ships default features (Dockerfile), so that is the configuration under
+        # test; mvcc-chunks gates 37 sites and flips whole branches, so it gets its own run.
+        include:
+          - config: default
+            features: ""
+          - config: all-features
+            features: "--all-features"
     # Three test binaries over the same heavy dependency graph — see the `test` job.
     env:
       CARGO_BUILD_JOBS: "2"
@@ -101,7 +109,7 @@ jobs:
       # with tests that run queries for other reasons.
       - name: Run conformance tier
         run: |
-          cargo test --all-features \
+          cargo test ${{ matrix.features }} \
             --test e2e \
             --test query_surface \
             --test query_concurrency
@@ -110,7 +118,7 @@ jobs:
       - name: List quarantined gap tests
         run: |
           for t in e2e query_surface query_concurrency; do
-            cargo test --all-features --test "$t" -- --ignored --list
+            cargo test ${{ matrix.features }} --test "$t" -- --ignored --list
           done
 
   fmt:

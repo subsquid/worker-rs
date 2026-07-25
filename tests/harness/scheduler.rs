@@ -161,6 +161,8 @@ impl Scheduler {
             } else {
                 &placement.dataset_base_url
             };
+            // `iter_chunks` resolves membership here, not from the worker's chunk list.
+            let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
             builder
                 .new_chunk()
                 .id(&placement.chunk_id)
@@ -168,20 +170,16 @@ impl Scheduler {
                 .dataset_base_url(base_url)
                 .block_range(placement.first_block..=placement.last_block)
                 .size(placement.size)
-                .worker_indexes(&[0])
+                .worker_indexes(if assigned { &[0] } else { &[] })
                 .last_block_timestamp(1_700_000_000 + placement.last_block)
                 .files(&placement.files)
                 .finish()
                 .expect("chunk is well-formed");
-            if placement.assigned {
+            if assigned {
                 assigned_indexes.push(index as u32);
             }
         }
         builder.finish_dataset();
-
-        if fault == AssignmentFault::NoChunksForWorker {
-            assigned_indexes.clear();
-        }
         // A fixed timestamp keeps the HMAC in the encrypted headers reproducible.
         builder.add_worker_with_timestamp(
             worker,
