@@ -1,0 +1,19 @@
+name: spec
+on:
+  pull_request:
+    paths: ["spec/**"]
+  push:
+    branches: [master]
+    paths: ["spec/**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # freshness checks need full history
+      - name: Annotate (non-gating, warnings included)
+        run: python3 spec/tools/check_spec.py spec --format github || true
+      - name: Gate on errors
+        run: python3 spec/tools/check_spec.py spec
