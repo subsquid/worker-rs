@@ -28,6 +28,7 @@ use crate::{
     query::result::{QueryError, QueryOk, QueryResult},
     storage::manager::{self, StateManager},
     types::dataset::Dataset,
+    util::panic_message,
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -97,6 +98,10 @@ impl Worker {
 
     pub async fn status(&self) -> manager::Status {
         self.state_manager.current_status().await
+    }
+
+    pub fn alarms(&self) -> manager::Alarms {
+        self.state_manager.alarms()
     }
 
     /// Subscribe to the "assignment fully applied" signal, so callers can refresh
@@ -224,12 +229,10 @@ impl Worker {
                 ))
             }))
             .unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+                Err(QueryError::from(anyhow::anyhow!(
+                    "Query panicked: {}",
+                    panic_message(panic)
+                )))
             });
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");
@@ -348,12 +351,10 @@ impl Worker {
                 ))
             }))
             .unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+                Err(QueryError::from(anyhow::anyhow!(
+                    "Query panicked: {}",
+                    panic_message(panic)
+                )))
             });
             tx.send(result).unwrap_or_else(|_| {
                 tracing::warn!("Query runner didn't wait for the result");
@@ -375,12 +376,10 @@ where
     sqd_polars::POOL.spawn(move || {
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
+                Err(QueryError::from(anyhow::anyhow!(
+                    "Query panicked: {}",
+                    panic_message(panic)
+                )))
             });
         tx.send(result).unwrap_or_else(|_| {
             tracing::warn!("Query runner didn't wait for the result");

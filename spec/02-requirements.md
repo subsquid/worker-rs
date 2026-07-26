@@ -122,7 +122,7 @@ exception. [Payload integrity after power loss is intent, currently violated: GA
 some committed prefix; no residue accumulates across repeated kills (RS-6).
 *Trace:* CN-3/4/5, INV-40..42, WP-15, WP-23.
 
-**REQ-24 — Hostile-input robustness.** [MUST — intent, currently violated: GAP-2, GAP-4]
+**REQ-24 — Hostile-input robustness.** [MUST — intent, currently violated: GAP-4]
 No input — query bytes, assignment document, origin payload, log request — may terminate
 the process, corrupt either store, or cause unbounded memory growth. Malformed input
 yields a typed error (queries) or a rejected-and-retried document (assignments), with an
@@ -131,13 +131,15 @@ alarm.
 run to completion with the process alive and both stores intact.
 *Trace:* ADR-18; FM-1, FM-10..23, INV-36.
 
-**REQ-25 — Bounded reconciliation blast radius.** [SHOULD — intent, currently violated: GAP-3]
+**REQ-25 — Bounded reconciliation blast radius.** [SHOULD]
 A single assignment application SHOULD NOT delete more than the P-DEL-FLOOR fraction of
-the store without an explicit operator override; a wipe-inducing assignment is held,
-alarmed, and re-evaluated on the next poll. ⚠ pending ADR-17.
+the store; a wipe-inducing assignment is held, alarmed, and re-evaluated on every pass.
+The hold is bounded: it lapses after P-DEL-HOLD-MAX, so a shrink the network keeps
+republishing is eventually obeyed and the held bytes stay accountable to RS-3. An
+operator override releases it sooner.
 *Acceptance:* publish an assignment dropping all chunks: the store retains its data, an
-alarm level is raised (OB-12), and a subsequent restoring assignment resumes normal
-reconciliation.
+alarm level is raised (OB-12), a subsequent restoring assignment resumes normal
+reconciliation, and — absent one — the eviction proceeds once P-DEL-HOLD-MAX elapses.
 *Trace:* ADR-17; WP-14, RS-5, FM-13.
 
 ## Explicitly unspecified

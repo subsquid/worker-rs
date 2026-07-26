@@ -25,6 +25,26 @@ pub enum QueryStatus {
     ServerError,
 }
 
+/// OB-12 alarm reasons. A level, not an event: raised while the condition holds.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum AlarmReason {
+    /// An assignment document was rejected whole (FM-12).
+    AssignmentRejected,
+    /// Some assigned chunk's download address doesn't resolve (FM-11).
+    UnresolvableChunkAddress,
+    /// The chain registry is unreachable or erroring (FM-52).
+    RegistryUnavailable,
+    /// Eviction is withheld by the P-DEL-FLOOR gate (REQ-25).
+    DeletionFloorHold,
+}
+
+const ALARM_REASONS: [AlarmReason; 4] = [
+    AlarmReason::AssignmentRejected,
+    AlarmReason::UnresolvableChunkAddress,
+    AlarmReason::RegistryUnavailable,
+    AlarmReason::DeletionFloorHold,
+];
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct WorkerInfoLabels {
     pub version: String,
@@ -40,11 +60,17 @@ struct QueryExecutedLabels {
     status: QueryStatus,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct AlarmLabels {
+    reason: AlarmReason,
+}
+
 lazy_static::lazy_static! {
     // Worker info metric (kept as worker_info_info for backward compatibility)
     pub static ref WORKER_INFO: Family<WorkerInfoLabels, Gauge> = Default::default();
 
     static ref STATUS: Family<StatusLabels, Gauge> = Default::default();
+    static ref ALARMS: Family<AlarmLabels, Gauge> = Default::default();
     pub static ref CHUNKS_AVAILABLE: Gauge = Default::default();
     pub static ref CHUNKS_DOWNLOADING: Gauge = Default::default();
     pub static ref CHUNKS_PENDING: Gauge = Default::default();
@@ -66,6 +92,17 @@ pub fn set_status(status: WorkerStatus) {
             worker_status: status,
         })
         .set(1);
+}
+
+/// OB-12: raise or clear `reason`'s alarm level.
+pub fn set_alarm(reason: AlarmReason, raised: bool) {
+    ALARMS
+        .get_or_create(&AlarmLabels { reason })
+        .set(raised as i64);
+}
+
+pub fn alarm_raised(reason: AlarmReason) -> bool {
+    ALARMS.get_or_create(&AlarmLabels { reason }).get() != 0
 }
 
 pub fn query_executed(result: &QueryResult) {
@@ -154,7 +191,16 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         RUNNING_QUERIES.clone(),
     );
     registry.register("worker_status", "Status of the worker", STATUS.clone());
+    registry.register(
+        "worker_alarms",
+        "Reason-coded alarm levels: 1 while the condition holds",
+        ALARMS.clone(),
+    );
     set_status(WorkerStatus::Starting);
+    // Exported from the start, so one read answers "is anything wrong".
+    for reason in ALARM_REASONS {
+        set_alarm(reason, false);
+    }
 }
 
 impl prometheus_client::encoding::EncodeLabelValue for WorkerStatus {
@@ -168,6 +214,36 @@ impl prometheus_client::encoding::EncodeLabelValue for WorkerStatus {
             WorkerStatus::Active => "active",
         };
         encoder.write_str(status)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// OB-12 wants a level, not an event: the same read must report raised and cleared.
+    #[test]
+    fn alarm_levels_are_readable_and_clearable() {
+        // A reason no other unit test touches, so this holds whatever else runs.
+        let reason = AlarmReason::DeletionFloorHold;
+        assert!(!alarm_raised(reason));
+        set_alarm(reason, true);
+        assert!(alarm_raised(reason));
+        set_alarm(reason, false);
+        assert!(!alarm_raised(reason));
+    }
+}
+
+impl prometheus_client::encoding::EncodeLabelValue for AlarmReason {
+    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        let reason = match self {
+            AlarmReason::AssignmentRejected => "assignment_rejected",
+            AlarmReason::UnresolvableChunkAddress => "unresolvable_chunk_address",
+            AlarmReason::RegistryUnavailable => "registry_unavailable",
+            AlarmReason::DeletionFloorHold => "deletion_floor_hold",
+        };
+        encoder.write_str(reason)?;
         Ok(())
     }
 }

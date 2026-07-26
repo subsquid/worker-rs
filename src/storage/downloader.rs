@@ -59,10 +59,9 @@ impl ChunkDownloader {
             panic!("Chunk {chunk} is already being downloaded");
         }
 
-        let num_files = files.len();
+        let watchdog = watchdog_timeout(self.args.s3_timeout, files.len());
         let client = self.reqwest_client.clone();
         let current_delay = self.current_delay;
-        let s3_timeout = self.args.s3_timeout;
         self.futures.push(tokio::spawn(async move {
             if current_delay > Duration::ZERO {
                 let sleep = rand::rng().random_range((current_delay / 2)..current_delay);
@@ -76,7 +75,7 @@ impl ChunkDownloader {
                 result = download_dir(files, dst, &client, &headers) => {
                     (chunk, result)
                 }
-                _ = tokio::time::sleep(s3_timeout * num_files as u32) => {
+                _ = tokio::time::sleep(watchdog) => {
                     (chunk, Err(anyhow!("Download timed out")))
                 }
                 _ = cancel_token.cancelled_owned() => {
@@ -127,6 +126,12 @@ impl ChunkDownloader {
     }
 }
 
+/// Whole-chunk download bound: one per-file timeout per file. The file count comes from the
+/// document, so it saturates rather than overflowing, and zero files still get one timeout.
+fn watchdog_timeout(per_file: Duration, num_files: usize) -> Duration {
+    per_file.saturating_mul(u32::try_from(num_files.max(1)).unwrap_or(u32::MAX))
+}
+
 /// Either downloads the entire directory or nothing at all.
 /// This function is cancel-safe. If it is not awaited until the end,
 /// it will clean up temporary results.
@@ -149,6 +154,28 @@ async fn download_dir(
     .await?;
     guard.persist(dst_dir)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FM-1: a document-chosen file count must not panic the task. `Duration * u32` does.
+    #[test]
+    fn watchdog_survives_any_file_count() {
+        let per_file = Duration::from_secs(60);
+        assert_eq!(watchdog_timeout(per_file, 3), Duration::from_secs(180));
+        assert_eq!(watchdog_timeout(per_file, 0), per_file);
+        assert_eq!(
+            watchdog_timeout(per_file, usize::MAX),
+            per_file.saturating_mul(u32::MAX)
+        );
+        assert_eq!(
+            watchdog_timeout(Duration::MAX, usize::MAX),
+            Duration::MAX,
+            "the bound saturates instead of overflowing"
+        );
+    }
 }
 
 #[instrument(skip_all)]

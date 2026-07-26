@@ -5,11 +5,11 @@ Status: Proposed
 ## Context
 
 ADR-3 accepted skipping document verification when the verifier cost over a minute.
-Since then: the panic on a malformed per-chunk address is proven remote-triggerable
-(GAP-2), decompression is unbounded (GAP-4/HZ-12), file names from the document reach
-filesystem paths without traversal checks, and origin payloads commit unverified
-(GAP-5). The one-minute measurement predates the binary-format rework and has not
-been re-taken.
+Since then: the reader's panic paths proved remote-triggerable and are now merely
+contained, not removed (ADR-21); decompression is unbounded (GAP-4/HZ-12); file names
+from the document reach filesystem paths without traversal checks; and origin payloads
+commit unverified (GAP-5). The one-minute measurement predates the binary-format rework
+and has not been re-taken.
 
 ## Decision
 

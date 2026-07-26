@@ -47,9 +47,11 @@ GAP-8; OQ-6.]
 
 **LIV-4 — Eviction convergence.**
 *Pre:* `c ∈ A`, `c ∉ N`, last pin released; process alive.
-*Bound:* store namespace removal within P-EVICT-BOUND ⚠ of the pin release — without
-requiring any further input event. [Currently violated: eviction waits for the next
-loop wake-up, potentially forever — GAP-6.]
+*Bound:* store namespace removal within P-EVICT-BOUND ⚠ of the pin release, or within
+P-DEL-HOLD-MAX + P-EVICT-BOUND when REQ-25's deletion floor withholds the batch — in
+both cases without requiring any further input event. [Currently violated for the
+pin-release path: eviction waits for the next loop wake-up, potentially forever —
+GAP-6. The floor's hold has its own timer.]
 *Witness:* evicted-chunks counter advances (OB-4); stored-bytes gauge falls (OB-5).
 *Check:* CT-1, CT-3.
 

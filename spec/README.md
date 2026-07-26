@@ -84,14 +84,15 @@ retention/space lifecycle (10).
 | [ADR-14](decisions/ADR-14-fail-fast-subsystem-tree.md) | Fail-fast subsystem tree | Accepted (historical) |
 | [ADR-15](decisions/ADR-15-identity-stamp-not-instance-lock.md) | Identity stamp, not an instance lock | Accepted (historical) |
 | [ADR-16](decisions/ADR-16-opaque-assignment-ids-pull-only-status.md) | Opaque assignment ids; pull-only status | Accepted (historical) |
-| [ADR-17](decisions/ADR-17-reconciliation-deletion-floor.md) | Reconciliation deletion floor | Proposed |
+| [ADR-17](decisions/ADR-17-reconciliation-deletion-floor.md) | Reconciliation deletion floor | Accepted (2026-07-26) |
 | [ADR-18](decisions/ADR-18-bounded-validated-assignment-intake.md) | Bounded, validated assignment intake | Proposed |
 | [ADR-19](decisions/ADR-19-ratify-provisional-targets.md) | Ratify provisional SLO targets and gate thresholds | Proposed |
 | [ADR-20](decisions/ADR-20-freshness-rejection-attribution.md) | Freshness rejections are worker-fault outcomes | Proposed |
+| [ADR-21](decisions/ADR-21-contain-assignment-reader-panics.md) | Contain assignment-reader panics | Accepted (2026-07-26) |
 
 ## How to use this suite
 
-1. **Ratify**: review the four `Proposed` ADRs and every ⚠ target in
+1. **Ratify**: review the three `Proposed` ADRs and every ⚠ target in
    [15-parameters.md](15-parameters.md); acceptance turns ⚠ into committed bounds.
 2. **Build the harness** in the order given in
    [13-conformance-tdd.md](13-conformance-tdd.md) §build order: input simulators and

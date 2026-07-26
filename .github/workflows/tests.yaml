@@ -75,7 +75,7 @@ jobs:
             features: ""
           - config: all-features
             features: "--all-features"
-    # Three test binaries over the same heavy dependency graph — see the `test` job.
+    # Four test binaries over the same heavy dependency graph — see the `test` job.
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
@@ -112,12 +112,13 @@ jobs:
           cargo test ${{ matrix.features }} \
             --test e2e \
             --test query_surface \
-            --test query_concurrency
+            --test query_concurrency \
+            --test assignment_faults
       # A gap test stays ignored until its fix lands (MG-8: failing-test-first, never a
       # silent skip). Listing them keeps any quarantine visible in the job log.
       - name: List quarantined gap tests
         run: |
-          for t in e2e query_surface query_concurrency; do
+          for t in e2e query_surface query_concurrency assignment_faults; do
             cargo test ${{ matrix.features }} --test "$t" -- --ignored --list
           done
 

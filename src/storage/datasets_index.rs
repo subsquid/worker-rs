@@ -4,7 +4,7 @@ use reqwest::Url;
 use sqd_network_transport::Keypair;
 use tracing::error;
 
-use crate::types::state::ChunkRef;
+use crate::{types::state::ChunkRef, util::panic_message};
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
 pub struct DatasetsIndex {
@@ -56,7 +56,25 @@ impl DatasetsIndex {
 
         Some(result)
     }
+    /// Reads this worker's slice out of `assignment`.
+    ///
+    /// The reader parses an unvalidated document (ADR-3, GAP-4) and panics on input it can't
+    /// read — a roster peer id, among others. ADR-21 contains that: a document nobody can
+    /// read costs one document (FM-12), not the process (FM-1).
     pub fn new(
+        assignment: sqd_assignments::Assignment,
+        id: impl Into<String>,
+        key: &Keypair,
+    ) -> anyhow::Result<Self> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::read(assignment, id, key)
+        }))
+        .unwrap_or_else(|payload| {
+            anyhow::bail!("assignment reader panicked: {}", panic_message(payload))
+        })
+    }
+
+    fn read(
         assignment: sqd_assignments::Assignment,
         id: impl Into<String>,
         key: &Keypair,

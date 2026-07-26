@@ -30,6 +30,14 @@ pub struct Args {
     #[clap(long, env, default_value_t = 3)]
     pub concurrent_downloads: usize,
 
+    /// Largest share of the stored chunks one assignment may delete (P-DEL-FLOOR). A larger
+    /// batch is held with an alarm; set to 1 to release it for a sanctioned rebalance.
+    #[clap(long, env, default_value_t = 0.5)]
+    pub deletion_floor: f64,
+
+    #[clap(env = "DELETION_HOLD_MAX_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
+    pub deletion_hold_max: Duration,
+
     #[clap(env, hide(true), value_parser=parse_seconds, default_value = "60")]
     pub s3_timeout: Duration,
 
