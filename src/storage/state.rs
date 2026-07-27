@@ -260,12 +260,12 @@ impl State {
     }
 }
 
-/// Test-only introspection for the property-based tests in
-/// [`super::state_pbt`], kept out of the production API surface.
-#[cfg(test)]
+/// Introspection for the property-based tests in `tests/state_pbt.rs`;
+/// hidden because it is test support, not part of the stable API.
+#[doc(hidden)]
 impl State {
     /// Structural invariants that must hold after every operation.
-    pub(super) fn assert_invariants(&self) {
+    pub fn assert_invariants(&self) {
         assert!(
             self.available.is_disjoint(&self.downloading),
             "available and downloading must not intersect"
@@ -306,31 +306,31 @@ impl State {
         );
     }
 
-    pub(super) fn available(&self) -> &ChunkSet {
+    pub fn available(&self) -> &ChunkSet {
         &self.available
     }
 
-    pub(super) fn downloading(&self) -> &ChunkSet {
+    pub fn downloading(&self) -> &ChunkSet {
         &self.downloading
     }
 
-    pub(super) fn desired(&self) -> &ChunkSet {
+    pub fn desired(&self) -> &ChunkSet {
         &self.desired
     }
 
-    pub(super) fn has_queued_downloads(&self) -> bool {
+    pub fn has_queued_downloads(&self) -> bool {
         !self.to_download.is_empty()
     }
 
-    pub(super) fn queued_downloads(&self) -> &ChunkSet {
+    pub fn queued_downloads(&self) -> &ChunkSet {
         &self.to_download
     }
 
-    pub(super) fn is_condemned(&self, chunk: &ChunkRef) -> bool {
+    pub fn is_condemned(&self, chunk: &ChunkRef) -> bool {
         self.condemned.contains_key(chunk)
     }
 
-    pub(super) fn has_condemned(&self) -> bool {
+    pub fn has_condemned(&self) -> bool {
         !self.condemned.is_empty()
     }
 }

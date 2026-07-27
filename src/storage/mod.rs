@@ -11,8 +11,6 @@ pub mod manager;
 #[cfg(test)]
 mod regression;
 pub mod state;
-#[cfg(test)]
-mod state_pbt;
 
 #[allow(async_fn_in_trait)]
 pub trait Filesystem {

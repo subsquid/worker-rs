@@ -44,14 +44,15 @@ pub struct Status {
     pub last_applied_assignment_id: Option<String>,
 }
 
-// pub(super) so the property-based tests in `super::state_pbt` can drive the
-// check-and-mark critical section directly.
+// Public (but doc-hidden) so `tests/state_pbt.rs` and `super::regression` can
+// drive the check-and-mark critical section directly.
+#[doc(hidden)]
 #[derive(Debug, Default)]
-pub(super) struct AssignmentApplicationStatus {
-    pub(super) current_assignment_id: Option<String>,
+pub struct AssignmentApplicationStatus {
+    pub current_assignment_id: Option<String>,
     // Intentionally remains set while a newer assignment is being applied.
     // This reports the latest fully applied assignment, not the current target.
-    pub(super) last_applied_assignment_id: Option<String>,
+    pub last_applied_assignment_id: Option<String>,
 }
 
 /// Terminal per-assignment verdict published on the settled channel.
@@ -362,7 +363,8 @@ impl StateManager {
 
 // Free function so tests can drive the check-and-mark critical section without
 // constructing a full `StateManager`.
-pub(super) fn mark_assignment_settled_if_ready(
+#[doc(hidden)]
+pub fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
     assignment_application: &Mutex<AssignmentApplicationStatus>,
     assignment_settled_tx: &tokio::sync::watch::Sender<Option<AssignmentSettled>>,

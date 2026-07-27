@@ -1,5 +1,5 @@
 //! Deterministic regression tests pinning counterexamples found by the
-//! property-based tests in [`super::state_pbt`].
+//! property-based tests in `tests/state_pbt.rs`.
 //!
 //! Counterexample: assignment A0 desires one chunk that is never downloaded;
 //! assignment A1 desires nothing. A settled-check that observes A1's

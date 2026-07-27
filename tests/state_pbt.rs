@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 
-use super::state::{State, MAX_DOWNLOAD_ATTEMPTS};
-use crate::types::state::{ChunkRef, ChunkSet};
+use sqd_worker::storage::state::{State, MAX_DOWNLOAD_ATTEMPTS};
+use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
 /// Small chunk universe so random subsets collide and re-assignments overlap.
 const UNIVERSE: usize = 8;
@@ -283,11 +283,11 @@ fn chunk_set(indexes: &[usize]) -> ChunkSet {
 mod confirmation {
     use parking_lot::Mutex;
 
-    use super::super::manager::{
+    use super::*;
+    use sqd_worker::storage::manager::{
         mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome,
         AssignmentSettled,
     };
-    use super::*;
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
@@ -325,7 +325,7 @@ mod confirmation {
     /// registered. Desired chunks and `current_assignment_id` change
     /// atomically w.r.t. the settled-check, as in `set_assignment`, so no ops
     /// interleave between them; the mixed-observation hazard is pinned in
-    /// `super::super::regression`.
+    /// `src/storage/regression.rs`.
     type Script = (Vec<usize>, Vec<MidOp>);
 
     fn arb_scripts() -> impl Strategy<Value = Vec<Script>> {
