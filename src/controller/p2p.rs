@@ -54,9 +54,8 @@ const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
 /// The one behavioral switch of the `mvcc-chunks` feature: apply assignments
-/// strictly in order, each waiting for the previous one to settle (applied or
-/// stalled). Without it every update is applied immediately in arrival order.
-/// The settled tracking and heartbeat reporting are always compiled.
+/// strictly in order, each waiting for the previous one to settle. Without it
+/// every update is applied immediately in arrival order.
 const IN_ORDER_APPLICATION: bool = cfg!(feature = "mvcc-chunks");
 // TODO: find out why the margin is required
 const MAX_LOGS_SIZE: usize =
@@ -355,11 +354,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             }
 
             match processing_id.clone() {
-                // The current assignment stalled — it can never be fully applied.
-                // Jump over it to the most recent assignment as soon as anything
-                // newer exists; until then only watch the update stream (the
-                // stall is terminal, so there is nothing to wait for in the
-                // state manager).
+                // The stalled assignment can never be fully applied. Jump to
+                // the most recent pending assignment as soon as one exists;
+                // until then only watch the update stream — the stall is
+                // terminal, so there is nothing to wait for.
                 Some(id) if processing_stalled => {
                     if !pending.is_empty() {
                         let skipped = keep_only_latest_pending_assignment(&mut pending);

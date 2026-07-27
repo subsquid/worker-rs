@@ -235,13 +235,10 @@ impl StateManager {
 
         let mut index = self.datasets_index.lock();
         // The settled-check correlates current_assignment_id with the chunk
-        // state, so the two must be updated atomically with respect to it:
-        // take the application lock before touching the desired chunks and
-        // hold it across both updates (lock order: index → application →
-        // state, same as everywhere else). Otherwise the state loop could
-        // observe the new desired set paired with the old assignment id and
-        // confirm a never-applied assignment based on the new one's chunks —
-        // found by the property test in `super::state_pbt::confirmation`.
+        // state, so both must change under the application lock (lock order:
+        // index → application → state); otherwise the check could pair the new
+        // desired set with the old id and confirm a never-applied assignment
+        // (see `super::regression`).
         let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
@@ -329,8 +326,8 @@ impl StateManager {
         let path = self.chunk_path(&chunk);
         let guard = scopeguard::guard(path, move |_| {
             if self.state.lock().unlock_chunk(&chunk) {
-                // The last query holding an undesired chunk finished — wake the
-                // state loop so the chunk is removed and downloads can resume.
+                // The last query holding a removable chunk finished — wake the
+                // state loop to delete it promptly.
                 self.notify.notify_one();
             }
         });
@@ -363,8 +360,8 @@ impl StateManager {
     }
 }
 
-// Free function (rather than a `StateManager` method) so tests can drive the exact
-// check-and-mark critical section without constructing a full `StateManager`.
+// Free function so tests can drive the check-and-mark critical section without
+// constructing a full `StateManager`.
 pub(super) fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
     assignment_application: &Mutex<AssignmentApplicationStatus>,
@@ -383,11 +380,9 @@ pub(super) fn mark_assignment_settled_if_ready(
         let state = state.lock();
         (state.is_fully_applied(), state.is_stalled())
     };
-    // send_replace, not send: a plain send stores nothing when no receiver is
-    // subscribed yet, and the guards above never re-send a verdict — the event
-    // would be lost forever, leaving waiters hanging.
+    // send_replace, not send: send stores nothing without subscribers, and the
+    // guards above never re-send a verdict — it would be lost forever.
     if applied {
-        // Only a full application advances last_applied_assignment_id.
         assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
         assignment_settled_tx.send_replace(Some(AssignmentSettled {
             id: current_assignment_id,
@@ -582,10 +577,9 @@ mod tests {
         })
     }
 
-    // Reproduces one specific interleaving between `set_assignment` and the state
-    // loop's periodic check that used to let a not-yet-applied assignment be reported
-    // as applied (see git history of `mark_assignment_settled_if_ready`). It is not an
-    // exhaustive test of every possible interleaving, just this one.
+    // One specific interleaving between `set_assignment` and the state loop's
+    // periodic check that must not report a not-yet-applied assignment as
+    // applied. Not an exhaustive test of every interleaving.
     #[test]
     fn does_not_misattribute_applied_state_to_a_newer_assignment() {
         use std::sync::Arc;
@@ -632,10 +626,8 @@ mod tests {
         // Step 3: `set_assignment` now points `current_assignment_id` at B.
         assignment_application.lock().current_assignment_id = Some("B".to_owned());
 
-        // Step 4: `set_assignment`'s own post-update check runs. `chunk_b` is still
-        // missing, so B must NOT be marked applied here. Before the fix, a
-        // `fully_applied` bool captured back in step 1 (still `true`, for A) would
-        // have been reused here and wrongly marked B applied.
+        // Step 4: `set_assignment`'s own post-update check runs. `chunk_b` is
+        // still missing, so B must NOT be marked applied here.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,

@@ -19,11 +19,9 @@ pub struct State {
     desired: ChunkSet,
     to_download: ChunkSet, // always equal to desired.diff(available).diff(downloading).diff(failed_downloads)
     locks: HashMap<ChunkRef, u8>, // stores ref count for each chunk
-    // Undesired chunks that were still query-locked when the removal pass ran,
-    // keyed with their remaining lock count. Logically removed — not available
-    // to new queries, not blocking new downloads — but still on disk until the
-    // last query finishes, so the overcommit is bounded by the locks held at
-    // the assignment switch.
+    // Undesired chunks still query-locked when the removal pass ran, keyed by
+    // remaining lock count: invisible to new queries and downloads, kept on
+    // disk until the last query finishes.
     condemned: HashMap<ChunkRef, u8>,
     // Both reset on every new assignment — each assignment gets a fresh download budget
     download_attempts: HashMap<ChunkRef, u32>, // failed attempts per desired chunk
@@ -59,9 +57,8 @@ impl State {
         };
 
         self.desired = desired;
-        // Fresh download budget: chunks that exhausted their attempts under the
-        // previous assignment are retried under the new one, which may carry
-        // fixed URLs or credentials.
+        // Fresh download budget: a new assignment may carry fixed URLs, so
+        // previously given-up chunks are retried.
         self.download_attempts.clear();
         self.failed_downloads.clear();
         self.to_download = self
@@ -113,18 +110,15 @@ impl State {
     }
 
     // Undesired chunks that are still available or still being downloaded.
-    // While any exist, new downloads are held back. Locked undesired chunks
-    // count only until the removal pass condemns them — condemned chunks don't
-    // hold downloads back.
+    // While any exist, new downloads are held back.
     pub fn has_pending_removals(&self) -> bool {
         self.available.difference(&self.desired).next().is_some()
             || self.downloading.difference(&self.desired).next().is_some()
     }
 
-    /// Undesired chunks ready for physical deletion. A locked undesired chunk
-    /// is not returned but condemned instead: logically removed right away —
-    /// new queries can't lock it and it doesn't block new downloads — and
-    /// handed out here once its last query finishes.
+    /// Undesired chunks ready for physical deletion. Locked undesired chunks
+    /// are condemned instead and handed out here once their last query
+    /// finishes.
     pub fn take_removals(&mut self) -> Vec<ChunkRef> {
         let mut result = Vec::new();
         self.available.retain(|chunk| {
@@ -172,9 +166,8 @@ impl State {
             let attempts = self.download_attempts.entry(chunk.clone()).or_insert(0);
             *attempts += 1;
             if *attempts >= MAX_DOWNLOAD_ATTEMPTS {
-                // Give up until the next assignment. The chunk keeps being
-                // reported as missing; if nothing else is left to download,
-                // the assignment counts as stalled.
+                // The chunk keeps being reported as missing; once no download
+                // work is left, the assignment counts as stalled.
                 warn!("Giving up on chunk {chunk} after {MAX_DOWNLOAD_ATTEMPTS} download attempts");
                 self.download_attempts.remove(&chunk);
                 self.failed_downloads.insert(chunk);
@@ -459,8 +452,7 @@ mod tests {
         assert_eq!(state.take_next_download(), None);
 
         // The removal pass condemns the locked chunk: nothing to delete yet,
-        // but downloads proceed immediately — the in-flight query only delays
-        // the deletion of `a`, not the new assignment
+        // but downloads proceed immediately
         assert_eq!(state.take_removals(), &[]);
         assert!(!state.has_pending_removals());
         assert_eq!(state.take_next_download(), Some(c));
@@ -534,10 +526,8 @@ mod tests {
     }
 
     // A permanently failing download — e.g. a chunk deleted from the bucket —
-    // is given up on after MAX_DOWNLOAD_ATTEMPTS instead of being re-queued
-    // forever, and the assignment becomes stalled (never fully applied) so the
-    // assignment loop can jump over it. The budget is per assignment: the next
-    // one retries the chunk from scratch.
+    // is given up on after MAX_DOWNLOAD_ATTEMPTS and the assignment becomes
+    // stalled. The budget is per assignment: the next one retries the chunk.
     #[test]
     fn failing_download_is_given_up_after_attempt_cap() {
         let ds = Arc::new("ds".to_owned());
@@ -571,9 +561,8 @@ mod tests {
         assert!(!state.is_stalled());
     }
 
-    // Queries can lock an undesired chunk only until the removal pass condemns
-    // it; from then on new locks are refused, so a steady stream of queries
-    // can't defer the removal (and thus the new assignment) indefinitely.
+    // After the removal pass condemns an undesired chunk, new locks are
+    // refused, so a steady stream of queries can't defer its removal forever.
     #[test]
     fn condemnation_stops_undesired_chunk_relocking() {
         let ds = Arc::new("ds".to_owned());

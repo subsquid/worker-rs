@@ -277,10 +277,9 @@ fn chunk_set(indexes: &[usize]) -> ChunkSet {
     indexes.iter().map(|&i| chunk(i)).collect()
 }
 
-/// Guarantee 3 — confirmation correctness, tested against the real
-/// check-and-mark critical section under randomized interleavings of the
-/// assignment pipeline with the state loop's own mark and download-progress
-/// steps. Generalizes the hand-written race test in `super::manager`.
+/// Guarantee 3 — confirmation correctness: the real check-and-mark critical
+/// section under randomized interleavings of the assignment pipeline with the
+/// state loop's own mark and download-progress steps.
 mod confirmation {
     use parking_lot::Mutex;
 
@@ -323,12 +322,10 @@ mod confirmation {
     }
 
     /// One assignment: its chunk subset and the ops that run after it is
-    /// registered. The desired chunks and `current_assignment_id` are updated
-    /// atomically w.r.t. the settled-check (`set_assignment` holds the
-    /// application lock across both), so no ops can interleave between them —
-    /// an earlier version of this model allowed such interleavings and caught
-    /// a real misattribution race, fixed by extending that critical section
-    /// (pinned in `super::super::regression`).
+    /// registered. Desired chunks and `current_assignment_id` change
+    /// atomically w.r.t. the settled-check, as in `set_assignment`, so no ops
+    /// interleave between them; the mixed-observation hazard is pinned in
+    /// `super::super::regression`.
     type Script = (Vec<usize>, Vec<MidOp>);
 
     fn arb_scripts() -> impl Strategy<Value = Vec<Script>> {

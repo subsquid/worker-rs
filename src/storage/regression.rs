@@ -1,13 +1,10 @@
 //! Deterministic regression tests pinning counterexamples found by the
 //! property-based tests in [`super::state_pbt`].
 //!
-//! Counterexample (found by `only_genuinely_applied_assignments_are_confirmed`
-//! before `set_assignment` was made atomic): assignment A0 desires one chunk
-//! that is never downloaded; assignment A1 desires nothing. When the
-//! settled-check observed A1's (trivially satisfied) chunk state while
-//! `current_assignment_id` still pointed at A0 — the window between
-//! `set_desired_chunks` and the id update — it confirmed A0 as applied even
-//! though its chunk was missing.
+//! Counterexample: assignment A0 desires one chunk that is never downloaded;
+//! assignment A1 desires nothing. A settled-check that observes A1's
+//! (trivially satisfied) chunk state while `current_assignment_id` still
+//! points at A0 confirms A0 as applied even though its chunk is missing.
 
 use std::sync::Arc;
 
@@ -20,13 +17,12 @@ use super::manager::{
 use super::state::State;
 use crate::types::state::{ChunkRef, ChunkSet};
 
-// The counterexample replayed verbatim, driving the settled-check with the
-// mixed observation directly. The wrong confirmation DOES happen here: the
-// mark function cannot detect the inconsistency by itself — the guarantee is
-// upheld solely by `set_assignment` updating the desired chunks and the
-// current id under one critical section (lock order: index → application →
-// state). This pins the hazard; if this test ever starts failing, the mark
-// function became self-sufficient and that critical section can be revisited.
+// The counterexample replayed verbatim against the settled-check. The wrong
+// confirmation DOES happen: the mark function cannot detect the inconsistency
+// by itself — the guarantee lives in `set_assignment`, which updates the
+// desired chunks and the current id under one critical section. If this test
+// ever fails, mark became self-sufficient and that critical section can be
+// revisited.
 #[test]
 fn mark_misattributes_application_when_observing_mixed_state() {
     let pipeline = Pipeline::new();
@@ -40,8 +36,8 @@ fn mark_misattributes_application_when_observing_mixed_state() {
     pipeline.mark();
     assert_eq!(pipeline.last_applied(), None);
 
-    // The bug interleaving, impossible in production since the fix: A1's empty
-    // chunk set is already visible while the current id still says A0
+    // The mixed observation `set_assignment`'s critical section rules out:
+    // A1's empty chunk set is visible while the current id still says A0
     pipeline.state.lock().set_desired_chunks(ChunkSet::new());
     pipeline.mark();
 
@@ -52,9 +48,9 @@ fn mark_misattributes_application_when_observing_mixed_state() {
     );
 }
 
-// The same trace through the fixed protocol: desired chunks and current id
-// change atomically w.r.t. the settled-check. A0 — never applied — is never
-// confirmed; A1 is confirmed as itself.
+// The same trace with desired chunks and current id changing atomically, as
+// `set_assignment` does: A0 — never applied — is never confirmed; A1 is
+// confirmed as itself.
 #[test]
 fn atomic_registration_never_confirms_the_undownloaded_assignment() {
     let pipeline = Pipeline::new();
