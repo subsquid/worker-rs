@@ -208,9 +208,9 @@ pub fn clean_chunk_ancestors(path: impl AsRef<Path>) -> Result<()> {
         if is_dir_empty(dir) {
             info!("Removing empty dir '{dir}'");
             if let Err(e) = std::fs::remove_dir(dir) {
-                // Concurrent removals of sibling chunks race on shared
-                // ancestors: another removal may have deleted the dir first
-                // (NotFound) or a download may have started repopulating it
+                // Racing housekeeping is benign: the dir may already be
+                // gone (NotFound) or a download may have started repopulating
+                // it between the emptiness check and the removal
                 // (DirectoryNotEmpty). Either way the dir needs no action.
                 match e.kind() {
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty => {}
@@ -224,7 +224,7 @@ pub fn clean_chunk_ancestors(path: impl AsRef<Path>) -> Result<()> {
 
 fn is_dir_empty(path: impl AsRef<Path>) -> bool {
     match std::fs::read_dir(path.as_ref()) {
-        Ok(entries) => entries.count() == 0,
+        Ok(mut entries) => entries.next().is_none(),
         Err(_) => false,
     }
 }

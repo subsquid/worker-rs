@@ -144,15 +144,16 @@ impl StateManager {
             let removals = self.state.lock().take_removals();
             // Concurrent, but still a barrier: the downloads below only start
             // once every removal has finished (deletion before download).
-            futures::stream::iter(removals)
+            futures::stream::iter(&removals)
                 .for_each_concurrent(CONCURRENT_REMOVALS, |chunk| async move {
                     info!("Removing chunk {chunk}");
-                    self.drop_chunk(&chunk)
+                    self.drop_chunk(chunk)
                         .await
                         .unwrap_or_else(|_| panic!("Couldn't remove chunk {chunk}"));
                     metrics::CHUNKS_REMOVED.inc();
                 })
                 .await;
+            self.sweep_removal_ancestors(&removals).await;
 
             let guard = self.datasets_index.lock();
             let Some(dataset_index) = guard.as_ref() else {
@@ -357,8 +358,34 @@ impl StateManager {
         let tmp = add_temp_prefix(&path)?;
         tokio::fs::rename(&path, &tmp).await?;
         tokio::fs::remove_dir_all(tmp).await?;
-        layout::clean_chunk_ancestors(path)?;
         Ok(())
+    }
+
+    /// Prunes now-empty ancestor dirs after a removal pass. Deduplicated per
+    /// parent dir — a mass removal touches each directory once, not once per
+    /// chunk — and run off the async thread. Best-effort housekeeping: an
+    /// empty leftover dir is harmless, so failures only warn.
+    async fn sweep_removal_ancestors(&self, removals: &[ChunkRef]) {
+        let mut seen_parents = std::collections::BTreeSet::new();
+        let representatives: Vec<PathBuf> = removals
+            .iter()
+            .filter_map(|chunk| {
+                let path = self.chunk_path(chunk);
+                let parent = path.parent()?.to_owned();
+                seen_parents.insert(parent).then_some(path)
+            })
+            .collect();
+        if representatives.is_empty() {
+            return;
+        }
+        tokio::task::spawn_blocking(move || {
+            for path in representatives {
+                layout::clean_chunk_ancestors(&path)
+                    .unwrap_or_else(|e| warn!("Couldn't clean chunk ancestors: {e:?}"));
+            }
+        })
+        .await
+        .expect("ancestor sweep shouldn't panic");
     }
 
     fn chunk_path(&self, chunk_ref: &ChunkRef) -> PathBuf {
