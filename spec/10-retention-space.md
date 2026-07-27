@@ -16,15 +16,19 @@ policy table:
 
 **RS-2 — Availability floor.** [MUST] Eviction never removes: desired chunks, pinned
 chunks (whatever the assignment says), or — per REQ-25 — more than the P-DEL-FLOOR
-fraction of the store per application without operator override ⚠ (ADR-17). Precedence:
+fraction of the store per application, until the hold lapses at P-DEL-HOLD-MAX or an
+operator override releases it (ADR-17). Precedence:
 pin > assignment (a pinned undesired chunk stays until released; ADR-16's
 never-interrupt rule is the same precedence applied to application).
 
 **RS-3 — Excess bound (amplification).** [MUST] At every instant,
-`store bytes ≤ live bytes + P-DL-CONC × W-CHUNK-BYTES-MAX + R + G`, where live = bytes
-of desired∪pinned committed chunks, the second term bounds in-flight fetch space, `R` =
-unswept residue (bounded by RS-6), and `G` = evicted-but-unreclaimed bytes (bounded by
-LIV-4's convergence bound × W-CHURN-RATE). ⚠ The bound's slack terms need ratified
+`store bytes ≤ live bytes + P-DL-CONC × W-CHUNK-BYTES-MAX + R + G + H`, where live =
+bytes of desired∪pinned committed chunks, the second term bounds in-flight fetch space,
+`R` = unswept residue (bounded by RS-6), `G` = evicted-but-unreclaimed bytes (bounded by
+LIV-4's convergence bound × W-CHURN-RATE), and `H` = bytes an undesired chunk holds
+while REQ-25's deletion floor withholds its batch (bounded by P-DEL-HOLD-MAX × the
+eviction rate the hold defers — unbounded if the hold never lapses, which is why it
+does). ⚠ The bound's slack terms need ratified
 values (ADR-19). The log store is additionally bounded by
 W-LOG-RATE × P-LOGS-RETENTION + the reclamation lag of RS-7.
 

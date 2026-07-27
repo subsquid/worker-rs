@@ -131,8 +131,10 @@ GET only: `/worker/status` → JSON `{"state":{"available":n,"downloading":n}}` 
 `chunks_downloaded/failed_download/removed` counters (OB-4), `used_storage_bytes`
 (OB-5), `running_queries` (OB-6), `num_queries_executed{status}` (OB-7),
 `query_result_size_bytes` (OB-8), `worker_status{worker_status}` (OB-12 assessed-state
-component), `worker_info_info{version}`. Signals OB-9/10/11/13 and the missing OB-4/7
-breakdowns have no binding yet — GAP-17/GAP-23 track the additions.
+component), `worker_alarms{reason}` (OB-12 alarm levels: `assignment_rejected`,
+`unresolvable_chunk_address`, `registry_unavailable`, `deletion_floor_hold`),
+`worker_info_info{version}`. Signals OB-9/10/11/13 and the missing OB-4/7 breakdowns
+have no binding yet — GAP-17/GAP-23 track the additions.
 
 **IB-32 — Configuration surface.** Flags/env (defaults live in the registry):
 
@@ -144,6 +146,8 @@ breakdowns have no binding yet — GAP-17/GAP-23 track the additions.
 | `--key` | `KEY_PATH` | identity key file (required) |
 | `--parallel-queries` | `PARALLEL_QUERIES` | P-Q-PAR |
 | `--concurrent-downloads` | `CONCURRENT_DOWNLOADS` | P-DL-CONC |
+| `--deletion-floor` | `DELETION_FLOOR` | P-DEL-FLOOR |
+| (positional) | `DELETION_HOLD_MAX_SEC` | P-DEL-HOLD-MAX |
 | `--query-threads` | `QUERY_THREADS` | engine pool width |
 | `--assignment-url` | `ASSIGNMENT_URL` | network-state document address |
 | (positional) | `S3_TIMEOUT` / `S3_READ_TIMEOUT` | P-DL-FILE-TIMEOUT / P-DL-STALL-TIMEOUT |

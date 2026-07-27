@@ -297,11 +297,18 @@ class Suite:
     # -- checks --------------------------------------------------------------
 
     def check_reference_integrity(self):
+        # Closing a gap deletes its row, but an accepted ADR is append-only: its context
+        # keeps citing ids the register has since dropped. A proposed one is still editable,
+        # so it stays checked.
+        frozen = {info[0] for info in self.adr_files.values()
+                  if (info[2] or "").startswith("Accepted")}
         for (prefix, num), sites in sorted(self.refs.items()):
             if prefix == "ADR":
                 continue
             if (prefix, num) not in self.defs:
                 hard_sites = [s for s in sites if s[2]]
+                if prefix == "GAP":
+                    hard_sites = [s for s in hard_sites if s[0] not in frozen]
                 if hard_sites:
                     p, l, _ = hard_sites[0]
                     self.add("id-undefined", p, l,

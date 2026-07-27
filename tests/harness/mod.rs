@@ -129,6 +129,12 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
+    /// P-DEL-FLOOR (REQ-25).
+    pub deletion_floor: f64,
+    /// P-DEL-HOLD-MAX: how long the floor withholds a batch before it goes through.
+    pub deletion_hold_max: Duration,
+    /// HC-8 fails every read from before the worker starts (FM-52). Skips the metering wait.
+    pub registry_failure: Option<String>,
 }
 
 impl Default for Config {
@@ -141,6 +147,9 @@ impl Default for Config {
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
+            deletion_floor: 0.5,
+            deletion_hold_max: Duration::from_secs(3600),
+            registry_failure: None,
         }
     }
 }
@@ -164,6 +173,9 @@ impl Harness {
         let scheduler = Scheduler::start(seed.stream("assignment-builder")).await;
         let origin = Origin::start().await;
         let registry = Registry::new(&[portal.peer_id()], config.compute_units);
+        if let Some(failure) = &config.registry_failure {
+            registry.fail_reads(failure.clone());
+        }
 
         let schema_stub = HttpStub::start().await;
         schema_stub.put(
@@ -194,16 +206,12 @@ impl Harness {
             config.parallel_queries,
         ));
 
-        let allocations = Arc::new(
-            AllocationsChecker::new(
-                registry.client(),
-                worker_id,
-                // Fast enough that a test that advances the epoch doesn't wait on P-EPOCH-POLL.
-                Duration::from_millis(20),
-            )
-            .await
-            .expect("registry stub answers the worker-id lookup"),
-        );
+        let allocations = Arc::new(AllocationsChecker::new(
+            registry.client(),
+            worker_id,
+            // Fast enough that a test that advances the epoch doesn't wait on P-EPOCH-POLL.
+            Duration::from_millis(20),
+        ));
 
         let logs = LogsStorage::new(data_path.join("logs.db").as_str())
             .await
@@ -250,7 +258,9 @@ impl Harness {
             _reporter: reporter,
         };
         harness.await_schemas_loaded().await;
-        harness.await_metering_ready().await;
+        if config.registry_failure.is_none() {
+            harness.await_metering_ready().await;
+        }
         harness
     }
 
@@ -449,7 +459,7 @@ impl Harness {
 
     /// Waits until the portal's bucket holds a token, stepping over the cold-start window
     /// (LIV-12, GAP-25) so tests about anything else don't race it.
-    async fn await_metering_ready(&self) {
+    pub async fn await_metering_ready(&self) {
         let portal = self.portal.peer_id();
         self.await_condition("metering bucket funded (LIV-12)", || async move {
             // Probe and immediately put the token back, so readiness costs nothing.
@@ -562,6 +572,8 @@ fn build_args(
         &config.parallel_queries.to_string(),
         "--concurrent-downloads",
         &config.concurrent_downloads.to_string(),
+        "--deletion-floor",
+        &config.deletion_floor.to_string(),
         "--rpc-url",
         "http://127.0.0.1:1/unused",
         "--l1-rpc-url",
@@ -572,6 +584,7 @@ fn build_args(
     args.s3_timeout = config.file_timeout;
     args.s3_read_timeout = config.file_timeout;
     args.downloads_max_delay = config.download_backoff_max;
+    args.deletion_hold_max = config.deletion_hold_max;
     args.assignment_fetch_timeout = Duration::from_secs(10);
     args.assignment_fetch_max_delay = Duration::from_millis(200);
     args.sentry_is_enabled = false;
@@ -607,7 +620,7 @@ fn declared_gaps_cite_the_spec() {
     let defined = spec_identifiers();
     // An inventory that failed to load would make everything below vacuous.
     assert!(
-        defined.len() > 100 && defined.contains("GAP-3") && defined.contains("INV-31"),
+        defined.len() > 100 && defined.contains("GAP-4") && defined.contains("INV-31"),
         "spec inventory looks wrong — {} identifiers parsed out of spec/",
         defined.len()
     );

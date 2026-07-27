@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf as PathBuf;
@@ -22,7 +23,7 @@ use super::{
     downloader::ChunkDownloader,
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
-    state::{State, UpdateStatus},
+    state::{DeletionFloor, State, UpdateStatus},
     Filesystem,
 };
 
@@ -46,6 +47,15 @@ pub struct Status {
     pub assignment_id: Option<String>,
     #[cfg(feature = "mvcc-chunks")]
     pub last_applied_assignment_id: Option<String>,
+}
+
+/// Reconciliation health, per instance — the OB-12 gauges are process-global.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Alarms {
+    /// Assigned chunks that cannot be fetched because their addresses don't resolve (FM-11).
+    pub unresolvable_chunks: usize,
+    /// Evictions withheld by the P-DEL-FLOOR gate (REQ-25), if any.
+    pub deletion_hold: Option<usize>,
 }
 
 #[cfg(feature = "mvcc-chunks")]
@@ -74,7 +84,10 @@ impl StateManager {
 
         Ok(Self {
             fs,
-            state: Mutex::new(State::new(existing_chunks)),
+            state: Mutex::new(State::new(
+                existing_chunks,
+                DeletionFloor::new(args.deletion_floor, args.deletion_hold_max),
+            )),
             concurrent_downloads,
             worker_id,
             notify: tokio::sync::Notify::new(),
@@ -89,6 +102,9 @@ impl StateManager {
 
     pub async fn run(&self, cancellation_token: CancellationToken) {
         let mut downloader = ChunkDownloader::new(self.worker_id, self.args.clone());
+        // Set while the deletion floor withholds a batch: LIV-4 wants that eviction without a
+        // further input event, and nothing else here would wake for it.
+        let mut hold_wakeup: Option<Duration> = None;
         loop {
             self.state.lock().report_status();
             let stored_bytes = get_directory_size(self.fs.root.clone()).await;
@@ -96,6 +112,7 @@ impl StateManager {
 
             tokio::select! {
                 _ = self.notify.notified() => {}
+                _ = sleep_opt(hold_wakeup) => {}
                 (chunk, result) = downloader.downloaded() => {
                     match result {
                         Ok(()) => {
@@ -117,7 +134,17 @@ impl StateManager {
                 downloader.cancel(&chunk);
             }
 
-            let removals = self.state.lock().take_removals();
+            let removals = {
+                let now = Instant::now();
+                let mut state = self.state.lock();
+                let removals = state.take_removals(now);
+                hold_wakeup = state.deletion_hold_remaining(now);
+                removals
+            };
+            metrics::set_alarm(
+                metrics::AlarmReason::DeletionFloorHold,
+                hold_wakeup.is_some(),
+            );
             for chunk in removals {
                 info!("Removing chunk {chunk}");
                 self.drop_chunk(&chunk)
@@ -130,18 +157,29 @@ impl StateManager {
             let Some(dataset_index) = guard.as_ref() else {
                 continue;
             };
+            // Held out of the pending set for the rest of the pass, so the loop terminates.
+            let mut deferred = Vec::new();
             while downloader.download_count() < self.concurrent_downloads {
-                if let Some(chunk_ref) = self.state.lock().take_next_download() {
-                    info!("Downloading chunk {chunk_ref}");
-                    let dst = self.chunk_path(&chunk_ref);
-                    let files = dataset_index
-                        .list_files(&chunk_ref)
-                        .unwrap_or_else(|| panic!("Dataset {} not found", chunk_ref.dataset));
-                    let headers = dataset_index.get_headers().clone();
-                    downloader.start_download(chunk_ref, dst, files, headers);
-                } else {
+                let Some(chunk_ref) = self.state.lock().take_next_download() else {
                     break;
+                };
+                // FM-11: a bad address costs its own chunk, not the document or the process.
+                let Some(files) = dataset_index.list_files(&chunk_ref) else {
+                    warn!("No resolvable download address for chunk {chunk_ref}");
+                    deferred.push(chunk_ref);
+                    continue;
+                };
+                info!("Downloading chunk {chunk_ref}");
+                let dst = self.chunk_path(&chunk_ref);
+                let headers = dataset_index.get_headers().clone();
+                downloader.start_download(chunk_ref, dst, files, headers);
+            }
+            if !deferred.is_empty() {
+                let mut state = self.state.lock();
+                for chunk in deferred {
+                    state.defer_unresolvable(chunk);
                 }
+                metrics::set_alarm(metrics::AlarmReason::UnresolvableChunkAddress, true);
             }
             #[cfg(feature = "mvcc-chunks")]
             {
@@ -220,6 +258,8 @@ impl StateManager {
             Ok(result) => result,
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                // WP-2/FM-12: rejected whole; the last good assignment stays in force.
+                metrics::set_alarm(metrics::AlarmReason::AssignmentRejected, true);
                 error!("Can not get assigned chunks: {e}");
                 return false;
             }
@@ -230,6 +270,9 @@ impl StateManager {
         let mut index = self.datasets_index.lock();
         let mut state = self.state.lock();
 
+        // A new index may resolve what the old one couldn't, even with the chunk set
+        // unchanged — and an unchanged set notifies nobody.
+        let had_unresolvable = state.clear_unresolvable();
         match state.set_desired_chunks(chunks) {
             UpdateStatus::Unchanged => {}
             UpdateStatus::Updated => {
@@ -240,6 +283,12 @@ impl StateManager {
         *index = Some(datasets_index);
         drop(state);
         drop(index);
+
+        if had_unresolvable {
+            self.notify.notify_one();
+        }
+        metrics::set_alarm(metrics::AlarmReason::UnresolvableChunkAddress, false);
+        metrics::set_alarm(metrics::AlarmReason::AssignmentRejected, false);
 
         #[cfg(feature = "mvcc-chunks")]
         {
@@ -289,6 +338,15 @@ impl StateManager {
                 }
                 _ = cancellation_token.cancelled() => return false,
             }
+        }
+    }
+
+    /// What this instance is alarming on (OB-12).
+    pub fn alarms(&self) -> Alarms {
+        let state = self.state.lock();
+        Alarms {
+            unresolvable_chunks: state.unresolvable_chunks(),
+            deletion_hold: state.deletion_hold(),
         }
     }
 
@@ -368,6 +426,14 @@ fn mark_assignment_applied_if_ready(
     }
     assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
     let _ = assignment_applied_tx.send(Some(current_assignment_id));
+}
+
+/// A `sleep` that never fires when there is no deadline, for use as a `select!` arm.
+async fn sleep_opt(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[instrument(skip_all)]
@@ -463,7 +529,9 @@ mod tests {
 
         use parking_lot::Mutex;
 
-        use super::{mark_assignment_applied_if_ready, AssignmentApplicationStatus, State};
+        use super::{
+            mark_assignment_applied_if_ready, AssignmentApplicationStatus, DeletionFloor, State,
+        };
         use crate::types::state::{ChunkRef, ChunkSet};
 
         let chunk = |id: &str| ChunkRef {
@@ -475,7 +543,10 @@ mod tests {
 
         // Assignment A only needs `chunk_a`, which is already available, and is
         // already marked as applied (steady state before the race begins).
-        let state = Mutex::new(State::new([chunk_a.clone()].into_iter().collect()));
+        let state = Mutex::new(State::new(
+            [chunk_a.clone()].into_iter().collect(),
+            DeletionFloor::default(),
+        ));
         let assignment_application = Mutex::new(AssignmentApplicationStatus {
             current_assignment_id: Some("A".to_owned()),
             last_applied_assignment_id: Some("A".to_owned()),

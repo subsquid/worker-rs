@@ -22,10 +22,13 @@ const STORAGE_SECRET: &str = "conformance-storage-secret";
 pub enum AssignmentFault {
     #[default]
     None,
-    /// A chunk whose dataset base address doesn't parse — GAP-2's reconciler panic.
+    /// The **first** placement's base address doesn't parse (FM-11). Per-chunk on purpose:
+    /// the blast radius under test is one chunk, not the document.
     UnparseableFileUrl,
-    /// The worker is in the roster but holds no chunks — GAP-3's deletion floor.
+    /// The worker is in the roster but holds no chunks — REQ-25's deletion floor.
     NoChunksForWorker,
+    /// A roster entry whose peer id can't be parsed (FM-12). The reader panics on it.
+    CorruptRosterPeerId,
     /// Truncated gzip stream — FM-12 / GAP-4's unvalidated document.
     TruncatedDocument,
 }
@@ -156,7 +159,7 @@ impl Scheduler {
 
         let mut assigned_indexes = Vec::new();
         for (index, placement) in placements.iter().enumerate() {
-            let base_url = if fault == AssignmentFault::UnparseableFileUrl {
+            let base_url = if fault == AssignmentFault::UnparseableFileUrl && index == 0 {
                 "not a url"
             } else {
                 &placement.dataset_base_url
@@ -188,8 +191,23 @@ impl Scheduler {
             1_700_000_000,
         );
 
-        builder.finish()
+        let mut doc = builder.finish();
+        if fault == AssignmentFault::CorruptRosterPeerId {
+            corrupt_peer_id(&mut doc, worker);
+        }
+        doc
     }
+}
+
+/// Patching the encoded bytes is the only way in: the builder takes a parsed `PeerId`.
+fn corrupt_peer_id(doc: &mut [u8], worker: PeerId) {
+    let encoded = worker.to_bytes();
+    let at = doc
+        .windows(encoded.len())
+        .position(|w| w == encoded)
+        .expect("the roster carries the worker's peer id verbatim");
+    // Not a multihash code libp2p accepts; the 38-byte struct layout stays intact.
+    doc[at] = 0x01;
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {

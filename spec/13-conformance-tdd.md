@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-07-25**
-(baseline commit `42d9aa1`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-07-26**
+(baseline commit `5c98f0d`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -62,7 +62,7 @@ abort(c):                                     # WP-13
 
 evict(c):                                     # WP-14
     require c in S.A and c not in S.N and S.L[c] == 0    # INV-12
-    require deletion_floor_ok(S)                         # REQ-25 ⚠
+    require deletion_floor_ok(S)                         # REQ-25
     S.A -= c
 
 recover():                                    # WP-15  (crash may precede)
@@ -121,13 +121,14 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-07-25)
+## Traceability matrix (as of 2026-07-26)
 
-Statuses reflect the actual test inventory: 39 inline unit tests (4 `mvcc-chunks`-gated)
+Statuses reflect the actual test inventory: 46 inline unit tests (4 `mvcc-chunks`-gated)
 plus the conformance tier over the harness in `tests/harness/`: one binary per subject —
-`e2e` (the smoke path), `query_surface` (admission outcomes and the RP-20 taxonomy) and
-`query_concurrency` (separate by necessity, not topic: the OB signals are process-global,
-so a gauge assertion cannot share a process with other query-running tests).
+`e2e` (the smoke path), `query_surface` (admission outcomes and the RP-20 taxonomy),
+`assignment_faults` (the CT-4 document corpus) and `query_concurrency` (separate by
+necessity, not topic: the OB signals are process-global, so a gauge assertion cannot
+share a process with other query-running tests).
 WP/RP/CN/RS rows are enforced through the INV/LIV rows that encode them
 (see 07 §reading the catalog).
 
@@ -151,8 +152,8 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
 | REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `query_concurrency`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
-| REQ-24 | CT-4/9 | U⊘ | known-violated (GAP-2, GAP-4) |
-| REQ-25 | CT-4 | U⊘ | no floor exists (GAP-3) |
+| REQ-24 | CT-4/9 | P⊘ | the documented termination paths are closed and covered by `assignment_faults`; unvalidated parsing and unbounded decompression remain (GAP-4) |
+| REQ-25 | CT-4 | C | floor unit-tested over the state machine and driven end-to-end: an empty slice is held with the data still readable, a restoring assignment releases it, the hold lapses on its own timer, the override wipes |
 
 ### Properties
 
@@ -189,7 +190,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | LIV-1 | CT-1/6 | U | |
 | LIV-2 | CT-1 | U | downloader has zero tests |
 | LIV-3 | CT-1/4 | U⊘ | unbounded today (GAP-8) |
-| LIV-4 | CT-1/3 | U⊘ | wake-up gap (GAP-6) |
+| LIV-4 | CT-1/3 | P⊘ | the deletion floor's hold lapses on its own timer, asserted with no further input event; the pin-release path keeps the wake-up gap (GAP-6) |
 | LIV-5 | CT-2/6 | U | |
 | LIV-6 | CT-3/6 | U? | at risk from store walks (GAP-15) |
 | LIV-7 | CT-5/7 | P | pagination/resumption unit-tested in memory; smoke adds one file-backed page read |
@@ -200,12 +201,12 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | LIV-12 | CT-5 | U | cold-start window known (GAP-25). The harness waits the window out before serving, so no test measures it yet |
 | LIV-13 | CT-4/7 | U | |
 | LIV-14 | CT-7 | U⊘ | log-store reclamation broken (GAP-10) |
-| FM-1 | CT-4/9 | U⊘ | known-violated (GAP-2) |
+| FM-1 | CT-4/9 | P⊘ | a bad address, an unreadable roster entry and a dead registry each leave the process serving; the unvalidated parse (GAP-4) is unprobed |
 | FM-2..3 | CT-4 | U | |
 | FM-10 | CT-4 | U | |
-| FM-11 | CT-4 | U⊘ | panic path (GAP-2) |
-| FM-12 | CT-4 | U⊘ | unbounded intake (GAP-4) |
-| FM-13 | CT-4 | U⊘ | no floor (GAP-3) |
+| FM-11 | CT-4 | C | HC-1's per-chunk bad address: that chunk alone is lost, the document applies, the alarm raises and clears |
+| FM-12 | CT-4 | P⊘ | an unreadable roster rejects the document whole and leaves the prior one in force; oversize and undecodable documents remain unbounded (GAP-4) |
+| FM-13 | CT-4 | P | the wipe case is covered by REQ-25's floor test; flip-flop churn (NG2 ordering) untested |
 | FM-14 | CT-7 | U⊘ | no age signal (GAP-23) |
 | FM-20..21 | CT-4 | U | |
 | FM-22 | CT-4 | U⊘ | no verification (GAP-5) |
@@ -222,21 +223,19 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-44 | CT-4 | U⊘ | no cancellation (GAP-8) |
 | FM-50 | CT-2 | U | |
 | FM-51 | CT-2 | U⊘ | sweep-before-check (GAP-16) |
-| FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
+| FM-52 | CT-4 | P | HC-8 failing from before start: the worker serves, refuses queries with no allocation, and recovers when the registry answers. The P-STALL-MAX alarm bound is untested |
 | FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-07-25)
+## Gap register (as of 2026-07-26)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.
 
 | GAP | Statement | Violates | Pri | First test |
 |---|---|---|---|---|
-| GAP-2 | Externally supplied content can terminate the process: a malformed file address in an assignment panics the reconciler; a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic | FM-1, FM-11, FM-52, REQ-24 | P0 | HC-1 assignment containing one bad URL: worker must survive, alarm, and keep serving |
-| GAP-3 | No reconciliation deletion floor: one empty/short assignment wipes the whole store next pass | REQ-25, FM-13, RS-2 | P0 | publish an assignment with zero chunks for the worker: store must survive with an alarm |
 | GAP-4 | Assignment intake is unverified and unbounded: unvalidated binary document parsed unsafely; decompression size uncapped | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
 | GAP-5 | No payload/content verification anywhere: corrupt origin bytes commit (INV-13), power-loss-truncated chunks are adopted (CN-4), and local corruption surfaces as client-blamed `bad_request` (FM-32) | INV-13, CN-4, FM-22, FM-32 | P1 | HC-2 corrupts one file's bytes: commit must be refused (fails today) |
 | GAP-6 | Eviction is fragile: an I/O error panics the process (FM-31), and a chunk unpinned after the eviction pass is not retried until an unrelated event (LIV-4 unbounded) | LIV-4, FM-31, WP-14 | P1 | unassign a pinned chunk, release the pin, inject no further events: bytes must be reclaimed within P-EVICT-BOUND |
@@ -276,11 +275,15 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
    library target so the tier can reach it. The SUT is assembled from the production subsystems
    and driven through the production functions, but the libp2p transport and the
    `P2PController` event loops are outside it — `harness::UNCOVERED` is the standing list.
-2. **Phase 1 — P0 gaps**: a failing test per gap, then the fix. MG-4 becomes meaningful
-   here. The query-concurrency gap is closed (test first, then a one-token fix; the
-   register row is gone and RP-4/REQ-22/INV-31/PF-1 no longer carry the exception).
-   GAP-2 and GAP-3 remain: their HC-1 fault knobs (`UnparseableFileUrl`,
-   `NoChunksForWorker`) exist, but no tests drive them yet.
+2. ~~**Phase 1 — P0 gaps**~~ **done**: a failing test per gap, then the fix, each
+   verified to fail without it. The query-concurrency gap went first (one-token fix).
+   The externally-triggered termination gap is closed across all four of its paths — a
+   bad address degrades per chunk (FM-11), reader panics are contained (ADR-21), the
+   download watchdog saturates, and a registry outage at startup degrades (FM-52). The
+   missing deletion floor is closed by ratifying and implementing ADR-17 (REQ-25). Both
+   register rows are gone, and REQ-24/25, FM-1/11/12/13/52 no longer carry the exception.
+   The alarms the closures needed are OB-12's first binding (`worker_alarms{reason}`,
+   IB-31). Lives in `tests/assignment_faults.rs`; MG-4 covers it.
 3. **Phase 2 — correctness core**: HC-4 reference model; CT-1 property runs; CT-2
    kill-point matrix (HC-7); CT-5 accounting reconciliation. Burn P1 gaps.
 4. **Phase 3 — robustness**: CT-3 swarms, CT-4 full corpus, CT-9 fuzz; P2 gaps.
@@ -305,7 +308,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP. Fault corpus holds 4 of the CT-4 cases (per-chunk bad address, empty slice, corrupt roster peer id, truncated document) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

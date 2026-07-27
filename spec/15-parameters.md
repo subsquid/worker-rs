@@ -1,6 +1,6 @@
 # 15 — Parameter registry
 
-**Mutable doc #2.** As of: 2026-07-25, baseline `42d9aa1`. Every `P-*` symbol used
+**Mutable doc #2.** As of: 2026-07-26, baseline `5c98f0d`. Every `P-*` symbol used
 anywhere in the suite has a row. **Observed** = what the implementation does today
 (configuration default where operator-settable). **Target** = the intended bound; ⚠ =
 proposed, unratified — ratification lands via the ADR named in the row (ADR-19 for the
@@ -76,7 +76,8 @@ batch unless stated).
 | P-START-ACCEPT | start → accepting queries (LIV-5) | unmeasured; recovery scan + residue sweep dominate | 120 s at W-CHUNKS ⚠ |
 | P-EVICT-BOUND | pin-release → reclamation (LIV-4) | **unbounded** — GAP-6 | 60 s ⚠ |
 | P-STALL-MAX | zero-progress-with-work alarm bound (LIV-9/13) | no alarm exists — GAP-17 | 600 s ⚠ |
-| P-DEL-FLOOR | max store fraction deletable per application without override (REQ-25) | no floor — GAP-3 | 50 % ⚠ (ADR-17) |
+| P-DEL-FLOOR | max store fraction deletable per application without override (REQ-25) | 50 % (`--deletion-floor`) | same (ADR-17) |
+| P-DEL-HOLD-MAX | how long the deletion floor withholds a batch before obeying it (REQ-25) | 3 600 s (`DELETION_HOLD_MAX_SEC`) | same (ADR-17) |
 | P-CONVERGE-SLACK | scheduling slack in convergence bounds (LIV-1/12) | — | 60 s ⚠ |
 | P-RECOVER-BOUND | overload-end → SLOs restored (LIV-8) | unmeasured | 60 s ⚠ |
 | P-REJECT-LATENCY | rejection response latency under storm (LIV-8) | unmeasured | 1 s ⚠ |

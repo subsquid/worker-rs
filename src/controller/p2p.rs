@@ -117,8 +117,7 @@ pub async fn create_p2p_controller(
         transport_builder.contract_client(),
         worker_id,
         args.network_polling_interval,
-    )
-    .await?;
+    );
 
     let worker_status = get_worker_status(&worker, allocations_checker.current_epoch()).await;
 
@@ -335,7 +334,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     })
                     .instrument(tracing::info_span!("set_assignment", id))
                     .await
-                    .expect("register_assignment shouldn't panic");
+                    .unwrap_or_else(|e| {
+                        // ADR-21's backstop: a panic the reader missed still costs one
+                        // document, not the process (FM-1).
+                        warn!("Applying assignment {id} panicked: {e}");
+                        metrics::set_alarm(metrics::AlarmReason::AssignmentRejected, true);
+                        false
+                    });
 
                     #[cfg(feature = "mvcc-chunks")]
                     if registered {

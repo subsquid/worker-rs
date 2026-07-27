@@ -15,7 +15,7 @@ Response verbs, used in every table:
 ## Global requirements
 
 **FM-1 — No externally-triggered termination.** [MUST — intent, currently violated:
-GAP-2] No content arriving from any actor — query bytes, assignment documents, origin
+GAP-4] No content arriving from any actor — query bytes, assignment documents, origin
 payloads, log requests, registry responses, schema manifests — may terminate,
 deadlock, or abort the process. The only sanctioned self-terminations: operator
 shutdown, startup refusal on identity mismatch (CN-9) or invalid adopted layout
@@ -38,7 +38,7 @@ budget → that operator (INV-35); one assignment document → intake of that do
 | # | Fault | Required response |
 |---|---|---|
 | FM-10 | network-state/assignment endpoint unreachable or slow | mask: retry per WP-1; previous assignment stays in force; alarm past P-STALL-MAX (LIV-13) |
-| FM-11 | document with malformed per-chunk entries (bad address, bad credential) | degrade: affected chunks fail per-chunk (WP-2); rest of the document applies; alarm. [Currently: process panic — GAP-2] |
+| FM-11 | document with malformed per-chunk entries (bad address, bad credential) | degrade: affected chunks fail per-chunk (WP-2); rest of the document applies; alarm |
 | FM-12 | document malformed as a whole, oversized, undecodable, or missing this worker | fail-safe + alarm: reject whole document (WP-2); keep prior assignment; keep serving. [Oversize unbounded today — GAP-4] |
 | FM-13 | equivocating/regressive document (wipes the store, flip-flops) | degrade + alarm: REQ-25 deletion floor holds data; application order is arrival order (NG2) — flip-flops churn but never corrupt |
 | FM-14 | stale document served long-term (worker dropped or endpoint frozen) | degrade + alarm: serve last-applied data honestly; assignment-age observable (OB-13) rises. [No age alarm exists today — GAP-23] |
@@ -80,7 +80,7 @@ budget → that operator (INV-35); one assignment document → intake of that do
 |---|---|---|
 | FM-50 | misconfiguration (unparseable addresses, missing required settings) | fail-safe: refuse startup with a diagnostic — never a half-configured worker |
 | FM-51 | second process, different identity, same store | fail-safe: refuse before mutating (CN-9). [Sweep-before-check today — GAP-16] |
-| FM-52 | chain-registry unreachable or erroring | degrade: serve with last-known allocations/epoch; alarm past P-STALL-MAX. [Startup registry error is fatal today — GAP-2 register entry] |
+| FM-52 | chain-registry unreachable or erroring | degrade: serve with last-known allocations/epoch; alarm past P-STALL-MAX |
 | FM-53 | schema-registry unreachable or malformed manifest | degrade: keep previously loaded schemas; dynamic-engine queries fail typed `server_error` until first load |
 | FM-54 | worker absent from the on-chain registry at startup | degrade by design: poll the registry and serve nothing until listed; the wait is a visible lifecycle phase (OB-10) with an alarm past P-STALL-MAX (OB-12). [The wait is externally invisible today — GAP-28] |
 | FM-55 | worker clock skewed beyond P-TS-WINDOW tolerance (drift, operator error) | degrade + alarm: freshness rejections surface as `server_error`, never `bad_request` (RP-20 freshness verdict — a stale sender and own skew are indistinguishable here, ADR-20); rejection rate and skew estimate observable (OB-15); alarm past P-SKEW-ALARM. [Misclassified and invisible today — GAP-33] |
