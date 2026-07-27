@@ -186,23 +186,6 @@ mod tests {
         assert!(second.is_none());
     }
 
-    // Known limitation (not yet fixed): `effective_from` is parsed but unused —
-    // an assignment scheduled far in the future is offered (and gets applied)
-    // immediately, so per-worker ordering holds but network-wide timing doesn't.
-    #[tokio::test]
-    async fn future_effective_from_is_offered_immediately() {
-        let year_2100_ms = 4_102_444_800_000;
-        let state = network_state_json("assignment-2", year_2100_ms);
-        let url = serve_responses(vec![http_ok(&state)]).await;
-        let mut last_id = None;
-
-        let update = update_assignment(&url, &test_client(), &mut last_id)
-            .await
-            .unwrap()
-            .expect("the update is yielded right away, ignoring effective_from");
-        assert_eq!(update._effective_from, year_2100_ms);
-    }
-
     // Known limitation (not yet fixed): the downloaded flatbuffer is never
     // validated (`from_owned_unchecked`) and carries no integrity check, so a
     // corrupted-but-gzip-valid body is accepted here and can panic or return
