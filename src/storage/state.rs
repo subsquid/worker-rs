@@ -153,6 +153,10 @@ impl State {
             .collect()
     }
 
+    /// # Panics
+    ///
+    /// Panics if `chunk` is not currently downloading — completions must
+    /// match a prior [`Self::take_next_download`].
     pub fn complete_download(&mut self, chunk: &ChunkRef, success: bool) {
         let chunk = self
             .downloading

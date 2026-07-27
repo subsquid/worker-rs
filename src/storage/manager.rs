@@ -37,6 +37,7 @@ pub struct StateManager {
     download_config: DownloadConfig,
 }
 
+#[derive(Debug)]
 pub struct Status {
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
@@ -99,6 +100,11 @@ impl StateManager {
         })
     }
 
+    /// # Panics
+    ///
+    /// Panics — taking the whole worker down under the fail-fast subsystem
+    /// tree — if a chunk removal fails on disk or an assigned chunk's file
+    /// URLs cannot be resolved from the current assignment.
     pub async fn run(&self, cancellation_token: CancellationToken) {
         let mut downloader = ChunkDownloader::new(self.worker_id, self.download_config);
         loop {

@@ -17,7 +17,7 @@ const START_DELAY: Duration = Duration::from_millis(100);
 
 /// The subset of [`cli::Args`] the downloader needs. Kept separate so tests
 /// can construct it without going through clap.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct DownloadConfig {
     pub s3_timeout: Duration,
     pub s3_read_timeout: Duration,
