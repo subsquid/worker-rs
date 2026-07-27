@@ -144,8 +144,10 @@ impl StateManager {
             }
 
             let removals = self.state.lock().take_removals();
-            // Concurrent, but still a barrier: the downloads below only start
-            // once every removal has finished (deletion before download).
+            // Concurrent, but a barrier for this batch: the downloads below
+            // start only after every already-deletable chunk is gone. Condemned
+            // chunks are not in the batch — they stay on disk until their last
+            // query ends and a later pass collects them.
             futures::stream::iter(&removals)
                 .for_each_concurrent(CONCURRENT_REMOVALS, |chunk| async move {
                     info!("Removing chunk {chunk}");
