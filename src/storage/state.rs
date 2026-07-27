@@ -10,7 +10,7 @@ use crate::{
 /// How many times a chunk download may fail before the worker gives up on it
 /// until the next assignment. Attempts are spaced by the downloader's global
 /// backoff, so the budget is not burned in a tight loop.
-pub const MAX_DOWNLOAD_ATTEMPTS: u32 = 5;
+pub const MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -24,7 +24,7 @@ pub struct State {
     // disk until the last query finishes.
     condemned: HashMap<ChunkRef, u8>,
     // Both reset on every new assignment — each assignment gets a fresh download budget
-    download_attempts: HashMap<ChunkRef, u32>, // failed attempts per desired chunk
+    download_attempts: HashMap<ChunkRef, u8>, // failed attempts per desired chunk
     failed_downloads: ChunkSet, // desired chunks that exhausted their download attempts
 }
 

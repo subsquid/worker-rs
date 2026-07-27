@@ -54,7 +54,7 @@ proptest! {
     ) {
         let mut state = State::new(ChunkSet::new());
         let mut shadow = Shadow::default();
-        let mut attempts_since_assignment = 0u32;
+        let mut attempts_since_assignment = 0u8;
         let target = chunk(target);
 
         for op in &ops {
