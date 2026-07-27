@@ -10,8 +10,8 @@ use sqd_messages::{
     TimeReport, WorkerStatus,
 };
 use sqd_network_transport::{
-    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseSender, WorkerConfig, WorkerEvent,
-    WorkerTransportHandle,
+    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseSender, StreamResponseError,
+    WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{
     sync::{mpsc, Semaphore},
@@ -45,7 +45,7 @@ const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
 const QUERIES_POOL_SIZE: usize = 16;
 const CONCURRENT_QUERY_MESSAGES: usize = 32;
-const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
+pub const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 /// Caps concurrent reject sends. Past this, the response is dropped — a cheap stream reset — rather
 /// than spawning unbounded signing tasks under a flood.
 const MAX_CONCURRENT_REJECTS: usize = 64;
@@ -58,7 +58,7 @@ const MAX_PENDING_ASSIGNMENTS: usize = 5;
 /// every update is applied immediately in arrival order.
 const IN_ORDER_APPLICATION: bool = cfg!(feature = "mvcc-chunks");
 // TODO: find out why the margin is required
-const MAX_LOGS_SIZE: usize =
+pub const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
 
 struct AdmittedQuery {
@@ -71,7 +71,7 @@ struct AdmittedQuery {
 
 /// What the log records for a served query, built alongside the wire message in [`build_delivery`]
 /// so the two can't diverge — a downgraded (oversized or unsignable) result is `Err` in both.
-enum Logged {
+pub enum Logged {
     Ok {
         data_hash: Vec<u8>,
         uncompressed_size: u64,
@@ -586,7 +586,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         queue_tx: &mpsc::Sender<AdmittedQuery>,
         protocol: &str,
     ) -> bool {
-        if let Err(err) = self.validate_query(&query, peer_id) {
+        if let Err(err) = validate_query(&query, peer_id, self.worker_id) {
             self.spawn_error_response(query.query_id, err, None, resp_chan);
             return true;
         }
@@ -679,60 +679,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         });
     }
 
-    /// Checks the signature and timestamp freshness; the `Err` is the response to send back.
-    #[instrument(skip_all)]
-    fn validate_query(&self, query: &Query, peer_id: PeerId) -> Result<(), query_error::Err> {
-        if !query.verify_signature(peer_id, self.worker_id) {
-            warn!("Rejected query with invalid signature from {peer_id}");
-            return Err(query_error::Err::BadRequest(
-                "invalid query signature".to_owned(),
-            ));
-        }
-        if query.timestamp_ms.abs_diff(timestamp_now_ms()) as u128
-            > protocol::MAX_TIME_LAG.as_millis()
-        {
-            warn!(
-                "Rejected query with invalid timestamp ({}) from {peer_id}",
-                query.timestamp_ms
-            );
-            return Err(query_error::Err::BadRequest(
-                "timestamp out of allowed range".to_owned(),
-            ));
-        }
-        // Reject unknown enum values instead of silently falling back to the default.
-        if sqd_messages::QueryEngine::try_from(query.query_engine).is_err() {
-            warn!(
-                "Rejected query with unknown query engine ({}) from {peer_id}",
-                query.query_engine
-            );
-            return Err(query_error::Err::BadRequest(format!(
-                "unknown query engine: {}",
-                query.query_engine
-            )));
-        }
-        if sqd_messages::OutputFormat::try_from(query.output_format).is_err() {
-            warn!(
-                "Rejected query with unknown output format ({}) from {peer_id}",
-                query.output_format
-            );
-            return Err(query_error::Err::BadRequest(format!(
-                "unknown output format: {}",
-                query.output_format
-            )));
-        }
-        // Arrow IPC output is only produced by the dynamic engine.
-        if query.output_format() == sqd_messages::OutputFormat::ArrowIpc
-            && query.query_engine() != sqd_messages::QueryEngine::Dynamic
-        {
-            warn!("Rejected Arrow IPC query for the legacy engine from {peer_id}");
-            return Err(query_error::Err::BadRequest(
-                "Arrow IPC output is only supported by the dynamic query engine".to_owned(),
-            ));
-        }
-        // TODO: check that query_id has not been used before
-        Ok(())
-    }
-
     /// Serve an admitted query. It already spent a compute unit, so it always produces a response
     /// and a matching log — both come from the same outcome, so they can't diverge.
     #[instrument(skip_all, fields(query_id = %query.query_id, peer_id = %peer_id, dataset = %query.dataset))]
@@ -780,7 +726,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         // Send before logging: the unit was spent at admission so the log happens regardless, and
         // the SQLite write stays off the response path.
         if let Err(e) = resp_chan.send(&message.encode_to_vec()).await {
-            warn!("Couldn't send query result to {peer_id}: {e:?}");
+            // Portals cancel in-flight queries once their own timeout fires, which resets the
+            // response stream. That's routine, so it isn't worth a warning.
+            if matches!(&e, StreamResponseError::Io(io) if io.kind() == std::io::ErrorKind::ConnectionReset)
+            {
+                tracing::debug!("Query result stream to {peer_id} was reset by the client: {e:?}");
+            } else {
+                warn!("Couldn't send query result to {peer_id}: {e:?}");
+            }
         }
 
         let log = build_log(query, peer_id, logged);
@@ -817,11 +770,69 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
     }
 }
 
+/// Checks the signature and timestamp freshness; the `Err` is the response to send back.
+/// Free-standing so the harness can drive RP-1 steps 1–3 without a transport.
+#[instrument(skip_all)]
+pub fn validate_query(
+    query: &Query,
+    peer_id: PeerId,
+    worker_id: PeerId,
+) -> Result<(), query_error::Err> {
+    if !query.verify_signature(peer_id, worker_id) {
+        warn!("Rejected query with invalid signature from {peer_id}");
+        return Err(query_error::Err::BadRequest(
+            "invalid query signature".to_owned(),
+        ));
+    }
+    if query.timestamp_ms.abs_diff(timestamp_now_ms()) as u128 > protocol::MAX_TIME_LAG.as_millis()
+    {
+        warn!(
+            "Rejected query with invalid timestamp ({}) from {peer_id}",
+            query.timestamp_ms
+        );
+        return Err(query_error::Err::BadRequest(
+            "timestamp out of allowed range".to_owned(),
+        ));
+    }
+    // Reject unknown enum values instead of silently falling back to the default.
+    if sqd_messages::QueryEngine::try_from(query.query_engine).is_err() {
+        warn!(
+            "Rejected query with unknown query engine ({}) from {peer_id}",
+            query.query_engine
+        );
+        return Err(query_error::Err::BadRequest(format!(
+            "unknown query engine: {}",
+            query.query_engine
+        )));
+    }
+    if sqd_messages::OutputFormat::try_from(query.output_format).is_err() {
+        warn!(
+            "Rejected query with unknown output format ({}) from {peer_id}",
+            query.output_format
+        );
+        return Err(query_error::Err::BadRequest(format!(
+            "unknown output format: {}",
+            query.output_format
+        )));
+    }
+    // Arrow IPC output is only produced by the dynamic engine.
+    if query.output_format() == sqd_messages::OutputFormat::ArrowIpc
+        && query.query_engine() != sqd_messages::QueryEngine::Dynamic
+    {
+        warn!("Rejected Arrow IPC query for the legacy engine from {peer_id}");
+        return Err(query_error::Err::BadRequest(
+            "Arrow IPC output is only supported by the dynamic query engine".to_owned(),
+        ));
+    }
+    // TODO: check that query_id has not been used before
+    Ok(())
+}
+
 /// Run an admitted query and refund the unused chunk fraction. The unit was spent at admission, so
 /// malformed params here are still charged and logged. Generic over the engine and rate limiter for
 /// mock-based tests (see [`super::query_deps`]).
 #[instrument(skip_all)]
-async fn execute<W: QueryRunner, A: CuChecker>(
+pub async fn execute<W: QueryRunner, A: CuChecker>(
     worker: &W,
     allocations_checker: &A,
     peer_id: PeerId,
@@ -879,7 +890,7 @@ async fn execute<W: QueryRunner, A: CuChecker>(
 /// Build the wire message and the log record from one outcome, so they can't diverge: an oversized
 /// or unsignable success downgrades to a signed `server_error` in both.
 #[instrument(skip_all)]
-async fn build_delivery(
+pub async fn build_delivery(
     keypair: &Keypair,
     query_id: &str,
     outcome: QueryResult,
@@ -991,7 +1002,7 @@ fn signed_result(
 
 /// Build the log from the delivery projection. Every admitted query is logged — no skip path — and
 /// the projection already carries whatever error the client saw.
-fn build_log(query: Query, client_id: PeerId, logged: Logged) -> QueryExecuted {
+pub fn build_log(query: Query, client_id: PeerId, logged: Logged) -> QueryExecuted {
     let (result, exec_time_report) = match logged {
         Logged::Ok {
             data_hash,
@@ -1022,8 +1033,9 @@ fn build_log(query: Query, client_id: PeerId, logged: Logged) -> QueryExecuted {
     }
 }
 
+/// Public so the harness asserts against the real status, not a copy of this function.
 #[tracing::instrument(skip_all)]
-async fn get_worker_status(
+pub async fn get_worker_status(
     worker: &Worker,
     current_epoch: Option<u32>,
 ) -> sqd_messages::WorkerStatus {

@@ -1,0 +1,8 @@
+# Suppressions for spec/tools/check_spec.py — format: check | file-glob | message-regex
+#
+# Every entry MUST carry a written justification on the comment line above it,
+# naming who accepted the deviation and why. Suppressions are for judgment calls
+# on tuned checks — never for silencing a check that was not first tuned in the
+# checker itself.
+#
+# (no entries)

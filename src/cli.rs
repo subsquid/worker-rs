@@ -78,9 +78,9 @@ pub struct Args {
     #[clap(long, env, hide(true), default_value_t = 0.001)]
     pub sentry_traces_sample_rate: f32,
 
-    // `ArgAction::Set` (rather than the default `SetTrue` for bools) keeps the
-    // value explicit: SENTRY_IS_ENABLED=false must parse as false, not be
-    // treated as "the flag is present".
+    // `long` so the env-only arg isn't silently positional; `ArgAction::Set`
+    // (not the bool default `SetTrue`) so SENTRY_IS_ENABLED=false parses as a
+    // value instead of counting as "flag present".
     #[clap(long, env, hide(true), default_value_t = true, action = clap::ArgAction::Set)]
     pub sentry_is_enabled: bool,
 }

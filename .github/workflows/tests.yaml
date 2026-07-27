@@ -3,7 +3,7 @@ name: Rust Tests
 on:
   push:
     branches:
-      - main
+      - master
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -12,6 +12,8 @@ env:
   CARGO_TERM_COLOR: always
   PROTOC_VERSION: 33.3
   ARCH: linux-x86_64
+  # Nothing here reads a backtrace, and DWARF is the bulk of every binary. `test` inherits it.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
@@ -22,6 +24,10 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || !github.event.pull_request.draft
+    # Every target links ~300 MB of polars/arrow. Four at once exhausts a 16 GB runner, and
+    # the agent dies with SIGTERM and no rustc error.
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Cache protoc
         id: cache-protoc
@@ -47,8 +53,73 @@ jobs:
           lfs: true
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+      # Unit tier only — building the conformance binaries here too would double the
+      # heaviest link work for no extra coverage.
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --all-features --lib --bins
+
+  # MG-4: the PR conformance subset, kept as its own job so its wall clock is visible
+  # against P-GATE-PR-TIME instead of hiding inside the unit-test run.
+  conformance:
+    name: Conformance (spec/13, ${{ matrix.config }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # P-GATE-PR-TIME
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        # The image ships default features (Dockerfile), so that is the configuration under
+        # test; mvcc-chunks gates 37 sites and flips whole branches, so it gets its own run.
+        include:
+          - config: default
+            features: ""
+          - config: all-features
+            features: "--all-features"
+    # Three test binaries over the same heavy dependency graph — see the `test` job.
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Cache protoc
+        id: cache-protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/protoc
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.arch }}
+
+      - name: Install protoc (if not cached)
+        if: steps.cache-protoc.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.local/protoc
+          curl -L -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${ARCH}.zip"
+          unzip -q /tmp/protoc.zip -d ~/.local/protoc
+
+      - name: Add protoc to PATH
+        run: echo "$HOME/.local/protoc/bin" >> "$GITHUB_PATH"
+
+      # The conformance corpus is generated, so LFS is not needed here.
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+      # One binary per subject. query_concurrency is separate by necessity, not topic:
+      # the OB signals are process-global, so gauge assertions cannot share a process
+      # with tests that run queries for other reasons.
+      - name: Run conformance tier
+        run: |
+          cargo test ${{ matrix.features }} \
+            --test e2e \
+            --test query_surface \
+            --test query_concurrency
+      # A gap test stays ignored until its fix lands (MG-8: failing-test-first, never a
+      # silent skip). Listing them keeps any quarantine visible in the job log.
+      - name: List quarantined gap tests
+        run: |
+          for t in e2e query_surface query_concurrency; do
+            cargo test ${{ matrix.features }} --test "$t" -- --ignored --list
+          done
 
   fmt:
     name: Rustfmt
