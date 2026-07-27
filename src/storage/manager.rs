@@ -26,10 +26,12 @@ use super::{
     Filesystem,
 };
 
-/// How many chunk removals may run at once. Removals are pure filesystem
-/// work, so a bit of parallelism shortens the mass-removal pass an assignment
-/// switch can trigger without saturating the disk.
-const CONCURRENT_REMOVALS: usize = 15;
+/// How many chunk removals may run at once. Overlapping a few syscall
+/// round-trips captures most of the mass-removal speedup; going higher only
+/// deepens filesystem-journal bursts on the SSD shared with latency-sensitive
+/// query reads (reference worker: 4 vCPU, single SSD). Removals are rare
+/// bursts and should yield to queries.
+const CONCURRENT_REMOVALS: usize = 4;
 
 pub struct StateManager {
     fs: LocalFs,
