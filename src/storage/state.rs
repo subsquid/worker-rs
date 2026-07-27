@@ -19,6 +19,12 @@ pub struct State {
     desired: ChunkSet,
     to_download: ChunkSet, // always equal to desired.diff(available).diff(downloading).diff(failed_downloads)
     locks: HashMap<ChunkRef, u8>, // stores ref count for each chunk
+    // Undesired chunks that were still query-locked when the removal pass ran,
+    // keyed with their remaining lock count. Logically removed — not available
+    // to new queries, not blocking new downloads — but still on disk until the
+    // last query finishes, so the overcommit is bounded by the locks held at
+    // the assignment switch.
+    condemned: HashMap<ChunkRef, u8>,
     // Both reset on every new assignment — each assignment gets a fresh download budget
     download_attempts: HashMap<ChunkRef, u32>, // failed attempts per desired chunk
     failed_downloads: ChunkSet, // desired chunks that exhausted their download attempts
@@ -80,10 +86,10 @@ impl State {
     }
 
     pub fn take_next_download(&mut self) -> Option<ChunkRef> {
-        // Deletion before download: while any undesired chunk still occupies disk
-        // (present, possibly locked by a running query) or its in-flight download
-        // hasn't been reaped yet, don't start new downloads. Otherwise old and new
-        // data would coexist and the worker could exceed its storage commitment.
+        // Deletion before download: while any undesired chunk is still available
+        // or its in-flight download hasn't been reaped yet, don't start new
+        // downloads. Otherwise old and new data would coexist and the worker
+        // could exceed its storage commitment.
         if self.has_pending_removals() {
             return None;
         }
@@ -92,6 +98,10 @@ impl State {
             let (_dataset, chunks) = self
                 .to_download
                 .iter()
+                // A re-desired condemned chunk can't start downloading yet: its
+                // stale copy still occupies the destination path until the last
+                // query holding it finishes.
+                .filter(|chunk| !self.condemned.contains_key(*chunk))
                 .into_group_map_by(|chunk| chunk.dataset.clone())
                 .into_iter()
                 .min_by_key(|(_ds, chunks)| chunks.len())?;
@@ -102,21 +112,39 @@ impl State {
         Some(chunk_ref)
     }
 
-    // Undesired chunks that are still present (locked ones included) or still
-    // being downloaded. While any exist, new downloads are held back.
+    // Undesired chunks that are still available or still being downloaded.
+    // While any exist, new downloads are held back. Locked undesired chunks
+    // count only until the removal pass condemns them — condemned chunks don't
+    // hold downloads back.
     pub fn has_pending_removals(&self) -> bool {
         self.available.difference(&self.desired).next().is_some()
             || self.downloading.difference(&self.desired).next().is_some()
     }
 
+    /// Undesired chunks ready for physical deletion. A locked undesired chunk
+    /// is not returned but condemned instead: logically removed right away —
+    /// new queries can't lock it and it doesn't block new downloads — and
+    /// handed out here once its last query finishes.
     pub fn take_removals(&mut self) -> Vec<ChunkRef> {
         let mut result = Vec::new();
         self.available.retain(|chunk| {
-            if self.desired.contains(chunk) || self.locks.contains_key(chunk) {
-                true
+            if self.desired.contains(chunk) {
+                return true;
+            }
+            if let Some(lock_count) = self.locks.remove(chunk) {
+                self.condemned.insert(chunk.clone(), lock_count);
             } else {
                 result.push(chunk.clone());
+            }
+            false
+        });
+        // Condemned chunks whose last query has finished (see `unlock_chunk`)
+        self.condemned.retain(|chunk, lock_count| {
+            if *lock_count == 0 {
+                result.push(chunk.clone());
                 false
+            } else {
+                true
             }
         });
         result
@@ -198,22 +226,24 @@ impl State {
         }
     }
 
-    /// Returns `true` if this was the last lock on a chunk that awaits removal,
-    /// so the caller can wake the state loop to process it promptly.
+    /// Returns `true` if this was the last lock on a chunk that awaits removal
+    /// (undesired and still available, or condemned), so the caller can wake
+    /// the state loop to process the deletion promptly.
     pub fn unlock_chunk(&mut self, chunk: &ChunkRef) -> bool {
-        let remove = self
-            .locks
-            .get_mut(chunk)
-            .map(|count| {
-                *count -= 1;
-                *count == 0
-            })
-            .unwrap_or(false);
-        if !remove {
-            return false;
+        if let Some(count) = self.locks.get_mut(chunk) {
+            *count -= 1;
+            if *count > 0 {
+                return false;
+            }
+            self.locks.remove(chunk);
+            return self.available.contains(chunk) && !self.desired.contains(chunk);
         }
-        self.locks.remove(chunk);
-        self.available.contains(chunk) && !self.desired.contains(chunk)
+        if let Some(count) = self.condemned.get_mut(chunk) {
+            *count -= 1;
+            // The zero-count entry stays for `take_removals` to extract
+            return *count == 0;
+        }
+        false
     }
 
     fn lock_chunk(&mut self, chunk: &ChunkRef) {
@@ -226,11 +256,12 @@ impl State {
 
     pub fn report_status(&self) {
         info!(
-            "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}",
+            "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}, condemned: {}",
             self.available.len(),
             self.downloading.len(),
             self.to_download.len(),
-            self.failed_downloads.len()
+            self.failed_downloads.len(),
+            self.condemned.len()
         );
         metrics::CHUNKS_AVAILABLE.set(self.available.len() as i64);
         metrics::CHUNKS_DOWNLOADING.set(self.downloading.len() as i64);
@@ -274,6 +305,14 @@ impl State {
                 .all(|chunk| self.available.contains(chunk)),
             "locks must only be held on available chunks"
         );
+        assert!(
+            self.condemned.keys().all(|chunk| {
+                !self.available.contains(chunk)
+                    && !self.downloading.contains(chunk)
+                    && !self.locks.contains_key(chunk)
+            }),
+            "condemned chunks must not be available, downloading, or freshly locked"
+        );
     }
 
     pub(super) fn available(&self) -> &ChunkSet {
@@ -290,6 +329,18 @@ impl State {
 
     pub(super) fn has_queued_downloads(&self) -> bool {
         !self.to_download.is_empty()
+    }
+
+    pub(super) fn queued_downloads(&self) -> &ChunkSet {
+        &self.to_download
+    }
+
+    pub(super) fn is_condemned(&self, chunk: &ChunkRef) -> bool {
+        self.condemned.contains_key(chunk)
+    }
+
+    pub(super) fn has_condemned(&self) -> bool {
+        !self.condemned.is_empty()
     }
 }
 
@@ -384,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn downloads_wait_for_locked_chunk_removal() {
+    fn locked_undesired_chunk_is_condemned_without_blocking_downloads() {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
@@ -405,16 +456,59 @@ mod tests {
             .is_some());
         state.set_desired_chunks([b.clone(), c.clone()].into_iter().collect());
 
-        // `a` is locked, so it can't be removed yet and downloads must wait
+        // Until the removal pass runs, downloads are gated as usual
         assert!(state.has_pending_removals());
-        assert_eq!(state.take_removals(), &[]);
         assert_eq!(state.take_next_download(), None);
 
-        // Releasing the last lock makes `a` removable and unblocks downloads
-        assert!(state.unlock_chunk(&a));
-        assert_eq!(state.take_removals(), &[a]);
+        // The removal pass condemns the locked chunk: nothing to delete yet,
+        // but downloads proceed immediately — the in-flight query only delays
+        // the deletion of `a`, not the new assignment
+        assert_eq!(state.take_removals(), &[]);
         assert!(!state.has_pending_removals());
         assert_eq!(state.take_next_download(), Some(c));
+
+        // The condemned chunk refuses new query locks
+        assert!(state
+            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
+            .is_none());
+
+        // Releasing the last lock makes `a` physically deletable
+        assert!(state.unlock_chunk(&a));
+        assert_eq!(state.take_removals(), &[a]);
+    }
+
+    // A condemned chunk that the next assignment wants again is not resurrected:
+    // its stale copy still occupies the destination path, so the re-download
+    // waits until the last query releases it and the copy is deleted.
+    #[test]
+    fn redesired_condemned_chunk_is_redownloaded_after_deletion() {
+        let ds = Arc::new("ds".to_owned());
+        let a = ChunkRef {
+            dataset: ds.clone(),
+            chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
+        };
+
+        let mut state = State::new([a.clone()].into_iter().collect());
+        assert!(state
+            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
+            .is_some());
+        state.set_desired_chunks(ChunkSet::new());
+        assert_eq!(state.take_removals(), &[]); // `a` is condemned
+
+        // The next assignment wants `a` again — it is queued for download, but
+        // can't start while the stale copy is still on disk
+        state.set_desired_chunks([a.clone()].into_iter().collect());
+        assert!(state.has_queued_downloads());
+        assert_eq!(state.take_next_download(), None);
+        assert!(!state.is_fully_applied());
+
+        // Once the query finishes and the stale copy is deleted, the download
+        // proceeds
+        assert!(state.unlock_chunk(&a));
+        assert_eq!(state.take_removals(), &[a.clone()]);
+        assert_eq!(state.take_next_download(), Some(a.clone()));
+        state.complete_download(&a, true);
+        assert!(state.is_fully_applied());
     }
 
     #[test]
@@ -479,13 +573,11 @@ mod tests {
         assert!(!state.is_stalled());
     }
 
-    // Known limitation (not yet fixed): `get_and_lock_chunk` only checks
-    // availability, so queries arriving after a new assignment can still lock a
-    // chunk that this assignment dropped. A steady stream of such queries defers
-    // the removal indefinitely and, with deletion-before-download, also holds
-    // back all new downloads.
+    // Queries can lock an undesired chunk only until the removal pass condemns
+    // it; from then on new locks are refused, so a steady stream of queries
+    // can't defer the removal (and thus the new assignment) indefinitely.
     #[test]
-    fn undesired_chunk_can_be_relocked_deferring_removal_and_downloads() {
+    fn condemnation_stops_undesired_chunk_relocking() {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
@@ -500,21 +592,23 @@ mod tests {
 
         let mut state = State::new([a.clone()].into_iter().collect());
         // The new assignment drops `a` and adds `b`
-        state.set_desired_chunks([b].into_iter().collect());
+        state.set_desired_chunks([b.clone()].into_iter().collect());
 
-        // A query arriving *after* the assignment switch can still lock `a`
+        // A query arriving *after* the assignment switch can still lock `a` —
+        // the removal pass hasn't run yet
         assert!(state
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
             .is_some());
-        // ...which defers both the removal and every new download
-        assert_eq!(state.take_removals(), &[]);
-        assert_eq!(state.take_next_download(), None);
 
-        // Each unlock can be immediately followed by another lock, repeating the cycle
-        assert!(state.unlock_chunk(&a));
-        assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_some());
+        // The removal pass condemns `a`: new locks are refused from here on,
+        // and downloads are not held back
         assert_eq!(state.take_removals(), &[]);
-        assert_eq!(state.take_next_download(), None);
+        assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_none());
+        assert_eq!(state.take_next_download(), Some(b));
+
+        // The last unlock releases `a` for deletion; it stays unlockable
+        assert!(state.unlock_chunk(&a));
+        assert_eq!(state.take_removals(), &[a]);
     }
 
     #[test]
