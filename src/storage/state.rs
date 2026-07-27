@@ -186,7 +186,6 @@ impl State {
         }
     }
 
-    #[cfg(any(feature = "mvcc-chunks", test))]
     pub fn is_fully_applied(&self) -> bool {
         // A stale in-flight download for a chunk no longer desired does not block
         // applying the current assignment. It will either complete as extra
@@ -201,7 +200,6 @@ impl State {
     /// No download work is left, but some desired chunks were given up on after
     /// exhausting their attempts — this assignment can never become fully
     /// applied. Terminal until the next assignment resets the budget.
-    #[cfg(any(feature = "mvcc-chunks", test))]
     pub fn is_stalled(&self) -> bool {
         !self.failed_downloads.is_empty()
             && self.to_download.is_empty()

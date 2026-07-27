@@ -281,7 +281,6 @@ fn chunk_set(indexes: &[usize]) -> ChunkSet {
 /// check-and-mark critical section under randomized interleavings of the
 /// assignment pipeline with the state loop's own mark and download-progress
 /// steps. Generalizes the hand-written race test in `super::manager`.
-#[cfg(feature = "mvcc-chunks")]
 mod confirmation {
     use parking_lot::Mutex;
 

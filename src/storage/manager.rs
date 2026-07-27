@@ -29,9 +29,7 @@ pub struct StateManager {
     fs: LocalFs,
     datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
-    #[cfg(feature = "mvcc-chunks")]
     assignment_application: Mutex<AssignmentApplicationStatus>,
-    #[cfg(feature = "mvcc-chunks")]
     assignment_settled_tx: tokio::sync::watch::Sender<Option<AssignmentSettled>>,
     notify: tokio::sync::Notify,
     concurrent_downloads: usize,
@@ -43,13 +41,11 @@ pub struct Status {
     pub unavailability_map: Vec<bool>,
     pub stored_bytes: u64,
     pub assignment_id: Option<String>,
-    #[cfg(feature = "mvcc-chunks")]
     pub last_applied_assignment_id: Option<String>,
 }
 
 // pub(super) so the property-based tests in `super::state_pbt` can drive the
 // check-and-mark critical section directly.
-#[cfg(feature = "mvcc-chunks")]
 #[derive(Debug, Default)]
 pub(super) struct AssignmentApplicationStatus {
     pub(super) current_assignment_id: Option<String>,
@@ -59,14 +55,12 @@ pub(super) struct AssignmentApplicationStatus {
 }
 
 /// Terminal per-assignment verdict published on the settled channel.
-#[cfg(feature = "mvcc-chunks")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentSettled {
     pub id: String,
     pub outcome: AssignmentOutcome,
 }
 
-#[cfg(feature = "mvcc-chunks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignmentOutcome {
     /// All desired chunks are present.
@@ -89,7 +83,6 @@ impl StateManager {
         let existing_chunks = load_state(&fs).await?;
         debug!("Loaded state: {:#?}", existing_chunks);
 
-        #[cfg(feature = "mvcc-chunks")]
         let (assignment_settled_tx, _) = tokio::sync::watch::channel(None);
 
         Ok(Self {
@@ -99,9 +92,7 @@ impl StateManager {
             worker_id,
             notify: tokio::sync::Notify::new(),
             datasets_index: Mutex::new(None),
-            #[cfg(feature = "mvcc-chunks")]
             assignment_application: Mutex::new(AssignmentApplicationStatus::default()),
-            #[cfg(feature = "mvcc-chunks")]
             assignment_settled_tx,
             download_config,
         })
@@ -163,10 +154,7 @@ impl StateManager {
                     break;
                 }
             }
-            #[cfg(feature = "mvcc-chunks")]
-            {
-                self.mark_current_assignment_settled_if_ready();
-            }
+            self.mark_current_assignment_settled_if_ready();
         }
         info!("State manager loop finished");
     }
@@ -175,7 +163,6 @@ impl StateManager {
     /// current assignment becomes fully applied (all chunks present) or stalls
     /// (some chunks exhausted their download attempts). Used to refresh the
     /// reported status promptly instead of waiting for the periodic timer.
-    #[cfg(feature = "mvcc-chunks")]
     pub fn subscribe_assignment_settled(
         &self,
     ) -> tokio::sync::watch::Receiver<Option<AssignmentSettled>> {
@@ -197,7 +184,6 @@ impl StateManager {
                 unavailability_map: Default::default(),
                 stored_bytes,
                 assignment_id: None,
-                #[cfg(feature = "mvcc-chunks")]
                 last_applied_assignment_id: self
                     .assignment_application
                     .lock()
@@ -220,7 +206,6 @@ impl StateManager {
             unavailability_map,
             stored_bytes,
             assignment_id: Some(assignment_id.to_owned()),
-            #[cfg(feature = "mvcc-chunks")]
             last_applied_assignment_id: self
                 .assignment_application
                 .lock()
@@ -236,7 +221,6 @@ impl StateManager {
         key: &Keypair,
     ) -> bool {
         let id = id.into();
-        #[cfg(feature = "mvcc-chunks")]
         let current_assignment_id = id.clone();
         let datasets_index = match DatasetsIndex::new(assignment, id, key) {
             Ok(result) => result,
@@ -258,7 +242,6 @@ impl StateManager {
         // observe the new desired set paired with the old assignment id and
         // confirm a never-applied assignment based on the new one's chunks —
         // found by the property test in `super::state_pbt::confirmation`.
-        #[cfg(feature = "mvcc-chunks")]
         let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
@@ -270,16 +253,13 @@ impl StateManager {
             }
         }
         *index = Some(datasets_index);
-        #[cfg(feature = "mvcc-chunks")]
         {
             assignment_application.current_assignment_id = Some(current_assignment_id);
         }
         drop(state);
-        #[cfg(feature = "mvcc-chunks")]
         drop(assignment_application);
         drop(index);
 
-        #[cfg(feature = "mvcc-chunks")]
         self.mark_current_assignment_settled_if_ready();
 
         match status {
@@ -305,7 +285,6 @@ impl StateManager {
 
     /// Waits until the given assignment settles — fully applied or stalled.
     /// Returns `None` when cancelled or the manager is gone.
-    #[cfg(feature = "mvcc-chunks")]
     pub async fn wait_until_assignment_settled(
         &self,
         assignment_id: &str,
@@ -375,7 +354,6 @@ impl StateManager {
             .join(chunk_ref.chunk.as_ref())
     }
 
-    #[cfg(feature = "mvcc-chunks")]
     fn mark_current_assignment_settled_if_ready(&self) {
         mark_assignment_settled_if_ready(
             &self.state,
@@ -387,7 +365,6 @@ impl StateManager {
 
 // Free function (rather than a `StateManager` method) so tests can drive the exact
 // check-and-mark critical section without constructing a full `StateManager`.
-#[cfg(feature = "mvcc-chunks")]
 pub(super) fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
     assignment_application: &Mutex<AssignmentApplicationStatus>,
@@ -598,7 +575,6 @@ mod tests {
         assert_eq!(PathBuf::from("a/b").join("**/*.c").as_str(), "a/b/**/*.c");
     }
 
-    #[cfg(feature = "mvcc-chunks")]
     fn settled(id: &str, outcome: super::AssignmentOutcome) -> Option<super::AssignmentSettled> {
         Some(super::AssignmentSettled {
             id: id.to_owned(),
@@ -610,7 +586,6 @@ mod tests {
     // loop's periodic check that used to let a not-yet-applied assignment be reported
     // as applied (see git history of `mark_assignment_settled_if_ready`). It is not an
     // exhaustive test of every possible interleaving, just this one.
-    #[cfg(feature = "mvcc-chunks")]
     #[test]
     fn does_not_misattribute_applied_state_to_a_newer_assignment() {
         use std::sync::Arc;
@@ -692,7 +667,6 @@ mod tests {
     // A stalled assignment (chunks exhausted their download attempts) is
     // published as Stalled on the settled channel but never advances
     // last_applied_assignment_id — the heartbeat stays honest.
-    #[cfg(feature = "mvcc-chunks")]
     #[test]
     fn reports_stalled_assignment_without_marking_it_applied() {
         use std::sync::Arc;

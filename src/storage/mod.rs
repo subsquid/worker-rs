@@ -8,7 +8,7 @@ pub mod guard;
 pub mod layout;
 pub mod local_fs;
 pub mod manager;
-#[cfg(all(test, feature = "mvcc-chunks"))]
+#[cfg(test)]
 mod regression;
 pub mod state;
 #[cfg(test)]

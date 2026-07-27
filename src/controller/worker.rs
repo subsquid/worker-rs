@@ -82,7 +82,6 @@ impl Worker {
 
     /// Waits until the given assignment settles — fully applied or stalled.
     /// Returns `None` when cancelled.
-    #[cfg(feature = "mvcc-chunks")]
     pub async fn wait_until_assignment_settled(
         &self,
         assignment_id: &str,
@@ -103,7 +102,6 @@ impl Worker {
 
     /// Subscribe to the "assignment settled" signal (applied or stalled), so
     /// callers can refresh the reported status promptly.
-    #[cfg(feature = "mvcc-chunks")]
     pub fn subscribe_assignment_settled(
         &self,
     ) -> tokio::sync::watch::Receiver<Option<manager::AssignmentSettled>> {
