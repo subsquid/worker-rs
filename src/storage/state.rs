@@ -21,7 +21,10 @@ pub struct State {
     locks: HashMap<ChunkRef, u8>, // stores ref count for each chunk
     // Undesired chunks still query-locked when the removal pass ran, keyed by
     // remaining lock count: invisible to new queries and downloads, kept on
-    // disk until the last query finishes.
+    // disk until the last query finishes. Locks are only ever held for the
+    // duration of a single-chunk query (seconds), so waiting the queries out
+    // keeps the disk overcommit both small — at most the locks held at the
+    // assignment switch — and short-lived.
     condemned: HashMap<ChunkRef, u8>,
     // Both reset on every new assignment — each assignment gets a fresh download budget
     download_attempts: HashMap<ChunkRef, u8>, // failed attempts per desired chunk
