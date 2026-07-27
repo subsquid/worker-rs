@@ -10,8 +10,8 @@ use sqd_messages::{
     TimeReport, WorkerStatus,
 };
 use sqd_network_transport::{
-    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseSender, WorkerConfig, WorkerEvent,
-    WorkerTransportHandle,
+    protocol, Keypair, P2PTransportBuilder, PeerId, ResponseSender, StreamResponseError,
+    WorkerConfig, WorkerEvent, WorkerTransportHandle,
 };
 use tokio::{
     sync::{mpsc, Semaphore},
@@ -702,7 +702,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         // Send before logging: the unit was spent at admission so the log happens regardless, and
         // the SQLite write stays off the response path.
         if let Err(e) = resp_chan.send(&message.encode_to_vec()).await {
-            warn!("Couldn't send query result to {peer_id}: {e:?}");
+            // Portals cancel in-flight queries once their own timeout fires, which resets the
+            // response stream. That's routine, so it isn't worth a warning.
+            if matches!(&e, StreamResponseError::Io(io) if io.kind() == std::io::ErrorKind::ConnectionReset)
+            {
+                tracing::debug!("Query result stream to {peer_id} was reset by the client: {e:?}");
+            } else {
+                warn!("Couldn't send query result to {peer_id}: {e:?}");
+            }
         }
 
         let log = build_log(query, peer_id, logged);
