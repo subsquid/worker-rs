@@ -97,7 +97,10 @@ impl StateManager {
 
         Ok(Self {
             fs,
-            state: Mutex::new(State::new(existing_chunks)),
+            state: Mutex::new(State::new(
+                existing_chunks,
+                download_config.max_download_attempts,
+            )),
             concurrent_downloads,
             worker_id,
             notify: tokio::sync::Notify::new(),
@@ -547,6 +550,7 @@ mod tests {
             s3_timeout: Duration::from_secs(1),
             s3_read_timeout: Duration::from_secs(1),
             downloads_max_delay: Duration::from_secs(1),
+            max_download_attempts: crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
         };
         StateManager::new(workdir, 1, worker_id, config)
             .await
@@ -638,6 +642,7 @@ mod tests {
         use super::{
             mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
         };
+        use crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
         let chunk = |id: &str| ChunkRef {
@@ -649,7 +654,10 @@ mod tests {
 
         // Assignment A only needs `chunk_a`, which is already available, and is
         // already marked as applied (steady state before the race begins).
-        let state = Mutex::new(State::new([chunk_a.clone()].into_iter().collect()));
+        let state = Mutex::new(State::new(
+            [chunk_a.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        ));
         let assignment_application = Mutex::new(AssignmentApplicationStatus {
             current_assignment_id: Some("A".to_owned()),
             last_applied_assignment_id: Some("A".to_owned()),
@@ -717,7 +725,7 @@ mod tests {
         use super::{
             mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
         };
-        use crate::storage::state::MAX_DOWNLOAD_ATTEMPTS;
+        use crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
         let chunk_a = ChunkRef {
@@ -725,9 +733,9 @@ mod tests {
             chunk: Arc::from("a"),
         };
 
-        let mut state = State::new(ChunkSet::new());
+        let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         state.set_desired_chunks([chunk_a.clone()].into_iter().collect());
-        for _ in 0..MAX_DOWNLOAD_ATTEMPTS {
+        for _ in 0..DEFAULT_MAX_DOWNLOAD_ATTEMPTS {
             assert_eq!(state.take_next_download(), Some(chunk_a.clone()));
             state.complete_download(&chunk_a, false);
         }

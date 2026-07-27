@@ -7,10 +7,11 @@ use crate::{
     types::state::{ChunkId, ChunkRef, ChunkSet, DatasetId},
 };
 
-/// How many times a chunk download may fail before the worker gives up on it
-/// until the next assignment. Attempts are spaced by the downloader's global
-/// backoff, so the budget is not burned in a tight loop.
-pub const MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
+/// Default for how many times a chunk download may fail before the worker
+/// gives up on it until the next assignment (`--max-download-attempts`).
+/// Attempts are spaced by the downloader's global backoff, so the budget is
+/// not burned in a tight loop.
+pub const DEFAULT_MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -29,6 +30,7 @@ pub struct State {
     // Both reset on every new assignment — each assignment gets a fresh download budget
     download_attempts: HashMap<ChunkRef, u8>, // failed attempts per desired chunk
     failed_downloads: ChunkSet, // desired chunks that exhausted their download attempts
+    max_download_attempts: u8,
 }
 
 #[derive(Debug)]
@@ -43,10 +45,11 @@ pub struct Status {
 }
 
 impl State {
-    pub fn new(available: ChunkSet) -> Self {
+    pub fn new(available: ChunkSet, max_download_attempts: u8) -> Self {
         Self {
             available: available.clone(),
             desired: available,
+            max_download_attempts,
             ..Default::default()
         }
     }
@@ -172,10 +175,13 @@ impl State {
         } else if self.desired.contains(&chunk) {
             let attempts = self.download_attempts.entry(chunk.clone()).or_insert(0);
             *attempts += 1;
-            if *attempts >= MAX_DOWNLOAD_ATTEMPTS {
+            if *attempts >= self.max_download_attempts {
                 // The chunk keeps being reported as missing; once no download
                 // work is left, the assignment counts as stalled.
-                warn!("Giving up on chunk {chunk} after {MAX_DOWNLOAD_ATTEMPTS} download attempts");
+                warn!(
+                    "Giving up on chunk {chunk} after {} download attempts",
+                    self.max_download_attempts
+                );
                 self.download_attempts.remove(&chunk);
                 self.failed_downloads.insert(chunk);
             } else {
@@ -350,7 +356,7 @@ mod tests {
 
     use crate::types::state::{ChunkRef, ChunkSet};
 
-    use super::{State, MAX_DOWNLOAD_ATTEMPTS};
+    use super::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
 
     #[test]
     fn test_state() {
@@ -368,7 +374,10 @@ mod tests {
         let c = chunk_ref(2);
         let d = chunk_ref(3);
 
-        let mut state = State::new([a.clone(), b.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone(), b.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         state.set_desired_chunks([a.clone(), b.clone(), c.clone()].into_iter().collect());
         assert_eq!(state.take_next_download(), Some(c.clone()));
         assert_eq!(state.take_next_download(), None);
@@ -413,7 +422,10 @@ mod tests {
         let b = chunk_ref(1);
         let c = chunk_ref(2);
 
-        let mut state = State::new([a.clone(), b.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone(), b.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         assert!(state.is_fully_applied());
 
         state.set_desired_chunks([a.clone(), b.clone(), c.clone()].into_iter().collect());
@@ -447,7 +459,10 @@ mod tests {
         let b = chunk_ref(1);
         let c = chunk_ref(2);
 
-        let mut state = State::new([a.clone(), b.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone(), b.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         // A query is using `a` when the new assignment drops it and adds `c`
         assert!(state
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
@@ -485,7 +500,10 @@ mod tests {
             chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
         };
 
-        let mut state = State::new([a.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         assert!(state
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
             .is_some());
@@ -516,7 +534,10 @@ mod tests {
             chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
         };
 
-        let mut state = State::new([a.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         assert!(state
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
             .is_some());
@@ -533,7 +554,7 @@ mod tests {
     }
 
     // A permanently failing download — e.g. a chunk deleted from the bucket —
-    // is given up on after MAX_DOWNLOAD_ATTEMPTS and the assignment becomes
+    // is given up on after max_download_attempts and the assignment becomes
     // stalled. The budget is per assignment: the next one retries the chunk.
     #[test]
     fn failing_download_is_given_up_after_attempt_cap() {
@@ -543,10 +564,10 @@ mod tests {
             chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
         };
 
-        let mut state = State::new(ChunkSet::new());
+        let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         state.set_desired_chunks([a.clone()].into_iter().collect());
 
-        for _ in 0..MAX_DOWNLOAD_ATTEMPTS {
+        for _ in 0..DEFAULT_MAX_DOWNLOAD_ATTEMPTS {
             assert_eq!(state.take_next_download(), Some(a.clone()));
             assert!(!state.is_stalled(), "still work in progress");
             state.complete_download(&a, false);
@@ -584,7 +605,10 @@ mod tests {
         let a = chunk_ref(0);
         let b = chunk_ref(1);
 
-        let mut state = State::new([a.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         // The new assignment drops `a` and adds `b`
         state.set_desired_chunks([b.clone()].into_iter().collect());
 
@@ -620,7 +644,10 @@ mod tests {
         let b = chunk_ref(1);
         let c = chunk_ref(2);
 
-        let mut state = State::new([a.clone(), b.clone()].into_iter().collect());
+        let mut state = State::new(
+            [a.clone(), b.clone()].into_iter().collect(),
+            DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
         state.set_desired_chunks([a.clone(), b.clone(), c.clone()].into_iter().collect());
 
         assert_eq!(state.take_next_download(), Some(c.clone()));

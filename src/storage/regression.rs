@@ -14,7 +14,7 @@ use super::manager::{
     mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome,
     AssignmentSettled,
 };
-use super::state::State;
+use super::state::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
 use crate::types::state::{ChunkRef, ChunkSet};
 
 // The counterexample replayed verbatim against the settled-check. The wrong
@@ -96,7 +96,7 @@ impl Pipeline {
     fn new() -> Self {
         let (settled_tx, _) = tokio::sync::watch::channel(None);
         Self {
-            state: Mutex::new(State::new(ChunkSet::new())),
+            state: Mutex::new(State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS)),
             application: Mutex::new(AssignmentApplicationStatus::default()),
             settled_tx,
         }

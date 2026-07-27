@@ -39,6 +39,11 @@ pub struct Args {
     #[clap(long, env = "DOWNLOADS_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
     pub downloads_max_delay: Duration,
 
+    /// How many times a chunk download may fail before it is given up on
+    /// until the next assignment
+    #[clap(long, env, hide(true), default_value_t = crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS, value_parser = clap::value_parser!(u8).range(1..))]
+    pub max_download_attempts: u8,
+
     #[clap(long, env)]
     pub query_threads: Option<usize>,
 

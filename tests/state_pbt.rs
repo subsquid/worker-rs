@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 
-use sqd_worker::storage::state::{State, MAX_DOWNLOAD_ATTEMPTS};
+use sqd_worker::storage::state::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
 use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
 /// Small chunk universe so random subsets collide and re-assignments overlap.
@@ -34,7 +34,7 @@ proptest! {
     fn random_op_sequences_uphold_ordering_liveness_and_bookkeeping(
         ops in prop::collection::vec(arb_op(), 1..200),
     ) {
-        let mut state = State::new(ChunkSet::new());
+        let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         let mut shadow = Shadow::default();
 
         for op in &ops {
@@ -45,14 +45,14 @@ proptest! {
     }
 
     // The attempt cap in isolation: however the failures are interleaved with
-    // other work, a chunk is offered at most MAX_DOWNLOAD_ATTEMPTS times per
+    // other work, a chunk is offered at most the attempt cap times per
     // assignment when every attempt fails.
     #[test]
     fn a_chunk_is_never_attempted_more_than_the_cap_per_assignment(
         target in 0..UNIVERSE,
         ops in prop::collection::vec(arb_op(), 1..100),
     ) {
-        let mut state = State::new(ChunkSet::new());
+        let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         let mut shadow = Shadow::default();
         let mut attempts_since_assignment = 0u8;
         let target = chunk(target);
@@ -68,7 +68,7 @@ proptest! {
                     if chunk == target {
                         attempts_since_assignment += 1;
                         prop_assert!(
-                            attempts_since_assignment <= MAX_DOWNLOAD_ATTEMPTS,
+                            attempts_since_assignment <= DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
                             "chunk retried past the attempt cap within one assignment"
                         );
                         state.complete_download(&chunk, false);
@@ -296,7 +296,7 @@ mod confirmation {
         fn only_genuinely_applied_assignments_are_confirmed(scripts in arb_scripts()) {
             let (settled_tx, _settled_rx) = tokio::sync::watch::channel(None);
             let mut pipeline = Pipeline {
-                state: Mutex::new(State::new(ChunkSet::new())),
+                state: Mutex::new(State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS)),
                 application: Mutex::new(AssignmentApplicationStatus::default()),
                 settled_tx,
                 chunk_sets: Vec::with_capacity(scripts.len()),

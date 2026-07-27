@@ -22,6 +22,7 @@ pub struct DownloadConfig {
     pub s3_timeout: Duration,
     pub s3_read_timeout: Duration,
     pub downloads_max_delay: Duration,
+    pub max_download_attempts: u8,
 }
 
 impl From<&cli::Args> for DownloadConfig {
@@ -30,6 +31,7 @@ impl From<&cli::Args> for DownloadConfig {
             s3_timeout: args.s3_timeout,
             s3_read_timeout: args.s3_read_timeout,
             downloads_max_delay: args.downloads_max_delay,
+            max_download_attempts: args.max_download_attempts,
         }
     }
 }
