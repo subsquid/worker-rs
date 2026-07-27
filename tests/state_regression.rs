@@ -1,5 +1,5 @@
 //! Deterministic regression tests pinning counterexamples found by the
-//! property-based tests in `tests/state_pbt.rs`.
+//! property-based tests in `state_pbt.rs`.
 //!
 //! Counterexample: assignment A0 desires one chunk that is never downloaded;
 //! assignment A1 desires nothing. A settled-check that observes A1's
@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::manager::{
+use sqd_worker::storage::manager::{
     mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome,
     AssignmentSettled,
 };
-use super::state::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
-use crate::types::state::{ChunkRef, ChunkSet};
+use sqd_worker::storage::state::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
+use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
 // The counterexample replayed verbatim against the settled-check. The wrong
 // confirmation DOES happen: the mark function cannot detect the inconsistency

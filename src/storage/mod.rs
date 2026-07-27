@@ -8,8 +8,6 @@ pub mod guard;
 pub mod layout;
 pub mod local_fs;
 pub mod manager;
-#[cfg(test)]
-mod regression;
 pub mod state;
 
 #[allow(async_fn_in_trait)]

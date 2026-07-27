@@ -53,8 +53,9 @@ pub struct Status {
     pub last_applied_assignment_id: Option<String>,
 }
 
-// Public (but doc-hidden) so `tests/state_pbt.rs` and `super::regression` can
-// drive the check-and-mark critical section directly.
+// Public (but doc-hidden) so `tests/state_pbt.rs` and `tests/state_regression.rs`
+// can drive the check-and-mark critical section directly; integration tests
+// compile the lib without cfg(test), so narrower visibility can't work.
 #[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct AssignmentApplicationStatus {

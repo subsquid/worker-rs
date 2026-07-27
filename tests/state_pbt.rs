@@ -325,7 +325,7 @@ mod confirmation {
     /// registered. Desired chunks and `current_assignment_id` change
     /// atomically w.r.t. the settled-check, as in `set_assignment`, so no ops
     /// interleave between them; the mixed-observation hazard is pinned in
-    /// `src/storage/regression.rs`.
+    /// `state_regression.rs`.
     type Script = (Vec<usize>, Vec<MidOp>);
 
     fn arb_scripts() -> impl Strategy<Value = Vec<Script>> {
