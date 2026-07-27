@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf as PathBuf;
+use futures::StreamExt;
 use parking_lot::Mutex;
 use sqd_contract_client::PeerId;
 use sqd_network_transport::Keypair;
@@ -24,6 +25,11 @@ use super::{
     state::{State, UpdateStatus},
     Filesystem,
 };
+
+/// How many chunk removals may run at once. Removals are pure filesystem
+/// work, so a bit of parallelism shortens the mass-removal pass an assignment
+/// switch can trigger without saturating the disk.
+const CONCURRENT_REMOVALS: usize = 15;
 
 pub struct StateManager {
     fs: LocalFs,
@@ -136,13 +142,17 @@ impl StateManager {
             }
 
             let removals = self.state.lock().take_removals();
-            for chunk in removals {
-                info!("Removing chunk {chunk}");
-                self.drop_chunk(&chunk)
-                    .await
-                    .unwrap_or_else(|_| panic!("Couldn't remove chunk {chunk}"));
-                metrics::CHUNKS_REMOVED.inc();
-            }
+            // Concurrent, but still a barrier: the downloads below only start
+            // once every removal has finished (deletion before download).
+            futures::stream::iter(removals)
+                .for_each_concurrent(CONCURRENT_REMOVALS, |chunk| async move {
+                    info!("Removing chunk {chunk}");
+                    self.drop_chunk(&chunk)
+                        .await
+                        .unwrap_or_else(|_| panic!("Couldn't remove chunk {chunk}"));
+                    metrics::CHUNKS_REMOVED.inc();
+                })
+                .await;
 
             let guard = self.datasets_index.lock();
             let Some(dataset_index) = guard.as_ref() else {
