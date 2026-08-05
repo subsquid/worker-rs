@@ -65,9 +65,7 @@ url = "2.5.2"
 walkdir = "2.5.0"
 zstd = "0.13"
 
-# TEMPORARY: pinned to the unmerged NET-1180 branch (WorkerAssignment/PortalAssignment types) for
-# NET-1186. Re-pin to sqd-network's master once NET-1180 lands there.
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "032d0c5", features = ["reader"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "360bbd4", features = ["reader"] }
 sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "1.2.1" }
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "2.0.2", features = ["bitstring"] }
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "3.0.0", features = ["worker", "metrics"] }
@@ -84,8 +82,7 @@ arrow = "54.2.1"
 # implements its `Client` trait, whose signatures mention `Ratio<u128>`.
 num-rational = "0.4"
 parquet = { version = "54.2.1", features = ["arrow"] }
-# TEMPORARY: see the NET-1180 note on the [dependencies] sqd-assignments entry above.
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "032d0c5", features = ["builder"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "360bbd4", features = ["builder"] }
 tempfile = "3"
 
 # sqd-network-transport depends on the kalabukdima/rust-libp2p fork, whose crates build against their
