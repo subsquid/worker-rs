@@ -292,6 +292,33 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         'assignments: loop {
             if processing_id.is_none() {
                 if let Some(update) = pending.pop_front() {
+                    // NET-1186: decode-only for now — DatasetsIndex/serving still needs the
+                    // legacy format (WorkerAssignmentChunk has no files/base_url; deriving them
+                    // from schema_id/tables_present is separate, not-yet-scoped work). Discarding
+                    // this update rather than falling back to `fetch_assignment` avoids feeding
+                    // worker-assignment-format bytes to the legacy parser.
+                    #[cfg(feature = "mvcc-chunks")]
+                    if update.is_worker_assignment {
+                        match super::assignments::fetch_worker_assignment(
+                            &update.fb_url_v1,
+                            &assignment_client,
+                        )
+                        .await
+                        {
+                            Ok(assignment) => {
+                                tracing::info!(
+                                    assignment_id = %update.id,
+                                    datasets = assignment.datasets().len(),
+                                    "Decoded worker-oriented assignment (not yet applied to serving state)"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(assignment_id = %update.id, error = %e, "Failed to download worker-oriented assignment");
+                            }
+                        }
+                        continue;
+                    }
+
                     tracing::debug!("Downloading assignment \"{}\"", update.id);
                     let assignment = match super::assignments::fetch_assignment(
                         &update.fb_url_v1,

@@ -6,7 +6,7 @@ edition = "2021"
 
 [features]
 query-tracing = ["sqd-query/max_level_trace"]
-mvcc-chunks = []
+mvcc-chunks = ["sqd-assignments/mvcc-chunks"]
 
 [dependencies]
 anyhow = "1.0"
@@ -65,7 +65,7 @@ url = "2.5.2"
 walkdir = "2.5.0"
 zstd = "0.13"
 
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", features = ["reader"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "360bbd4", features = ["reader"] }
 sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "1.2.1" }
 sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "2.0.2", features = ["bitstring"] }
 sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "3.0.0", features = ["worker", "metrics"] }
@@ -82,7 +82,7 @@ arrow = "54.2.1"
 # implements its `Client` trait, whose signatures mention `Ratio<u128>`.
 num-rational = "0.4"
 parquet = { version = "54.2.1", features = ["arrow"] }
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", features = ["builder"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "360bbd4", features = ["builder"] }
 tempfile = "3"
 
 # sqd-network-transport depends on the kalabukdima/rust-libp2p fork, whose crates build against their
