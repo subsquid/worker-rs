@@ -39,6 +39,7 @@ use crate::{
 use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::worker::Worker;
+use crate::storage::manager::AssignmentOutcome;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
@@ -52,6 +53,10 @@ const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
+/// The one behavioral switch of the `mvcc-chunks` feature: apply assignments
+/// strictly in order, each waiting for the previous one to settle. Without it
+/// every update is applied immediately in arrival order.
+const IN_ORDER_APPLICATION: bool = cfg!(feature = "mvcc-chunks");
 // TODO: find out why the margin is required
 pub const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
@@ -284,10 +289,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let assignment_client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
-        #[cfg(feature = "mvcc-chunks")]
+        // The assignment currently being applied; stays `None` without
+        // IN_ORDER_APPLICATION, so every update is applied as it arrives.
         let mut processing_id: Option<String> = None;
-        #[cfg(not(feature = "mvcc-chunks"))]
-        let processing_id: Option<String> = None;
+        // The assignment in `processing_id` stalled: some of its chunks exhausted
+        // their download attempts, so it will never become fully applied.
+        let mut processing_stalled = false;
 
         'assignments: loop {
             if processing_id.is_none() {
@@ -364,19 +371,42 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     .await
                     .expect("register_assignment shouldn't panic");
 
-                    #[cfg(feature = "mvcc-chunks")]
-                    if registered {
+                    if IN_ORDER_APPLICATION && registered {
                         processing_id = Some(id);
+                        processing_stalled = false;
                     }
-                    #[cfg(not(feature = "mvcc-chunks"))]
-                    let _ = registered;
 
                     continue;
                 }
             }
 
-            #[cfg(feature = "mvcc-chunks")]
             match processing_id.clone() {
+                // The stalled assignment can never be fully applied. Jump to
+                // the most recent pending assignment as soon as one exists;
+                // until then only watch the update stream — the stall is
+                // terminal, so there is nothing to wait for.
+                Some(id) if processing_stalled => {
+                    if !pending.is_empty() {
+                        let skipped = keep_only_latest_pending_assignment(&mut pending);
+                        warn!(
+                            assignment_id = %id,
+                            skipped,
+                            "Skipping stalled assignment in favor of the most recent one"
+                        );
+                        processing_id = None;
+                        processing_stalled = false;
+                        continue;
+                    }
+                    tokio::select! {
+                        update = assignments.next() => {
+                            let Some(update) = update else {
+                                break;
+                            };
+                            push_pending_assignment(&mut pending, update);
+                        }
+                        _ = cancellation_token.cancelled() => break,
+                    }
+                }
                 Some(id) => {
                     tokio::select! {
                         update = assignments.next() => {
@@ -388,11 +418,17 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                                 processing_id = None;
                             }
                         }
-                        applied = self.worker.wait_until_assignment_applied(&id, cancellation_token.clone()) => {
-                            if !applied {
-                                break;
+                        settled = self.worker.wait_until_assignment_settled(&id, cancellation_token.clone()) => {
+                            match settled {
+                                None => break,
+                                Some(AssignmentOutcome::Applied) => {
+                                    processing_id = None;
+                                }
+                                Some(AssignmentOutcome::Stalled) => {
+                                    warn!(assignment_id = %id, "Assignment stalled: some chunks exhausted their download attempts");
+                                    processing_stalled = true;
+                                }
                             }
-                            processing_id = None;
                         }
                     }
                 }
@@ -407,17 +443,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                         _ = cancellation_token.cancelled() => break,
                     }
                 }
-            }
-
-            #[cfg(not(feature = "mvcc-chunks"))]
-            tokio::select! {
-                update = assignments.next() => {
-                    let Some(update) = update else {
-                        break;
-                    };
-                    push_pending_assignment(&mut pending, update);
-                }
-                _ = cancellation_token.cancelled() => break,
             }
         }
         info!("Assignment processing task finished");
@@ -444,16 +469,15 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Refresh on the periodic timer and, additionally, when an assignment
-        // becomes fully applied (prompt last_applied_assignment_id, via the
-        // existing applied signal).
-        #[cfg(feature = "mvcc-chunks")]
-        let mut assignment_applied = Some(self.worker.subscribe_assignment_applied());
-        #[cfg(not(feature = "mvcc-chunks"))]
-        let mut assignment_applied: Option<tokio::sync::watch::Receiver<Option<String>>> = None;
+        // settles (applied → prompt last_applied_assignment_id; stalled → prompt
+        // missing-chunks bitmap).
+        let mut assignment_settled = self.worker.subscribe_assignment_settled();
         loop {
             tokio::select! {
                 _ = timer.tick() => {}
-                _ = wait_for_assignment_applied(&mut assignment_applied) => {}
+                changed = assignment_settled.changed() => {
+                    changed.expect("assignment_settled sender outlives the status loop");
+                }
                 _ = cancellation_token.cancelled() => break,
             }
             let status =
@@ -831,21 +855,6 @@ pub fn validate_query(
     Ok(())
 }
 
-// Resolves when the current assignment becomes fully applied. `applied` is `None`
-// in non-mvcc builds (no "applied" concept), so it never resolves and the status
-// loop relies on the periodic timer only.
-async fn wait_for_assignment_applied(
-    applied: &mut Option<tokio::sync::watch::Receiver<Option<String>>>,
-) {
-    match applied {
-        Some(applied) => applied
-            .changed()
-            .await
-            .expect("assignment_applied sender outlives the status loop"),
-        None => std::future::pending::<()>().await,
-    }
-}
-
 /// Run an admitted query and refund the unused chunk fraction. The unit was spent at admission, so
 /// malformed params here are still charged and logged. Generic over the engine and rate limiter for
 /// mock-based tests (see [`super::query_deps`]).
@@ -1065,10 +1074,7 @@ pub async fn get_worker_status(
         version: WORKER_VERSION.to_string(),
         stored_bytes: Some(status.stored_bytes),
         current_epoch,
-        #[cfg(feature = "mvcc-chunks")]
         last_applied_assignment_id: status.last_applied_assignment_id,
-        #[cfg(not(feature = "mvcc-chunks"))]
-        last_applied_assignment_id: None,
     }
 }
 
@@ -1088,15 +1094,9 @@ fn push_pending_assignment(
 
 fn push_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
     pending.push_back(item);
-    #[cfg(feature = "mvcc-chunks")]
     if pending.len() > MAX_PENDING_ASSIGNMENTS {
         Some(keep_only_latest_pending_assignment(pending))
     } else {
-        None
-    }
-
-    #[cfg(not(feature = "mvcc-chunks"))]
-    {
         None
     }
 }
@@ -1117,20 +1117,13 @@ fn requeue_pending_assignment(
 
 fn requeue_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
     pending.push_front(item);
-    #[cfg(feature = "mvcc-chunks")]
     if pending.len() > MAX_PENDING_ASSIGNMENTS {
         Some(keep_only_latest_pending_assignment(pending))
     } else {
         None
     }
-
-    #[cfg(not(feature = "mvcc-chunks"))]
-    {
-        None
-    }
 }
 
-#[cfg(feature = "mvcc-chunks")]
 fn keep_only_latest_pending_assignment<T>(pending: &mut VecDeque<T>) -> usize {
     let latest = pending
         .pop_back()
@@ -1164,7 +1157,7 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
     }
 }
 
-#[cfg(all(test, feature = "mvcc-chunks"))]
+#[cfg(test)]
 mod assignment_tests {
     use super::*;
 

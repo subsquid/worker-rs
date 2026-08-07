@@ -182,7 +182,7 @@ impl Harness {
             data_path.join("worker"),
             config.concurrent_downloads,
             worker_id,
-            args.clone(),
+            (&args).into(),
         )
         .await
         .expect("state manager initialises");

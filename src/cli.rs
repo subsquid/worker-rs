@@ -5,6 +5,12 @@ use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
 use sqd_network_transport::TransportArgs;
 
+/// Default for `--max-download-attempts`: how many times a chunk download may
+/// fail before the worker gives up on it until the next assignment. Attempts
+/// are spaced by the downloader's global backoff, so the budget is not burned
+/// in a tight loop.
+pub const DEFAULT_MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
+
 #[derive(Parser, Clone)]
 #[command(version)]
 pub struct Args {
@@ -30,14 +36,19 @@ pub struct Args {
     #[clap(long, env, default_value_t = 3)]
     pub concurrent_downloads: usize,
 
-    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "60")]
+    #[clap(long, env, hide(true), value_parser=parse_seconds, default_value = "60")]
     pub s3_timeout: Duration,
 
-    #[clap(env, hide(true), value_parser=parse_seconds, default_value = "3")]
+    #[clap(long, env, hide(true), value_parser=parse_seconds, default_value = "3")]
     pub s3_read_timeout: Duration,
 
-    #[clap(env = "DOWNLOADS_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
+    #[clap(long, env = "DOWNLOADS_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
     pub downloads_max_delay: Duration,
+
+    /// How many times a chunk download may fail before it is given up on
+    /// until the next assignment
+    #[clap(long, env, hide(true), default_value_t = DEFAULT_MAX_DOWNLOAD_ATTEMPTS, value_parser = clap::value_parser!(u8).range(1..))]
+    pub max_download_attempts: u8,
 
     #[clap(long, env)]
     pub query_threads: Option<usize>,
@@ -50,20 +61,20 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub query_schemas_url: String,
 
-    #[clap(env = "QUERY_SCHEMAS_REFRESH_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
+    #[clap(long, env = "QUERY_SCHEMAS_REFRESH_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
     pub query_schemas_refresh_interval: Duration,
 
-    #[clap(env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
+    #[clap(long, env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,
 
-    #[clap(env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
+    #[clap(long, env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
     pub assignment_check_interval: Duration,
 
-    #[clap(env = "ASSIGNMENT_CHECK_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "14400")]
+    #[clap(long, env = "ASSIGNMENT_CHECK_MAX_DELAY_SEC", hide(true), value_parser=parse_seconds, default_value = "14400")]
     pub assignment_fetch_max_delay: Duration,
 
-    #[clap(env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
+    #[clap(long, env = "ASSIGNMENT_FETCH_TIMEOUT_SEC", hide(true), value_parser=parse_seconds, default_value = "300")]
     pub assignment_fetch_timeout: Duration,
 
     #[clap(long, env, hide(true), default_value_t = false)]
@@ -72,14 +83,16 @@ pub struct Args {
     #[command(flatten)]
     pub transport: TransportArgs,
 
-    #[clap(env, hide(true))]
+    #[clap(long, env, hide(true))]
     pub sentry_dsn: Option<String>,
 
-    #[clap(env, hide(true), default_value_t = 0.001)]
+    #[clap(long, env, hide(true), default_value_t = 0.001)]
     pub sentry_traces_sample_rate: f32,
 
-    // A bare `bool` positional defaults to a flag action, which clap rejects.
-    #[clap(env, hide(true), action = clap::ArgAction::Set, default_value_t = true)]
+    // `long` so the env-only arg isn't silently positional; `ArgAction::Set`
+    // (not the bool default `SetTrue`) so SENTRY_IS_ENABLED=false parses as a
+    // value instead of counting as "flag present".
+    #[clap(long, env, hide(true), default_value_t = true, action = clap::ArgAction::Set)]
     pub sentry_is_enabled: bool,
 }
 

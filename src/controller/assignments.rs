@@ -174,6 +174,7 @@ async fn download_gzipped(url: &str, reqwest_client: &reqwest::Client) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[allow(deprecated)]
     fn assignment(id: &str) -> sqd_assignments::NetworkAssignment {
@@ -218,5 +219,88 @@ mod tests {
         let (visible, is_worker_assignment) = visible_assignment(&state);
         assert_eq!(visible.id, "worker");
         assert!(is_worker_assignment);
+    }
+
+    /// Serves each queued response to one connection, then stops accepting.
+    /// Returns the server's base URL.
+    async fn serve_responses(responses: Vec<Vec<u8>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+            }
+        });
+        url
+    }
+
+    fn http_ok(body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn network_state_json(id: &str, effective_from: u64) -> Vec<u8> {
+        format!(
+            r#"{{"network":"test","assignment":{{"id":"{id}","fb_url_v1":"http://example.com/{id}.fb.gz","effective_from":{effective_from}}}}}"#
+        )
+        .into_bytes()
+    }
+
+    fn test_client() -> reqwest::Client {
+        new_reqwest_client(Duration::from_secs(5), PeerId::random())
+    }
+
+    // Known limitation (not yet fixed): the assignment id is recorded as seen the
+    // moment the update is yielded — before anyone knows whether the assignment
+    // can actually be applied. If registration fails downstream (corrupted
+    // download, no entry for this worker, header decryption failure), the stream
+    // never offers the same id again, so the worker idles on its old assignment
+    // until the network publishes a *different* id.
+    #[tokio::test]
+    async fn assignment_id_is_consumed_before_the_assignment_is_known_to_apply() {
+        let state = network_state_json("assignment-1", 0);
+        let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
+        let mut last_id = None;
+
+        let first = update_assignment(&url, &test_client(), &mut last_id)
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap().id, "assignment-1");
+
+        // The same id is now silently skipped — there is no way to ask for a retry
+        let second = update_assignment(&url, &test_client(), &mut last_id)
+            .await
+            .unwrap();
+        assert!(second.is_none());
+    }
+
+    // Known limitation (not yet fixed): the downloaded flatbuffer is never
+    // validated (`from_owned_unchecked`) and carries no integrity check, so a
+    // corrupted-but-gzip-valid body is accepted here and can panic or return
+    // garbage at any later access.
+    #[tokio::test]
+    async fn fetch_assignment_accepts_bytes_that_fail_validation() {
+        use async_compression::tokio::write::GzipEncoder;
+
+        let garbage = b"definitely not a flatbuffer".to_vec();
+        let mut encoder = GzipEncoder::new(Vec::new());
+        encoder.write_all(&garbage).await.unwrap();
+        encoder.shutdown().await.unwrap();
+        let url = serve_responses(vec![http_ok(&encoder.into_inner())]).await;
+
+        let fetched = fetch_assignment(&url, &test_client()).await;
+        assert!(fetched.is_ok(), "unchecked parsing accepts arbitrary bytes");
+        // The checked constructor rejects the very same bytes
+        assert!(sqd_assignments::Assignment::from_owned(garbage).is_err());
     }
 }
