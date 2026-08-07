@@ -4,12 +4,12 @@
 //!
 //! 1. Deletion before download: a download is never handed out while any chunk
 //!    on disk or in flight is not part of the current assignment — except
-//!    condemned chunks (undesired but still query-held), whose overcommit is
+//!    draining chunks (undesired but still query-held), whose overcommit is
 //!    bounded by the locks held at the assignment switch.
 //! 2. No wedge states: whenever downloads are refused, the blockage is
-//!    attributable to a pending removal or a condemned copy that a future
-//!    event clears, and draining all pending events always reaches a terminal
-//!    state with nothing condemned left.
+//!    attributable to a pending removal or a draining copy that a future
+//!    event clears, and running all pending events to completion always
+//!    reaches a terminal state with nothing left draining.
 //! 3. Correct confirmation: an assignment is only ever marked applied when all
 //!    of its chunks are actually available; a stalled assignment never is.
 
@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 
-use sqd_worker::storage::state::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
+use sqd_worker::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
+use sqd_worker::storage::state::State;
 use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
 /// Small chunk universe so random subsets collide and re-assignments overlap.
@@ -139,11 +140,11 @@ fn apply_op(state: &mut State, shadow: &mut Shadow, op: &Op) {
         }
         Op::Lock { target } => {
             let target = chunk(*target);
-            let condemned = state.is_condemned(&target);
+            let draining = state.is_draining(&target);
             if let Some(locked) =
                 state.get_and_lock_chunk(target.dataset.clone(), target.chunk.clone())
             {
-                assert!(!condemned, "a condemned chunk accepted a new query lock");
+                assert!(!draining, "a draining chunk accepted a new query lock");
                 shadow.locks_held.push(locked);
             }
         }
@@ -162,7 +163,7 @@ fn apply_op(state: &mut State, shadow: &mut Shadow, op: &Op) {
                     !shadow.locks_held.contains(&removed),
                     "removed a chunk still locked by a query"
                 );
-                // A desired chunk may be deleted only as a stale condemned
+                // A desired chunk may be deleted only as a stale draining
                 // copy making way for its own re-download
                 assert!(
                     !state.desired().contains(&removed)
@@ -179,15 +180,15 @@ fn take_download(state: &mut State, shadow: &mut Shadow) {
         Some(chunk) => {
             assert_no_overcommit(state);
             assert!(
-                !state.is_condemned(&chunk),
-                "handed out a download whose stale condemned copy is still on disk"
+                !state.is_draining(&chunk),
+                "handed out a download whose stale draining copy is still on disk"
             );
             shadow.in_flight.push(chunk);
         }
         None => {
             // Guarantee 2 (accountability): a refusal with work still queued
             // must be attributable to something a future event clears — a
-            // pending removal, or queued chunks whose stale condemned copies
+            // pending removal, or queued chunks whose stale draining copies
             // are still held by queries.
             if state.has_queued_downloads() {
                 assert!(
@@ -195,7 +196,7 @@ fn take_download(state: &mut State, shadow: &mut Shadow) {
                         || state
                             .queued_downloads()
                             .iter()
-                            .all(|chunk| state.is_condemned(chunk)),
+                            .all(|chunk| state.is_draining(chunk)),
                     "downloads refused with work queued but nothing to remove"
                 );
             }
@@ -226,7 +227,7 @@ fn drain(state: &mut State, shadow: &mut Shadow) {
             continue;
         }
         // Quiescent: exactly one terminal verdict must hold, and no undesired
-        // or condemned data may remain on disk.
+        // or draining data may remain on disk.
         assert!(
             state.is_fully_applied() ^ state.is_stalled(),
             "quiescent state is neither applied nor stalled (or claims both)"
@@ -236,8 +237,8 @@ fn drain(state: &mut State, shadow: &mut Shadow) {
             "quiescent state still holds undesired chunks"
         );
         assert!(
-            !state.has_condemned(),
-            "quiescent state still holds condemned chunks"
+            !state.has_draining_chunks(),
+            "quiescent state still holds draining chunks"
         );
         return;
     }
@@ -246,7 +247,7 @@ fn drain(state: &mut State, shadow: &mut Shadow) {
 
 /// Guarantee 1 — deletion before download. Checked at the only moment it can
 /// be violated: when a download is handed out, everything available and in
-/// flight must belong to the current assignment. Condemned chunks are the one
+/// flight must belong to the current assignment. Draining chunks are the one
 /// deliberate exception — still on disk, but bounded by the query locks held
 /// at the assignment switch and invisible to new queries.
 fn assert_no_overcommit(state: &State) {

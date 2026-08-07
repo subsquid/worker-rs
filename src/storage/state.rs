@@ -1,17 +1,12 @@
 use itertools::Itertools;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use tracing::{info, instrument, warn};
 
 use crate::{
     metrics,
     types::state::{ChunkId, ChunkRef, ChunkSet, DatasetId},
 };
-
-/// Default for how many times a chunk download may fail before the worker
-/// gives up on it until the next assignment (`--max-download-attempts`).
-/// Attempts are spaced by the downloader's global backoff, so the budget is
-/// not burned in a tight loop.
-pub const DEFAULT_MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -26,7 +21,7 @@ pub struct State {
     // duration of a single-chunk query (seconds), so waiting the queries out
     // keeps the disk overcommit both small — at most the locks held at the
     // assignment switch — and short-lived.
-    condemned: HashMap<ChunkRef, u8>,
+    draining: HashMap<ChunkRef, u8>,
     // Both reset on every new assignment — each assignment gets a fresh download budget
     download_attempts: HashMap<ChunkRef, u8>, // failed attempts per desired chunk
     failed_downloads: ChunkSet, // desired chunks that exhausted their download attempts
@@ -101,10 +96,10 @@ impl State {
             let (_dataset, chunks) = self
                 .to_download
                 .iter()
-                // A re-desired condemned chunk can't start downloading yet: its
+                // A re-desired draining chunk can't start downloading yet: its
                 // stale copy still occupies the destination path until the last
                 // query holding it finishes.
-                .filter(|chunk| !self.condemned.contains_key(*chunk))
+                .filter(|chunk| !self.draining.contains_key(*chunk))
                 .into_group_map_by(|chunk| chunk.dataset.clone())
                 .into_iter()
                 .min_by_key(|(_ds, chunks)| chunks.len())?;
@@ -123,8 +118,8 @@ impl State {
     }
 
     /// Undesired chunks ready for physical deletion. Locked undesired chunks
-    /// are condemned instead and handed out here once their last query
-    /// finishes.
+    /// are moved to `draining` instead, and handed out here once their last
+    /// query finishes.
     pub fn take_removals(&mut self) -> Vec<ChunkRef> {
         let mut result = Vec::new();
         self.available.retain(|chunk| {
@@ -132,14 +127,14 @@ impl State {
                 return true;
             }
             if let Some(lock_count) = self.locks.remove(chunk) {
-                self.condemned.insert(chunk.clone(), lock_count);
+                self.draining.insert(chunk.clone(), lock_count);
             } else {
                 result.push(chunk.clone());
             }
             false
         });
-        // Condemned chunks whose last query has finished (see `unlock_chunk`)
-        self.condemned.retain(|chunk, lock_count| {
+        // Draining chunks whose last query has finished (see `unlock_chunk`)
+        self.draining.retain(|chunk, lock_count| {
             if *lock_count == 0 {
                 result.push(chunk.clone());
                 false
@@ -231,7 +226,7 @@ impl State {
     }
 
     /// Returns `true` if this was the last lock on a chunk that awaits removal
-    /// (undesired and still available, or condemned), so the caller can wake
+    /// (undesired and still available, or draining), so the caller can wake
     /// the state loop to process the deletion promptly.
     pub fn unlock_chunk(&mut self, chunk: &ChunkRef) -> bool {
         if let Some(count) = self.locks.get_mut(chunk) {
@@ -242,7 +237,7 @@ impl State {
             self.locks.remove(chunk);
             return self.available.contains(chunk) && !self.desired.contains(chunk);
         }
-        if let Some(count) = self.condemned.get_mut(chunk) {
+        if let Some(count) = self.draining.get_mut(chunk) {
             *count -= 1;
             // The zero-count entry stays for `take_removals` to extract
             return *count == 0;
@@ -259,17 +254,28 @@ impl State {
     }
 
     pub fn report_status(&self) {
+        // The three counters below are the steady-state ones and keep their
+        // historical wording — operators parse this line. The exceptional ones
+        // are appended only when they are non-zero.
+        // `write!` into a String is infallible, hence the discarded results.
+        let mut extra = String::new();
+        if !self.failed_downloads.is_empty() {
+            let _ = write!(extra, ", given up: {}", self.failed_downloads.len());
+        }
+        if !self.draining.is_empty() {
+            let _ = write!(extra, ", awaiting deletion: {}", self.draining.len());
+        }
         info!(
-            "Chunks available: {}, downloading: {}, pending downloads: {}, given up: {}, condemned: {}",
+            "Chunks available: {}, downloading: {}, pending downloads: {}{extra}",
             self.available.len(),
             self.downloading.len(),
             self.to_download.len(),
-            self.failed_downloads.len(),
-            self.condemned.len()
         );
         metrics::CHUNKS_AVAILABLE.set(self.available.len() as i64);
         metrics::CHUNKS_DOWNLOADING.set(self.downloading.len() as i64);
         metrics::CHUNKS_PENDING.set(self.to_download.len() as i64);
+        metrics::CHUNKS_GIVEN_UP.set(self.failed_downloads.len() as i64);
+        metrics::CHUNKS_DRAINING.set(self.draining.len() as i64);
     }
 }
 
@@ -310,12 +316,12 @@ impl State {
             "locks must only be held on available chunks"
         );
         assert!(
-            self.condemned.keys().all(|chunk| {
+            self.draining.keys().all(|chunk| {
                 !self.available.contains(chunk)
                     && !self.downloading.contains(chunk)
                     && !self.locks.contains_key(chunk)
             }),
-            "condemned chunks must not be available, downloading, or freshly locked"
+            "draining chunks must not be available, downloading, or freshly locked"
         );
     }
 
@@ -339,12 +345,12 @@ impl State {
         &self.to_download
     }
 
-    pub fn is_condemned(&self, chunk: &ChunkRef) -> bool {
-        self.condemned.contains_key(chunk)
+    pub fn is_draining(&self, chunk: &ChunkRef) -> bool {
+        self.draining.contains_key(chunk)
     }
 
-    pub fn has_condemned(&self) -> bool {
-        !self.condemned.is_empty()
+    pub fn has_draining_chunks(&self) -> bool {
+        !self.draining.is_empty()
     }
 }
 
@@ -356,7 +362,8 @@ mod tests {
 
     use crate::types::state::{ChunkRef, ChunkSet};
 
-    use super::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
+    use super::State;
+    use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
 
     #[test]
     fn test_state() {
@@ -445,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_undesired_chunk_is_condemned_without_blocking_downloads() {
+    fn locked_undesired_chunk_is_draining_without_blocking_downloads() {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
@@ -473,13 +480,13 @@ mod tests {
         assert!(state.has_pending_removals());
         assert_eq!(state.take_next_download(), None);
 
-        // The removal pass condemns the locked chunk: nothing to delete yet,
+        // The removal pass starts draining the locked chunk: nothing to delete yet,
         // but downloads proceed immediately
         assert_eq!(state.take_removals(), &[]);
         assert!(!state.has_pending_removals());
         assert_eq!(state.take_next_download(), Some(c));
 
-        // The condemned chunk refuses new query locks
+        // The draining chunk refuses new query locks
         assert!(state
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
             .is_none());
@@ -489,11 +496,11 @@ mod tests {
         assert_eq!(state.take_removals(), &[a]);
     }
 
-    // A condemned chunk that the next assignment wants again is not resurrected:
+    // A draining chunk that the next assignment wants again is not resurrected:
     // its stale copy still occupies the destination path, so the re-download
     // waits until the last query releases it and the copy is deleted.
     #[test]
-    fn redesired_condemned_chunk_is_redownloaded_after_deletion() {
+    fn redesired_draining_chunk_is_redownloaded_after_deletion() {
         let ds = Arc::new("ds".to_owned());
         let a = ChunkRef {
             dataset: ds.clone(),
@@ -508,7 +515,7 @@ mod tests {
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
             .is_some());
         state.set_desired_chunks(ChunkSet::new());
-        assert_eq!(state.take_removals(), &[]); // `a` is condemned
+        assert_eq!(state.take_removals(), &[]); // `a` is draining
 
         // The next assignment wants `a` again — it is queued for download, but
         // can't start while the stale copy is still on disk
@@ -589,10 +596,10 @@ mod tests {
         assert!(!state.is_stalled());
     }
 
-    // After the removal pass condemns an undesired chunk, new locks are
+    // Once the removal pass starts draining an undesired chunk, new locks are
     // refused, so a steady stream of queries can't defer its removal forever.
     #[test]
-    fn condemnation_stops_undesired_chunk_relocking() {
+    fn draining_stops_undesired_chunk_relocking() {
         let ds = Arc::new("ds".to_owned());
         let chunk_ref = |x| ChunkRef {
             dataset: ds.clone(),
@@ -618,7 +625,7 @@ mod tests {
             .get_and_lock_chunk(ds.clone(), a.chunk.clone())
             .is_some());
 
-        // The removal pass condemns `a`: new locks are refused from here on,
+        // The removal pass starts draining `a`: new locks are refused from here on,
         // and downloads are not held back
         assert_eq!(state.take_removals(), &[]);
         assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_none());

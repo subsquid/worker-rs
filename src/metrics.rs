@@ -48,6 +48,8 @@ lazy_static::lazy_static! {
     pub static ref CHUNKS_AVAILABLE: Gauge = Default::default();
     pub static ref CHUNKS_DOWNLOADING: Gauge = Default::default();
     pub static ref CHUNKS_PENDING: Gauge = Default::default();
+    pub static ref CHUNKS_GIVEN_UP: Gauge = Default::default();
+    pub static ref CHUNKS_DRAINING: Gauge = Default::default();
     pub static ref CHUNKS_DOWNLOADED: Counter = Default::default();
     pub static ref CHUNKS_FAILED_DOWNLOAD: Counter = Default::default();
     pub static ref CHUNKS_REMOVED: Counter = Default::default();
@@ -109,6 +111,16 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "chunks_pending",
         "Number of chunks pending download",
         CHUNKS_PENDING.clone(),
+    );
+    registry.register(
+        "chunks_given_up",
+        "Number of assigned chunks that exhausted their download attempts",
+        CHUNKS_GIVEN_UP.clone(),
+    );
+    registry.register(
+        "chunks_draining",
+        "Number of unassigned chunks kept on disk until running queries release them",
+        CHUNKS_DRAINING.clone(),
     );
     registry.register(
         "chunks_downloaded",

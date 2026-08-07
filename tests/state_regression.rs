@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use sqd_worker::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
 use sqd_worker::storage::manager::{
     mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome,
     AssignmentSettled,
 };
-use sqd_worker::storage::state::{State, DEFAULT_MAX_DOWNLOAD_ATTEMPTS};
+use sqd_worker::storage::state::State;
 use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
 // The counterexample replayed verbatim against the settled-check. The wrong

@@ -5,6 +5,12 @@ use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
 use sqd_network_transport::TransportArgs;
 
+/// Default for `--max-download-attempts`: how many times a chunk download may
+/// fail before the worker gives up on it until the next assignment. Attempts
+/// are spaced by the downloader's global backoff, so the budget is not burned
+/// in a tight loop.
+pub const DEFAULT_MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
+
 #[derive(Parser, Clone)]
 #[command(version)]
 pub struct Args {
@@ -41,7 +47,7 @@ pub struct Args {
 
     /// How many times a chunk download may fail before it is given up on
     /// until the next assignment
-    #[clap(long, env, hide(true), default_value_t = crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS, value_parser = clap::value_parser!(u8).range(1..))]
+    #[clap(long, env, hide(true), default_value_t = DEFAULT_MAX_DOWNLOAD_ATTEMPTS, value_parser = clap::value_parser!(u8).range(1..))]
     pub max_download_attempts: u8,
 
     #[clap(long, env)]

@@ -149,7 +149,7 @@ impl StateManager {
 
             let removals = self.state.lock().take_removals();
             // Concurrent, but a barrier for this batch: the downloads below
-            // start only after every already-deletable chunk is gone. Condemned
+            // start only after every already-deletable chunk is gone. Draining
             // chunks are not in the batch — they stay on disk until their last
             // query ends and a later pass collects them.
             futures::stream::iter(&removals)
@@ -551,7 +551,7 @@ mod tests {
             s3_timeout: Duration::from_secs(1),
             s3_read_timeout: Duration::from_secs(1),
             downloads_max_delay: Duration::from_secs(1),
-            max_download_attempts: crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+            max_download_attempts: crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
         };
         StateManager::new(workdir, 1, worker_id, config)
             .await
@@ -643,7 +643,7 @@ mod tests {
         use super::{
             mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
         };
-        use crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
+        use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
         let chunk = |id: &str| ChunkRef {
@@ -726,7 +726,7 @@ mod tests {
         use super::{
             mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
         };
-        use crate::storage::state::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
+        use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
         let chunk_a = ChunkRef {
