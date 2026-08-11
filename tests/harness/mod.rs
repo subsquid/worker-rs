@@ -29,6 +29,7 @@ use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, Quer
 use sqd_worker::controller::p2p;
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
+use sqd_worker::storage::datasets_index::AssignmentBlob;
 use sqd_worker::storage::manager::StateManager;
 
 pub mod corpus;
@@ -226,6 +227,8 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
+            // The harness's scheduler stub publishes the legacy format.
+            false,
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
@@ -304,7 +307,7 @@ impl Harness {
             Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
         };
         self.worker
-            .register_assignment(document, update.id, &self.keypair)
+            .register_assignment(AssignmentBlob::Legacy(document), update.id, &self.keypair)
     }
 
     /// Blocks until every assigned chunk is locally available (LIV-1 convergence).

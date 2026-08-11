@@ -7,8 +7,18 @@ use tracing::error;
 use crate::types::state::ChunkRef;
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
+/// A downloaded assignment in whichever format the network published it.
+///
+/// The two carry the same chunk assignments but describe a chunk's contents differently: the
+/// legacy blob lists each file explicitly, while the worker blob names a write schema whose
+/// inline roster the file list is derived from.
+pub enum AssignmentBlob {
+    Legacy(sqd_assignments::Assignment),
+    Worker(sqd_assignments::WorkerAssignment),
+}
+
 pub struct DatasetsIndex {
-    assignment: sqd_assignments::Assignment,
+    assignment: AssignmentBlob,
     assignment_id: String,
     status: sqd_assignments::WorkerStatus,
     http_headers: reqwest::header::HeaderMap,
@@ -28,44 +38,90 @@ impl DatasetsIndex {
     /// fails to parse.
     pub fn list_files(&self, chunk: &ChunkRef) -> Option<Vec<RemoteFile>> {
         let chunk_ref = self.chunks.get(chunk)?;
-        let chunk = self.assignment.get_chunk(*chunk_ref)?;
-        let base_url = Url::from_str(&chunk.dataset_base_url())
-            .inspect_err(|e| {
-                tracing::warn!(
-                    "Can't parse dataset base url '{}': {e}",
-                    chunk.dataset_base_url()
-                )
-            })
-            .ok()?;
-        let base_url = base_url
-            .join(&format!("{}/", chunk.base_url()))
-            .inspect_err(|e| {
-                tracing::warn!("Can't parse chunk base url '{}': {e}", chunk.base_url())
-            })
-            .ok()?;
-        let mut result = Vec::with_capacity(chunk.files().len());
-        for file in chunk.files() {
-            result.push(RemoteFile {
-                name: file.filename().to_owned(),
-                url: base_url
-                    .join(file.url())
-                    .inspect_err(|e| tracing::warn!("Can't parse file url '{}': {e}", file.url()))
-                    .ok()?,
-            });
+        match &self.assignment {
+            AssignmentBlob::Legacy(assignment) => {
+                let chunk = assignment.get_chunk(*chunk_ref)?;
+                let base_url = chunk_base_url(chunk.dataset_base_url(), chunk.base_url())?;
+                let mut result = Vec::with_capacity(chunk.files().len());
+                for file in chunk.files() {
+                    result.push(RemoteFile {
+                        name: file.filename().to_owned(),
+                        url: base_url
+                            .join(file.url())
+                            .inspect_err(|e| {
+                                tracing::warn!("Can't parse file url '{}': {e}", file.url())
+                            })
+                            .ok()?,
+                    });
+                }
+                Some(result)
+            }
+            AssignmentBlob::Worker(assignment) => {
+                let chunk = assignment.get_chunk(*chunk_ref)?;
+                // No per-chunk base_url in this format: the legacy field only ever restated `id`.
+                let base_url = chunk_base_url(chunk.dataset_base_url(), chunk.id())?;
+                // `new` rejects an assignment with an unresolvable chunk, so a roster is present.
+                let tables = assignment.chunk_tables(chunk)?;
+                let mut result = Vec::new();
+                for table in tables {
+                    let name = format!("{table}.parquet");
+                    result.push(RemoteFile {
+                        url: base_url
+                            .join(&name)
+                            .inspect_err(|e| tracing::warn!("Can't parse file url '{name}': {e}"))
+                            .ok()?,
+                        name,
+                    });
+                }
+                Some(result)
+            }
         }
-
-        Some(result)
     }
+
     pub fn new(
-        assignment: sqd_assignments::Assignment,
+        assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
-        let Some(worker) = assignment.get_worker(&peer_id) else {
-            anyhow::bail!("no assignment for this worker");
+        let mut pool = StringPool::default();
+
+        let (status, headers, chunks) = match &assignment {
+            AssignmentBlob::Legacy(assignment) => {
+                let Some(worker) = assignment.get_worker(&peer_id) else {
+                    anyhow::bail!("no assignment for this worker");
+                };
+                let chunks = worker
+                    .iter_chunks_with_ref()
+                    .map(|(chunk_ref, chunk)| {
+                        (pool.chunk_ref(chunk.dataset_id(), chunk.id()), chunk_ref)
+                    })
+                    .collect();
+                (worker.status(), worker.decrypt_headers(key)?, chunks)
+            }
+            AssignmentBlob::Worker(assignment) => {
+                let Some(worker) = assignment.get_worker(&peer_id) else {
+                    anyhow::bail!("no assignment for this worker");
+                };
+                let mut chunks = HashMap::new();
+                for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
+                    // A chunk whose write schema has no roster has no derivable file list. That
+                    // can only be a malformed assignment, and applying it partially would leave
+                    // the worker quietly short of the data the network believes it holds — so
+                    // reject the whole thing and keep serving the previous assignment.
+                    if assignment.chunk_tables(chunk).is_none() {
+                        anyhow::bail!(
+                            "chunk '{}' references write schema {} which has no roster in the assignment",
+                            chunk.id(),
+                            chunk.write_schema_id()
+                        );
+                    }
+                    chunks.insert(pool.chunk_ref(chunk.dataset_id(), chunk.id()), chunk_ref);
+                }
+                (worker.status(), worker.decrypt_headers(key)?, chunks)
+            }
         };
-        let headers = worker.decrypt_headers(key)?;
+
         let http_headers = headers
             .into_iter()
             .filter_map(|(k, v)| {
@@ -79,18 +135,8 @@ impl DatasetsIndex {
             })
             .collect();
 
-        let mut chunks = HashMap::new();
-        let mut pool = StringPool::default();
-        for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-            let key = ChunkRef {
-                dataset: pool.get(chunk.dataset_id()),
-                chunk: Arc::from(chunk.id()),
-            };
-            chunks.insert(key, chunk_ref);
-        }
-
         Ok(Self {
-            status: worker.status(),
+            status,
             assignment,
             assignment_id: id.into(),
             http_headers,
@@ -115,12 +161,29 @@ impl DatasetsIndex {
     }
 }
 
+/// The directory a chunk's files live under: `<dataset_base_url>/<chunk prefix>/`.
+fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Option<Url> {
+    Url::from_str(dataset_base_url)
+        .inspect_err(|e| tracing::warn!("Can't parse dataset base url '{dataset_base_url}': {e}"))
+        .ok()?
+        .join(&format!("{chunk_prefix}/"))
+        .inspect_err(|e| tracing::warn!("Can't parse chunk base url '{chunk_prefix}': {e}"))
+        .ok()
+}
+
 #[derive(Default)]
 struct StringPool {
     map: HashMap<String, Arc<String>>,
 }
 
 impl StringPool {
+    fn chunk_ref(&mut self, dataset: &str, chunk: &str) -> ChunkRef {
+        ChunkRef {
+            dataset: self.get(dataset),
+            chunk: Arc::from(chunk),
+        }
+    }
+
     fn get(&mut self, s: &str) -> Arc<String> {
         match self.map.get(s) {
             Some(s) => s.clone(),

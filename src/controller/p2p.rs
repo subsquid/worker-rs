@@ -38,7 +38,9 @@ use crate::{
 
 use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
+use super::schema_bundle;
 use super::worker::Worker;
+use crate::storage::datasets_index::AssignmentBlob;
 use crate::storage::manager::AssignmentOutcome;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -53,10 +55,6 @@ const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
-/// The one behavioral switch of the `mvcc-chunks` feature: apply assignments
-/// strictly in order, each waiting for the previous one to settle. Without it
-/// every update is applied immediately in arrival order.
-const IN_ORDER_APPLICATION: bool = cfg!(feature = "mvcc-chunks");
 // TODO: find out why the margin is required
 pub const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
@@ -96,6 +94,11 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
+    /// Read the `worker_assignment` pointer rather than the legacy one, download the schema
+    /// bundle alongside it, and apply assignments strictly in order (each waiting for the
+    /// previous one to settle) instead of immediately in arrival order.
+    use_worker_assignments: bool,
+    schema_bundles: schema_bundle::SchemaBundleStore,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
     queries_tx: mpsc::Sender<AdmittedQuery>,
@@ -147,6 +150,8 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         assignment_url: args.assignment_url,
+        use_worker_assignments: args.use_worker_assignments,
+        schema_bundles: schema_bundle::SchemaBundleStore::new(args.data_dir.join("schemas")),
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
@@ -270,6 +275,34 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("SQL Query processing task finished");
     }
 
+    /// Downloads the blob this update points at, in whichever format this worker reads.
+    ///
+    /// In worker-assignment mode the schema bundle is a hard prerequisite: it is fetched first,
+    /// and a failure aborts the whole update rather than applying an assignment whose schemas
+    /// never arrived. Nothing reads the bundle yet, so this couples a working assignment to a
+    /// component it doesn't need — deliberately, so a broken bundle surfaces during rollout
+    /// instead of when something first depends on it.
+    async fn download_assignment(
+        &self,
+        update: &super::assignments::AssignmentUpdate,
+        client: &reqwest::Client,
+    ) -> Result<AssignmentBlob> {
+        if !self.use_worker_assignments {
+            return Ok(AssignmentBlob::Legacy(
+                super::assignments::fetch_assignment(&update.fb_url_v1, client).await?,
+            ));
+        }
+
+        let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
+        })?;
+        self.schema_bundles.ensure(bundle, client).await?;
+
+        Ok(AssignmentBlob::Worker(
+            super::assignments::fetch_worker_assignment(&update.fb_url_v1, client).await?,
+        ))
+    }
+
     async fn run_assignments_loop(
         &'static self,
         cancellation_token: CancellationToken,
@@ -282,6 +315,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_fetch_timeout,
                 self.assignment_fetch_max_delay,
                 self.worker_id,
+                self.use_worker_assignments,
             )
             .take_until(cancellation_token.clone().cancelled_owned())
             .fuse(),
@@ -289,8 +323,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let assignment_client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
-        // The assignment currently being applied; stays `None` without
-        // IN_ORDER_APPLICATION, so every update is applied as it arrives.
+        // The assignment currently being applied; stays `None` when assignments are applied
+        // immediately in arrival order rather than strictly in order.
         let mut processing_id: Option<String> = None;
         // The assignment in `processing_id` stalled: some of its chunks exhausted
         // their download attempts, so it will never become fully applied.
@@ -299,39 +333,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         'assignments: loop {
             if processing_id.is_none() {
                 if let Some(update) = pending.pop_front() {
-                    // NET-1186: decode-only for now — DatasetsIndex/serving still needs the
-                    // legacy format (WorkerAssignmentChunk has no files/base_url; deriving them
-                    // from schema_id/tables_present is separate, not-yet-scoped work). Discarding
-                    // this update rather than falling back to `fetch_assignment` avoids feeding
-                    // worker-assignment-format bytes to the legacy parser.
-                    #[cfg(feature = "mvcc-chunks")]
-                    if update.is_worker_assignment {
-                        match super::assignments::fetch_worker_assignment(
-                            &update.fb_url_v1,
-                            &assignment_client,
-                        )
-                        .await
-                        {
-                            Ok(assignment) => {
-                                tracing::info!(
-                                    assignment_id = %update.id,
-                                    datasets = assignment.datasets().len(),
-                                    "Decoded worker-oriented assignment (not yet applied to serving state)"
-                                );
-                            }
-                            Err(e) => {
-                                warn!(assignment_id = %update.id, error = %e, "Failed to download worker-oriented assignment");
-                            }
-                        }
-                        continue;
-                    }
-
                     tracing::debug!("Downloading assignment \"{}\"", update.id);
-                    let assignment = match super::assignments::fetch_assignment(
-                        &update.fb_url_v1,
-                        &assignment_client,
-                    )
-                    .await
+                    let assignment = match self
+                        .download_assignment(&update, &assignment_client)
+                        .await
                     {
                         Ok(assignment) => assignment,
                         Err(e) => {
@@ -371,7 +376,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     .await
                     .expect("register_assignment shouldn't panic");
 
-                    if IN_ORDER_APPLICATION && registered {
+                    if self.use_worker_assignments && registered {
                         processing_id = Some(id);
                         processing_stalled = false;
                     }

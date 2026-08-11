@@ -123,7 +123,7 @@ ones-count consistent (INV-30) · gauges nonnegative and consistent with set alg
 
 ## Traceability matrix (as of 2026-07-25)
 
-Statuses reflect the actual test inventory: 39 inline unit tests (4 `mvcc-chunks`-gated)
+Statuses reflect the actual test inventory: inline unit tests, all built unconditionally,
 plus the conformance tier over the harness in `tests/harness/`: one binary per subject —
 `e2e` (the smoke path), `query_surface` (admission outcomes and the RP-20 taxonomy) and
 `query_concurrency` (separate by necessity, not topic: the OB signals are process-global,

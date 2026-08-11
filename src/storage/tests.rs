@@ -27,7 +27,7 @@ fn test_chunks_with_same_block_range() {
     use sqd_assignments::AssignmentBuilder;
     use sqd_network_transport::Keypair;
 
-    use super::datasets_index::DatasetsIndex;
+    use super::datasets_index::{AssignmentBlob, DatasetsIndex};
 
     let chunk_a_id = "0000000000/0000000000-0000001000-abcdef12";
     let chunk_b_id = "0000000000/0000000000-0000001000-abcdef12-fork";
@@ -69,7 +69,8 @@ fn test_chunks_with_same_block_range() {
     let bytes = builder.finish();
     let assignment = sqd_assignments::Assignment::from_owned(bytes).unwrap();
 
-    let index = DatasetsIndex::new(assignment, "test-asgn", &keypair).unwrap();
+    let index =
+        DatasetsIndex::new(AssignmentBlob::Legacy(assignment), "test-asgn", &keypair).unwrap();
 
     assert_eq!(
         index.chunks().len(),
@@ -109,4 +110,167 @@ fn test_chunks_with_same_block_range() {
         files_b[0].url.as_str(),
         "https://example.com/0000000000/0000000000-0000001000-abcdef12-fork/blocks.parquet"
     );
+}
+
+/// Worker assignments carry no file list; a chunk's files are derived from its write schema's
+/// roster, narrowed by the `tables_present` bitmap.
+#[cfg(test)]
+mod worker_assignment {
+    use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
+    use sqd_network_transport::Keypair;
+
+    use crate::storage::datasets_index::{AssignmentBlob, DatasetsIndex, RemoteFile};
+    use crate::types::state::ChunkRef;
+
+    const CHUNK_ID: &str = "0221000000/0221000000-0221000649-BQJdx";
+    const DATASET: &str = "s3://solana-mainnet-2";
+    const BASE_URL: &str = "https://solana-mainnet-2.sqd-datasets.io";
+
+    /// One chunk on write schema 7 (roster `blocks`, `logs`, `transactions`), present-tables
+    /// bitmap as given. `schema_id` lets a test point the chunk at an unregistered schema.
+    fn try_build(
+        peer_id: sqd_network_transport::PeerId,
+        schema_id: u32,
+        tables_present: Option<&[&str]>,
+    ) -> anyhow::Result<WorkerAssignment> {
+        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+        builder
+            .register_write_schema(7, &["blocks", "logs", "transactions"])
+            .unwrap();
+
+        let mut chunk = builder
+            .new_chunk()
+            .id(CHUNK_ID)
+            .dataset_id(DATASET)
+            .dataset_base_url(BASE_URL)
+            .block_range(221000000..=221000649)
+            .size(1000000)
+            .write_schema_id(schema_id);
+        if let Some(tables) = tables_present {
+            chunk = chunk.tables_present(tables)?;
+        }
+        chunk.worker_indexes(&[0]).finish()?;
+        builder.finish_dataset();
+
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        Ok(WorkerAssignment::from_owned(builder.finish())?)
+    }
+
+    fn assignment(
+        peer_id: sqd_network_transport::PeerId,
+        schema_id: u32,
+        tables_present: Option<&[&str]>,
+    ) -> WorkerAssignment {
+        try_build(peer_id, schema_id, tables_present).expect("assignment is well-formed")
+    }
+
+    /// `DatasetsIndex` holds a self-referencing flatbuffer and so isn't `Debug`, which rules
+    /// out `expect_err`.
+    fn expect_rejected(assignment: WorkerAssignment, keypair: &Keypair) -> String {
+        match DatasetsIndex::new(AssignmentBlob::Worker(assignment), "test-asgn", keypair) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("assignment should have been rejected"),
+        }
+    }
+
+    fn files_of(schema_id: u32, tables_present: Option<&[&str]>) -> Vec<RemoteFile> {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let index = DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment(peer_id, schema_id, tables_present)),
+            "test-asgn",
+            &keypair,
+        )
+        .expect("assignment is well-formed");
+
+        let chunk = index
+            .chunks()
+            .keys()
+            .find(|c| c.chunk.as_ref() == CHUNK_ID)
+            .cloned()
+            .expect("the chunk is assigned to this worker");
+        index.list_files(&chunk).expect("files resolve")
+    }
+
+    fn names(files: &[RemoteFile]) -> Vec<&str> {
+        files.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    #[test]
+    fn unset_bitmap_resolves_to_the_whole_roster() {
+        let files = files_of(7, None);
+
+        assert_eq!(
+            names(&files),
+            ["blocks.parquet", "logs.parquet", "transactions.parquet"]
+        );
+        assert_eq!(
+            files[0].url.as_str(),
+            "https://solana-mainnet-2.sqd-datasets.io/0221000000/0221000000-0221000649-BQJdx/blocks.parquet",
+            "the download prefix is dataset_base_url + chunk id, with no per-chunk base_url"
+        );
+    }
+
+    #[test]
+    fn bitmap_narrows_the_roster_to_the_tables_present() {
+        let files = files_of(7, Some(&["blocks", "transactions"]));
+
+        assert_eq!(
+            names(&files),
+            ["blocks.parquet", "transactions.parquet"],
+            "a table absent from the bitmap is not downloaded"
+        );
+    }
+
+    /// A chunk naming a write schema with no roster has no derivable file list, so
+    /// `DatasetsIndex::new` refuses the whole assignment rather than applying it a chunk short.
+    ///
+    /// That branch can't be reached with a blob this builder produced — it rejects the chunk at
+    /// staging time, as asserted here — so the runtime check exists for blobs from other
+    /// producers and for corruption that `from_owned`'s structural validation doesn't catch
+    /// (it verifies offsets, not that `write_schema_id` resolves).
+    #[test]
+    fn a_chunk_on_an_unregistered_write_schema_cannot_be_published() {
+        let peer_id = Keypair::generate_ed25519().public().to_peer_id();
+
+        let err = try_build(peer_id, 9, None)
+            .err()
+            .expect("the builder refuses a chunk whose write schema was never registered");
+        assert!(format!("{err:#}").contains("write schema 9"), "{err:#}");
+    }
+
+    #[test]
+    fn an_assignment_without_an_entry_for_this_worker_is_rejected() {
+        let keypair = Keypair::generate_ed25519();
+        let assigned_to_someone_else =
+            assignment(Keypair::generate_ed25519().public().to_peer_id(), 7, None);
+
+        let message = expect_rejected(assigned_to_someone_else, &keypair);
+        assert!(
+            message.contains("no assignment for this worker"),
+            "{message}"
+        );
+    }
+
+    /// The index is keyed by (dataset, chunk id) exactly as the legacy path is, so the storage
+    /// manager's desired-chunk bookkeeping is unaffected by the format switch.
+    #[test]
+    fn chunks_are_keyed_the_same_way_as_the_legacy_format() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let index = DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment(peer_id, 7, None)),
+            "test-asgn",
+            &keypair,
+        )
+        .unwrap();
+
+        let expected = ChunkRef {
+            dataset: std::sync::Arc::new(DATASET.to_owned()),
+            chunk: std::sync::Arc::from(CHUNK_ID),
+        };
+        assert!(index.chunks().contains_key(&expected));
+        assert_eq!(index.assignment_id(), "test-asgn");
+        assert_eq!(index.status(), sqd_assignments::WorkerStatus::Ok);
+    }
 }

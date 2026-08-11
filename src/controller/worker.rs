@@ -3,13 +3,13 @@ use std::sync::{
     Arc,
 };
 
+use crate::storage::datasets_index::AssignmentBlob;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use polars::{
     io::SerWriter,
     prelude::{JsonFormat, JsonWriter},
 };
 use prost::Message;
-use sqd_assignments::Assignment;
 use sqd_query::ParquetChunk;
 use sql_query_plan::plan;
 use substrait::proto::Plan;
@@ -73,7 +73,7 @@ impl Worker {
 
     pub fn register_assignment(
         &self,
-        assignment: Assignment,
+        assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
     ) -> bool {

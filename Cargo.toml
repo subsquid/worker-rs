@@ -6,7 +6,6 @@ edition = "2021"
 
 [features]
 query-tracing = ["sqd-query/max_level_trace"]
-mvcc-chunks = ["sqd-assignments/mvcc-chunks"]
 
 [dependencies]
 anyhow = "1.0"
@@ -48,6 +47,7 @@ serde_json = { version = "1.0.111", features = ["preserve_order"] }
 serde_yaml = "0.9"
 serde_with = { version = "3.11.0", features = ["base64"] }
 sha2 = "0.10.8"
+tar = "0.4"
 sha3 = "0.10.8"
 substrait = { version = "0.48.0", features = ["serde", "parse"] }
 thiserror = "1.0.57"
@@ -65,10 +65,10 @@ url = "2.5.2"
 walkdir = "2.5.0"
 zstd = "0.13"
 
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "360bbd4", features = ["reader"] }
-sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "1.2.1" }
-sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "2.0.2", features = ["bitstring"] }
-sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", rev = "0633335", version = "3.0.0", features = ["worker", "metrics"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", branch = "defnull/add-schema-bundle", features = ["reader"] }
+sqd-contract-client = { git = "https://github.com/subsquid/sqd-network.git", branch = "defnull/add-schema-bundle", version = "1.2.1" }
+sqd-messages = { git = "https://github.com/subsquid/sqd-network.git", branch = "defnull/add-schema-bundle", version = "2.0.2", features = ["bitstring"] }
+sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", branch = "defnull/add-schema-bundle", version = "3.0.0", features = ["worker", "metrics"] }
 
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "eaa9f86", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "eaa9f86" }
@@ -83,7 +83,7 @@ arrow = "54.2.1"
 num-rational = "0.4"
 proptest = "1"
 parquet = { version = "54.2.1", features = ["arrow"] }
-sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", rev = "360bbd4", features = ["builder"] }
+sqd-assignments = { git = "https://github.com/subsquid/sqd-network.git", branch = "defnull/add-schema-bundle", features = ["builder"] }
 tempfile = "3"
 
 # sqd-network-transport depends on the kalabukdima/rust-libp2p fork, whose crates build against their

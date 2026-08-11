@@ -10,10 +10,15 @@ pub struct AssignmentUpdate {
     pub id: String,
     pub fb_url_v1: String,
     pub _effective_from: u64,
-    /// Whether this update was discovered via the dedicated `worker_assignment` pointer rather
-    /// than the legacy shared `assignment` (NET-1186). Always `false` outside `mvcc-chunks`.
-    #[cfg(feature = "mvcc-chunks")]
-    pub is_worker_assignment: bool,
+    /// Where to fetch the schema content the assignment references by id, as published alongside
+    /// this assignment. Carried on the update so both are applied from one consistent network
+    /// state rather than two independent polls.
+    ///
+    /// Known limitation: updates are deduplicated by assignment id, so a network state that
+    /// changes only its `schema_bundle` yields nothing and the new bundle is picked up when the
+    /// next assignment lands. Harmless while nothing reads the cached schemas; revisit before
+    /// anything does.
+    pub schema_bundle: Option<sqd_assignments::SchemaBundle>,
 }
 
 pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client {
@@ -32,6 +37,7 @@ pub fn new_assignments_stream(
     timeout: Duration,
     max_delay: Duration,
     peer_id: PeerId,
+    use_worker_assignments: bool,
 ) -> impl Stream<Item = AssignmentUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -46,7 +52,7 @@ pub fn new_assignments_stream(
 
             let mut current_delay = Duration::from_secs(1);
             loop {
-                match update_assignment(&url, &reqwest_client, &mut last_id).await {
+                match update_assignment(&url, &reqwest_client, &mut last_id, use_worker_assignments).await {
                     Ok(Some(data)) => {
                         yield data;
                         break;
@@ -68,11 +74,24 @@ async fn update_assignment(
     url: &str,
     reqwest_client: &reqwest::Client,
     last_id: &mut Option<String>,
+    use_worker_assignments: bool,
 ) -> anyhow::Result<Option<AssignmentUpdate>> {
     tracing::debug!("Checking for new assignment: {url}");
-    let network_state = fetch_network_state(&url, &reqwest_client).await?;
-    #[cfg_attr(not(feature = "mvcc-chunks"), allow(unused_variables))]
-    let (visible, is_worker_assignment) = visible_assignment(&network_state);
+    let mut network_state = fetch_network_state(url, reqwest_client).await?;
+    let Some(visible) = visible_assignment(&network_state, use_worker_assignments) else {
+        // Not an error worth retrying against: the state parsed fine, it just doesn't carry the
+        // pointer this worker was configured to read. Warn rather than debug — a worker in this
+        // position serves nothing new until the publisher catches up.
+        tracing::warn!(
+            expected = if use_worker_assignments {
+                "worker_assignment"
+            } else {
+                "assignment"
+            },
+            "Network state carries no assignment for this worker's mode; waiting"
+        );
+        return Ok(None);
+    };
     let assignment_id = visible.id.clone();
     if last_id.as_ref() == Some(&assignment_id) {
         tracing::debug!("Assignment has not been changed");
@@ -92,35 +111,25 @@ async fn update_assignment(
         id: assignment_id,
         fb_url_v1,
         _effective_from,
-        #[cfg(feature = "mvcc-chunks")]
-        is_worker_assignment,
+        // Only meaningful to the worker-assignment path; taken unconditionally so the field
+        // reflects the state as published rather than the mode we happen to be in.
+        schema_bundle: network_state.schema_bundle.take(),
     }))
 }
 
 /// Selects the assignment pointer to discover updates from.
 ///
-/// `mvcc-chunks` builds prefer the dedicated `worker_assignment` pointer but fall back to the
-/// legacy `assignment` so rollouts tolerate a scheduler that hasn't started publishing
-/// `worker_assignment` yet — mirrors sqd-portal's `visible_assignment` (NET-1186). Non-`mvcc-chunks`
-/// builds always use the legacy pointer; there is no other concept of assignment to prefer.
+/// Each mode reads exactly one pointer and never falls back to the other: mixing the two would
+/// feed one format's bytes to the other's parser. Both are optional in a `NetworkState` — a
+/// network mid-migration may publish either, both, or (for a mode it has retired) neither.
 fn visible_assignment(
     network_state: &sqd_assignments::NetworkState,
-) -> (&sqd_assignments::NetworkAssignment, bool) {
-    #[cfg(feature = "mvcc-chunks")]
-    {
-        match network_state.worker_assignment.as_ref() {
-            Some(assignment) => (assignment, true),
-            None => {
-                tracing::debug!(
-                    "worker_assignment missing in network state; falling back to legacy assignment"
-                );
-                (&network_state.assignment, false)
-            }
-        }
-    }
-    #[cfg(not(feature = "mvcc-chunks"))]
-    {
-        (&network_state.assignment, false)
+    use_worker_assignments: bool,
+) -> Option<&sqd_assignments::NetworkAssignment> {
+    if use_worker_assignments {
+        network_state.worker_assignment.as_ref()
+    } else {
+        network_state.assignment.as_ref()
     }
 }
 
@@ -141,16 +150,18 @@ pub async fn fetch_assignment(
     Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
 }
 
-/// Decodes the dedicated worker-oriented assignment (NET-1186). Parsing only — wiring the result
-/// into `DatasetsIndex`/serving state is out of scope until schema delivery exists (there is
-/// nothing to derive a `WorkerAssignmentChunk`'s files from yet).
-#[cfg(feature = "mvcc-chunks")]
+/// Decodes the dedicated worker-oriented assignment (NET-1186).
+///
+/// Unlike [`fetch_assignment`], this validates the buffer instead of trusting it. A malformed
+/// blob here would otherwise surface as a panic or garbage much later, while resolving a chunk's
+/// tables through the inline rosters.
 pub async fn fetch_worker_assignment(
     url: &str,
     reqwest_client: &reqwest::Client,
 ) -> anyhow::Result<sqd_assignments::WorkerAssignment> {
     let buf = download_gzipped(url, reqwest_client).await?;
-    Ok(sqd_assignments::WorkerAssignment::from_owned_unchecked(buf))
+    sqd_assignments::WorkerAssignment::from_owned(buf)
+        .map_err(|e| anyhow::anyhow!("malformed worker assignment: {e}"))
 }
 
 async fn download_gzipped(url: &str, reqwest_client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
@@ -190,35 +201,40 @@ mod tests {
     fn network_state() -> sqd_assignments::NetworkState {
         sqd_assignments::NetworkState {
             network: "testnet".to_string(),
-            assignment: assignment("legacy"),
-            #[cfg(feature = "mvcc-chunks")]
+            assignment: Some(assignment("legacy")),
             worker_assignment: None,
-            #[cfg(feature = "mvcc-chunks")]
             portal_assignment: None,
+            schema_bundle: None,
         }
     }
 
     #[test]
-    fn visible_assignment_uses_legacy_assignment() {
-        let state = network_state();
-        let (visible, is_worker_assignment) = visible_assignment(&state);
-
-        assert_eq!(visible.id, "legacy");
-        #[cfg(feature = "mvcc-chunks")]
-        assert!(!is_worker_assignment);
-        #[cfg(not(feature = "mvcc-chunks"))]
-        let _ = is_worker_assignment;
-    }
-
-    #[cfg(feature = "mvcc-chunks")]
-    #[test]
-    fn visible_assignment_prefers_worker_assignment() {
+    fn visible_assignment_uses_legacy_assignment_by_default() {
         let mut state = network_state();
         state.worker_assignment = Some(assignment("worker"));
 
-        let (visible, is_worker_assignment) = visible_assignment(&state);
-        assert_eq!(visible.id, "worker");
-        assert!(is_worker_assignment);
+        assert_eq!(visible_assignment(&state, false).unwrap().id, "legacy");
+    }
+
+    #[test]
+    fn visible_assignment_uses_worker_assignment_when_enabled() {
+        let mut state = network_state();
+        state.worker_assignment = Some(assignment("worker"));
+
+        assert_eq!(visible_assignment(&state, true).unwrap().id, "worker");
+    }
+
+    /// Neither mode falls back to the other's pointer: feeding one format's bytes to the other's
+    /// parser is worse than serving nothing.
+    #[test]
+    fn visible_assignment_never_falls_back_to_the_other_pointer() {
+        let legacy_only = network_state();
+        assert!(visible_assignment(&legacy_only, true).is_none());
+
+        let mut worker_only = network_state();
+        worker_only.assignment = None;
+        worker_only.worker_assignment = Some(assignment("worker"));
+        assert!(visible_assignment(&worker_only, false).is_none());
     }
 
     /// Serves each queued response to one connection, then stops accepting.
@@ -272,13 +288,13 @@ mod tests {
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let mut last_id = None;
 
-        let first = update_assignment(&url, &test_client(), &mut last_id)
+        let first = update_assignment(&url, &test_client(), &mut last_id, false)
             .await
             .unwrap();
         assert_eq!(first.unwrap().id, "assignment-1");
 
         // The same id is now silently skipped — there is no way to ask for a retry
-        let second = update_assignment(&url, &test_client(), &mut last_id)
+        let second = update_assignment(&url, &test_client(), &mut last_id, false)
             .await
             .unwrap();
         assert!(second.is_none());

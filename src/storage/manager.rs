@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    datasets_index::DatasetsIndex,
+    datasets_index::{AssignmentBlob, DatasetsIndex},
     downloader::{ChunkDownloader, DownloadConfig},
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -242,7 +242,7 @@ impl StateManager {
 
     pub fn set_assignment(
         &self,
-        assignment: sqd_assignments::Assignment,
+        assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
     ) -> bool {
@@ -533,6 +533,8 @@ mod tests {
     use sqd_network_transport::Keypair;
     use tokio_util::sync::CancellationToken;
 
+    use crate::storage::datasets_index::AssignmentBlob;
+
     use super::{DownloadConfig, StateManager};
     use crate::types::dataset::encode_dataset;
 
@@ -573,7 +575,11 @@ mod tests {
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
         let manager = test_manager(workdir, worker_id).await;
 
-        assert!(manager.set_assignment(empty_assignment_for(worker_id), "A", &keypair));
+        assert!(manager.set_assignment(
+            AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
+            "A",
+            &keypair
+        ));
         assert_eq!(
             manager.current_status().await.assignment_id.as_deref(),
             Some("A")
@@ -581,7 +587,11 @@ mod tests {
 
         // Assignment B doesn't include this worker, so registration fails...
         let other_worker = Keypair::generate_ed25519().public().to_peer_id();
-        assert!(!manager.set_assignment(empty_assignment_for(other_worker), "B", &keypair));
+        assert!(!manager.set_assignment(
+            AssignmentBlob::Legacy(empty_assignment_for(other_worker)),
+            "B",
+            &keypair
+        ));
 
         // ...and the worker keeps reporting A, with no retry path for B
         assert_eq!(
@@ -610,7 +620,11 @@ mod tests {
         let manager = test_manager(workdir, worker_id).await;
 
         // The new assignment holds no chunks, scheduling the local one for removal
-        assert!(manager.set_assignment(empty_assignment_for(worker_id), "A", &keypair));
+        assert!(manager.set_assignment(
+            AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
+            "A",
+            &keypair
+        ));
 
         // Sabotage the removal: the chunk dir vanishes behind the manager's back
         std::fs::remove_dir_all(&chunk_dir).unwrap();

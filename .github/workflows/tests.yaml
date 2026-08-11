@@ -69,12 +69,12 @@ jobs:
       fail-fast: false
       matrix:
         # The image ships default features (Dockerfile), so that is the configuration under
-        # test; mvcc-chunks gates 37 sites and flips whole branches, so it gets its own run.
+        # test. There is no second config: the worker-assignment path that `mvcc-chunks` used
+        # to gate is now compiled unconditionally and selected at runtime by
+        # --use-worker-assignments, so it is covered by the default build.
         include:
           - config: default
             features: ""
-          - config: all-features
-            features: "--all-features"
     # Three test binaries over the same heavy dependency graph — see the `test` job.
     env:
       CARGO_BUILD_JOBS: "2"
