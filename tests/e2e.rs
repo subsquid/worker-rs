@@ -176,12 +176,8 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
-/// The worker-oriented bindings end to end (IB-40b/41b/44b): the file list is derived from the
-/// assignment's inline schema roster rather than read from it, and the schema the query executes
-/// against comes from the chunk's `write_schema_id` rather than the query's dataset type.
-///
-/// Mirrors `smoke_assign_download_query_verify_logs` on the other format — the point is that
-/// nothing downstream of intake notices which one was served.
+/// IB-40b/41b/44b: the file list is derived from the assignment's inline schema roster, and the
+/// query executes against the chunk's `write_schema_id`, not the query's dataset type.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assign_download_query() {
     use harness::scheduler::Format;
@@ -203,8 +199,7 @@ async fn worker_format_assign_download_query() {
 
     h.await_all_chunks_available().await;
 
-    // The roster names `blocks` and `logs`, so exactly those two files are fetched — nothing
-    // in the document lists them.
+    // The document lists no files; these names come from the roster.
     for (name, _) in &chunk.files {
         let served = h
             .origin
@@ -215,7 +210,7 @@ async fn worker_format_assign_download_query() {
         assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
     }
 
-    // The schemas came from the bundle, not the CDN manifest — that loop never ran.
+    // The schemas came from the bundle, not the CDN manifest.
     let query = h.all_blocks_query(&chunk.id, (2_000, 2_009));
     let served = h.serve(query.clone()).await;
     let (response, _) = served.expect_admitted();
@@ -236,8 +231,7 @@ async fn worker_format_assign_download_query() {
     assert_eq!(blocks, (2_000..=2_009).collect::<Vec<_>>(), "RP-12");
 }
 
-/// FM-53b: the schema bundle is a prerequisite, so an assignment whose bundle can't be fetched
-/// must not apply — the worker would otherwise hold chunks it cannot answer queries about.
+/// FM-53b: without the schema bundle the worker would hold chunks it cannot answer queries about.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assignment_waits_for_its_schema_bundle() {
     use harness::scheduler::{AssignmentFault, Format};

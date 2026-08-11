@@ -94,9 +94,8 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    /// Read the `worker_assignment` pointer rather than the legacy one, download the schema
-    /// bundle alongside it, and apply assignments strictly in order (each waiting for the
-    /// previous one to settle) instead of immediately in arrival order.
+    /// Read the `worker_assignment` pointer instead of the legacy one, require the schema
+    /// bundle, and apply assignments strictly in order instead of as they arrive.
     use_worker_assignments: bool,
     schema_bundles: schema_bundle::SchemaBundleStore,
     query_schemas_url: String,
@@ -137,7 +136,6 @@ pub async fn create_p2p_controller(
     let (sql_queries_tx, sql_queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
-    // Taken before `worker` is moved into the struct below.
     let query_schemas = worker.query_schemas();
 
     Ok(P2PController {
@@ -198,9 +196,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         start_loop(s, "assignments", |t| {
             self.run_assignments_loop(t, self.assignment_check_interval)
         });
-        // The CDN manifest is the legacy source of query schemas. In worker-assignment mode the
-        // schema bundle supersedes it, and running both would have them overwrite each other's
-        // registry contents.
+        // Both loops write the same schema registry; the bundle supersedes the CDN manifest.
         if !self.use_worker_assignments {
             start_loop(s, "query_schemas", |t| {
                 experimental_engine::run_schemas_refresh_loop(
@@ -286,13 +282,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("SQL Query processing task finished");
     }
 
-    /// Downloads the blob this update points at, in whichever format this worker reads.
+    /// Downloads the blob in whichever assignment format this worker reads.
     ///
-    /// In worker-assignment mode the schema bundle is a hard prerequisite: it is fetched first,
-    /// and a failure aborts the whole update rather than applying an assignment whose schemas
-    /// never arrived. Nothing reads the bundle yet, so this couples a working assignment to a
-    /// component it doesn't need — deliberately, so a broken bundle surfaces during rollout
-    /// instead of when something first depends on it.
+    /// The schema bundle is a hard prerequisite in worker-assignment mode: nothing reads it yet,
+    /// but coupling it in now surfaces a broken bundle during rollout.
     async fn download_assignment(
         &self,
         update: &super::assignments::AssignmentUpdate,
@@ -307,8 +300,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
             anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
         })?;
-        // The assignment in force is still the previous one until this update registers, so its
-        // schemas have to outlive the bundle swap.
+        // The old assignment stays in force until this registers, so its schemas must survive.
         self.schema_bundles
             .ensure(bundle, client, &self.worker.active_schema_ids())
             .await?;
@@ -326,9 +318,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let assignment_client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let bundle_client = assignment_client.clone();
-        // A bundle that moved without the assignment is installed here and filtered out, so the
-        // queue below only ever holds assignments. On failure the store keeps its previous hash,
-        // so the next poll offers the same bundle again — the retry needs no bookkeeping.
+        // Bundle-only updates are installed here and filtered out, so the queue below holds only
+        // assignments. On failure the store keeps its old hash and the next poll re-offers it.
         let mut assignments = Box::pin(
             super::assignments::new_assignments_stream(
                 self.assignment_url.clone(),
@@ -360,8 +351,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .fuse(),
         );
         let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
-        // The assignment currently being applied; stays `None` when assignments are applied
-        // immediately in arrival order rather than strictly in order.
+        // The assignment currently being applied; stays `None` unless applied strictly in order.
         let mut processing_id: Option<String> = None;
         // The assignment in `processing_id` stalled: some of its chunks exhausted
         // their download attempts, so it will never become fully applied.

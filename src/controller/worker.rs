@@ -83,8 +83,7 @@ impl Worker {
             })
     }
 
-    /// The write schemas the current assignment still relies on — schemas that must survive a
-    /// schema-bundle replacement.
+    /// Write schemas the current assignment relies on — must survive a schema-bundle replacement.
     pub fn active_schema_ids(&self) -> std::collections::HashSet<u32> {
         self.state_manager.active_schema_ids()
     }
@@ -272,10 +271,8 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        // Prefer the schema the chunk's data was actually written with. The query's dataset type
-        // can't stand in for it: once a bundle carries several versions of one type, the type
-        // names a set rather than a schema, and picking by type would execute against whichever
-        // version happened to win the type-keyed slot.
+        // Use the schema the chunk was written with: a bundle can carry several versions of one
+        // dataset type, so the type-keyed lookup could pick the wrong one.
         let schema = match chunk.write_schema_id {
             Some(schema_id) => {
                 let schema = self.query_schemas.get_by_id(schema_id)?;
@@ -288,7 +285,7 @@ impl Worker {
                 }
                 schema
             }
-            // Legacy assignments pin no schema, so the query's type is all there is.
+            // Legacy assignments pin no schema.
             None => self.query_schemas.get(&dataset_type)?,
         };
 

@@ -56,12 +56,9 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub assignment_url: String,
 
-    /// Read the network state's dedicated `worker_assignment` instead of the legacy shared
-    /// `assignment`, and download the schema bundle alongside it. The legacy pointer is ignored
-    /// entirely; there is no fallback if `worker_assignment` is absent.
-    // `long` so the env-only arg isn't silently positional; `ArgAction::Set` (not the bool default
-    // `SetTrue`) so USE_WORKER_ASSIGNMENTS=false parses as a value instead of counting as
-    // "flag present" — same reasoning as `sentry_is_enabled` below.
+    /// Read the network state's dedicated `worker_assignment` (plus schema bundle) instead of the
+    /// legacy shared `assignment`. No fallback if `worker_assignment` is absent.
+    // `ArgAction::Set` so USE_WORKER_ASSIGNMENTS=false parses as a value — see `sentry_is_enabled`.
     #[clap(long, env, hide(true), default_value_t = false, action = clap::ArgAction::Set)]
     pub use_worker_assignments: bool,
 

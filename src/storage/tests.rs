@@ -117,8 +117,8 @@ fn test_chunks_with_same_block_range() {
     );
 }
 
-/// Worker assignments carry no file list; a chunk's files are derived from its write schema's
-/// roster, narrowed by the `tables_present` bitmap.
+/// Worker assignments carry no file list: files derive from the write schema roster,
+/// narrowed by `tables_present`.
 #[cfg(test)]
 mod worker_assignment {
     use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
@@ -127,7 +127,6 @@ mod worker_assignment {
     use crate::storage::datasets_index::{AssignmentBlob, DatasetsIndex, RemoteFile};
     use crate::types::state::ChunkRef;
 
-    /// Stands in for a schema bundle that carries everything the assignment references.
     fn all_schemas_available(_: u32) -> bool {
         true
     }
@@ -136,8 +135,7 @@ mod worker_assignment {
     const DATASET: &str = "s3://solana-mainnet-2";
     const BASE_URL: &str = "https://solana-mainnet-2.sqd-datasets.io";
 
-    /// One chunk on write schema 7 (roster `blocks`, `logs`, `transactions`), present-tables
-    /// bitmap as given. `schema_id` lets a test point the chunk at an unregistered schema.
+    /// One chunk on write schema 7; `schema_id` may point at an unregistered schema.
     fn try_build(
         peer_id: sqd_network_transport::PeerId,
         schema_id: u32,
@@ -174,8 +172,7 @@ mod worker_assignment {
         try_build(peer_id, schema_id, tables_present).expect("assignment is well-formed")
     }
 
-    /// `DatasetsIndex` holds a self-referencing flatbuffer and so isn't `Debug`, which rules
-    /// out `expect_err`.
+    /// `DatasetsIndex` isn't `Debug` (self-referencing flatbuffer), so `expect_err` is out.
     fn expect_rejected(assignment: WorkerAssignment, keypair: &Keypair) -> String {
         match DatasetsIndex::new(
             AssignmentBlob::Worker(assignment),
@@ -238,13 +235,9 @@ mod worker_assignment {
         );
     }
 
-    /// A chunk naming a write schema with no roster has no derivable file list, so
-    /// `DatasetsIndex::new` refuses the whole assignment rather than applying it a chunk short.
-    ///
-    /// That branch can't be reached with a blob this builder produced — it rejects the chunk at
-    /// staging time, as asserted here — so the runtime check exists for blobs from other
-    /// producers and for corruption that `from_owned`'s structural validation doesn't catch
-    /// (it verifies offsets, not that `write_schema_id` resolves).
+    /// An unregistered write schema yields no file list, so the whole assignment is refused.
+    /// The builder rejects it first, as asserted here; `DatasetsIndex::new` re-checks for
+    /// foreign blobs — `from_owned` validates offsets, not that `write_schema_id` resolves.
     #[test]
     fn a_chunk_on_an_unregistered_write_schema_cannot_be_published() {
         let peer_id = Keypair::generate_ed25519().public().to_peer_id();
@@ -268,8 +261,7 @@ mod worker_assignment {
         );
     }
 
-    /// The chunk's write schema has to reach query execution, or a query would be run against
-    /// whichever schema happens to share its dataset type.
+    /// Query execution needs the chunk's schema, else it resolves by dataset type.
     #[test]
     fn the_chunks_write_schema_is_recoverable_from_the_index() {
         let keypair = Keypair::generate_ed25519();
@@ -293,8 +285,7 @@ mod worker_assignment {
         assert_eq!(index.write_schema_id(&absent), None);
     }
 
-    /// An assignment whose schemas the worker doesn't have would download fine and then fail —
-    /// or silently resolve to another version of the same dataset type — at query time.
+    /// Otherwise the failure — or a silent wrong-version match — surfaces only at query time.
     #[test]
     fn an_assignment_referencing_an_unavailable_schema_is_rejected() {
         let keypair = Keypair::generate_ed25519();
@@ -351,8 +342,7 @@ mod worker_assignment {
         assert!(index.schema_ids().is_empty());
     }
 
-    /// The index is keyed by (dataset, chunk id) exactly as the legacy path is, so the storage
-    /// manager's desired-chunk bookkeeping is unaffected by the format switch.
+    /// Keying is unchanged from the legacy path, so the manager's chunk bookkeeping survives.
     #[test]
     fn chunks_are_keyed_the_same_way_as_the_legacy_format() {
         let keypair = Keypair::generate_ed25519();

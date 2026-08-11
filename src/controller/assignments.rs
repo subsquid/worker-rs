@@ -6,13 +6,9 @@ use rand::Rng;
 use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
 
-/// What one poll of the network state turned up. The assignment and the schema bundle are
-/// versioned independently — the bundle can be revised (a schema clarified, a column
-/// documented) without the assignment moving, and vice versa — so each is reported on its own
-/// terms rather than one riding on the other's identity.
+/// The assignment and the schema bundle are versioned independently, and reported separately.
 pub enum NetworkUpdate {
-    /// A new assignment, carrying the bundle published alongside it so both are applied from one
-    /// consistent network state.
+    /// A new assignment, carrying whatever bundle was published alongside it.
     Assignment(AssignmentUpdate),
     /// The assignment is unchanged; only the schema bundle moved.
     SchemaBundle(sqd_assignments::SchemaBundle),
@@ -22,8 +18,7 @@ pub struct AssignmentUpdate {
     pub id: String,
     pub fb_url_v1: String,
     pub _effective_from: u64,
-    /// Where to fetch the schema content the assignment references by id. `None` outside
-    /// worker-assignment mode, which has no use for it.
+    /// `None` outside worker-assignment mode.
     pub schema_bundle: Option<sqd_assignments::SchemaBundle>,
 }
 
@@ -37,12 +32,8 @@ pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client
         .unwrap()
 }
 
-/// Polls the network state, reporting the assignment and the schema bundle as they change.
-///
-/// `installed_bundle_hash` reports the bundle the worker currently has installed. Deduplicating
-/// against that — rather than against a "last seen" marker kept here — means a bundle that fails
-/// to install is offered again on the next poll instead of being silently skipped, and there is
-/// no second copy of the same state to drift.
+/// Polls for assignment and schema bundle updates. Deduplicating the bundle against
+/// `installed_bundle_hash` rather than a "last seen" marker re-offers one that failed to install.
 pub fn new_assignments_stream(
     url: String,
     frequency: Duration,
@@ -83,10 +74,6 @@ pub fn new_assignments_stream(
     }
 }
 
-/// Reports a new assignment if there is one, otherwise a new schema bundle if only that moved.
-///
-/// A new assignment subsumes the bundle rather than reporting both: it carries whatever bundle
-/// was published with it, and applying it installs that bundle first.
 async fn poll_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
@@ -94,71 +81,61 @@ async fn poll_network_state(
     use_worker_assignments: bool,
     installed_bundle_hash: &impl Fn() -> Option<String>,
 ) -> anyhow::Result<Option<NetworkUpdate>> {
-    tracing::debug!("Checking for new assignment: {url}");
+    tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
-    // Legacy mode has no use for the bundle, so it never reports one.
     let published_bundle = use_worker_assignments
         .then(|| network_state.schema_bundle.take())
         .flatten();
 
-    let new_assignment = match visible_assignment(&network_state, use_worker_assignments) {
-        Some(visible) if last_id.as_deref() != Some(visible.id.as_str()) => Some(visible),
-        Some(_) => {
-            tracing::debug!("Assignment has not been changed");
-            None
+    match changed_assignment(&network_state, last_id.as_deref(), use_worker_assignments) {
+        Some(assignment) => {
+            let update = AssignmentUpdate {
+                fb_url_v1: assignment
+                    .fb_url_v1
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Missing fb_url_v1"))?,
+                id: assignment.id.clone(),
+                _effective_from: assignment.effective_from,
+                schema_bundle: published_bundle,
+            };
+            tracing::debug!("Discovered assignment \"{}\"", update.id);
+            *last_id = Some(update.id.clone());
+            Ok(Some(NetworkUpdate::Assignment(update)))
         }
-        None => {
-            // Not an error worth retrying against: the state parsed fine, it just doesn't carry
-            // the pointer this worker was configured to read. Warn rather than debug — a worker
-            // in this position serves nothing new until the publisher catches up.
-            tracing::warn!(
-                expected = if use_worker_assignments {
-                    "worker_assignment"
-                } else {
-                    "assignment"
-                },
-                "Network state carries no assignment for this worker's mode; waiting"
-            );
-            None
-        }
+        None => Ok(published_bundle
+            .filter(|bundle| installed_bundle_hash().as_deref() != Some(bundle.hash.as_str()))
+            .map(NetworkUpdate::SchemaBundle)),
+    }
+}
+
+/// The assignment this worker reads, unless it is the one already reported.
+fn changed_assignment<'a>(
+    network_state: &'a sqd_assignments::NetworkState,
+    last_id: Option<&str>,
+    use_worker_assignments: bool,
+) -> Option<&'a sqd_assignments::NetworkAssignment> {
+    let Some(assignment) = visible_assignment(network_state, use_worker_assignments) else {
+        // Warn, not debug: a worker whose mode the publisher doesn't serve stands still.
+        tracing::warn!(
+            expected = if use_worker_assignments {
+                "worker_assignment"
+            } else {
+                "assignment"
+            },
+            "Network state carries no assignment for this worker's mode; waiting"
+        );
+        return None;
     };
-
-    if let Some(visible) = new_assignment {
-        let fb_url_v1 = visible
-            .fb_url_v1
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Missing fb_url_v1"))?;
-        let id = visible.id.clone();
-        let _effective_from = visible.effective_from;
-        *last_id = Some(id.clone());
-
-        tracing::debug!("Discovered assignment \"{id}\"");
-        return Ok(Some(NetworkUpdate::Assignment(AssignmentUpdate {
-            id,
-            fb_url_v1,
-            _effective_from,
-            schema_bundle: published_bundle,
-        })));
+    if last_id == Some(assignment.id.as_str()) {
+        tracing::debug!("Assignment has not been changed");
+        return None;
     }
-
-    // The assignment stood still, but the bundle can move on its own — schemas get clarified
-    // without the chunk layout changing.
-    if let Some(bundle) = published_bundle {
-        if installed_bundle_hash().as_deref() != Some(bundle.hash.as_str()) {
-            tracing::debug!(hash = %bundle.hash, "Discovered new schema bundle");
-            return Ok(Some(NetworkUpdate::SchemaBundle(bundle)));
-        }
-        tracing::debug!("Schema bundle has not been changed");
-    }
-
-    Ok(None)
+    Some(assignment)
 }
 
 /// Selects the assignment pointer to discover updates from.
 ///
-/// Each mode reads exactly one pointer and never falls back to the other: mixing the two would
-/// feed one format's bytes to the other's parser. Both are optional in a `NetworkState` — a
-/// network mid-migration may publish either, both, or (for a mode it has retired) neither.
+/// Never falls back to the other mode's pointer: its bytes are a different format.
 fn visible_assignment(
     network_state: &sqd_assignments::NetworkState,
     use_worker_assignments: bool,
@@ -187,11 +164,9 @@ pub async fn fetch_assignment(
     Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
 }
 
-/// Decodes the dedicated worker-oriented assignment (NET-1186).
-///
-/// Unlike [`fetch_assignment`], this validates the buffer instead of trusting it. A malformed
-/// blob here would otherwise surface as a panic or garbage much later, while resolving a chunk's
-/// tables through the inline rosters.
+/// Decodes the dedicated worker-oriented assignment (NET-1186). Validated unlike
+/// [`fetch_assignment`], so a malformed blob fails here instead of panicking much later, while
+/// resolving a chunk's tables.
 pub async fn fetch_worker_assignment(
     url: &str,
     reqwest_client: &reqwest::Client,
@@ -261,8 +236,6 @@ mod tests {
         assert_eq!(visible_assignment(&state, true).unwrap().id, "worker");
     }
 
-    /// Neither mode falls back to the other's pointer: feeding one format's bytes to the other's
-    /// parser is worse than serving nothing.
     #[test]
     fn visible_assignment_never_falls_back_to_the_other_pointer() {
         let legacy_only = network_state();
@@ -309,7 +282,6 @@ mod tests {
         .into_bytes()
     }
 
-    /// A worker-mode state: the `worker_assignment` pointer plus a schema bundle.
     fn worker_state_json(id: &str, bundle_hash: &str) -> Vec<u8> {
         format!(
             r#"{{"network":"test","worker_assignment":{{"id":"{id}","fb_url_v1":"http://example.com/{id}.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{bundle_hash}","url":"http://example.com/bundle.tar.gz"}}}}"#
@@ -321,9 +293,7 @@ mod tests {
         new_reqwest_client(Duration::from_secs(5), PeerId::random())
     }
 
-    /// The assignment and the bundle move independently, so all four combinations have to be
-    /// reported on their own terms — a revised schema must not need a new assignment to land,
-    /// and a new assignment must not force a bundle it already has to be re-downloaded.
+    /// All four assignment/bundle change combinations are reported on their own terms.
     #[tokio::test]
     async fn assignment_and_bundle_are_versioned_independently() {
         let a1b1 = worker_state_json("assignment-1", "sha256:aaa");
@@ -337,11 +307,10 @@ mod tests {
         ])
         .await;
         let mut last_id = None;
-        // Stands in for the store: what the worker currently has installed.
         let installed = std::sync::Mutex::new(None::<String>);
         let installed_hash = || installed.lock().unwrap().clone();
 
-        // Both new: reported as one assignment carrying its bundle.
+        // Both new: one assignment, carrying its bundle.
         let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
             .await
             .unwrap();
@@ -350,8 +319,7 @@ mod tests {
         assert_eq!(update.schema_bundle.unwrap().hash, "sha256:aaa");
         *installed.lock().unwrap() = Some("sha256:aaa".to_owned());
 
-        // New assignment, same bundle: still one assignment, and because the hash matches what
-        // is installed, applying it re-downloads nothing.
+        // New assignment, same bundle: the bundle rides along, already installed.
         let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
             .await
             .unwrap();
@@ -365,7 +333,7 @@ mod tests {
             .unwrap();
         assert!(update.is_none());
 
-        // New bundle, same assignment: reported on its own, without re-fetching the assignment.
+        // New bundle, same assignment: reported on its own.
         let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
             .await
             .unwrap();
@@ -378,8 +346,7 @@ mod tests {
         }
     }
 
-    /// A bundle that fails to install stays uninstalled, so the next poll offers it again
-    /// instead of skipping it as already seen.
+    /// A bundle that failed to install is offered again, not skipped as already seen.
     #[tokio::test]
     async fn an_uninstalled_bundle_is_offered_again() {
         let state = worker_state_json("assignment-1", "sha256:aaa");
@@ -391,7 +358,7 @@ mod tests {
             .unwrap();
         assert_eq!(assignment_of(update).id, "assignment-1");
 
-        // The assignment id is consumed, but nothing was installed, so the bundle comes back.
+        // The assignment id is consumed, but nothing was installed: the bundle comes back.
         let update = poll_network_state(&url, &test_client(), &mut last_id, true, &|| None)
             .await
             .unwrap();
@@ -402,7 +369,6 @@ mod tests {
         );
     }
 
-    /// Legacy mode has no use for the bundle and must not be disturbed by one being published.
     #[tokio::test]
     async fn legacy_mode_ignores_the_schema_bundle() {
         let state = format!(
@@ -422,7 +388,7 @@ mod tests {
             "legacy mode drops the bundle"
         );
 
-        // Nothing installed, but legacy mode must still not report a bundle update.
+        // Nothing installed, yet still no bundle update.
         let update = poll_network_state(&url, &test_client(), &mut last_id, false, &|| None)
             .await
             .unwrap();

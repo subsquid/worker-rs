@@ -18,14 +18,11 @@ const NETWORK_STATE_PATH: &str = "/network-state.json";
 const SCHEMA_BUNDLE_PATH: &str = "/schema-bundle.tar.gz";
 const STORAGE_SECRET: &str = "conformance-storage-secret";
 
-/// The write schema every corpus chunk is pinned to in worker format. Its roster must name
-/// exactly the corpus chunk's files minus `.parquet` — that is what the worker derives the
-/// download list from (IB-41b).
+/// Roster must match the corpus files minus `.parquet` — the worker's download list (IB-41b).
 pub const WRITE_SCHEMA_ID: u32 = 7;
 const WRITE_SCHEMA_TABLES: [&str; 2] = ["blocks", "logs"];
 
-/// Which input-side bindings the simulator serves: the legacy shared assignment (IB-40/41) or
-/// the worker-oriented pair plus its schema bundle (IB-40b/41b/44b).
+/// Legacy shared assignment (IB-40/41), or the worker-oriented pair plus bundle (IB-40b/41b/44b).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Format {
     #[default]
@@ -81,8 +78,7 @@ pub struct Scheduler {
 impl Scheduler {
     pub async fn start(rng: SplitMix64, format: Format) -> Self {
         let stub = HttpStub::start().await;
-        // In worker format the bundle is the only source of query schemas, so it has to be
-        // serveable before the first assignment points at it.
+        // Must be serveable before the first assignment points at it.
         let bundle_hash = (format == Format::Worker).then(|| {
             let archive = schema_bundle(&[(WRITE_SCHEMA_ID, super::corpus::SCHEMA_YAML)]);
             let hash = format!("sha256:{:x}", Sha256::digest(&archive));
@@ -241,8 +237,7 @@ impl Scheduler {
         builder.finish()
     }
 
-    /// The worker-oriented document (IB-41b): no per-chunk file list — every chunk pins
-    /// [`WRITE_SCHEMA_ID`], whose inline roster the worker derives `<table>.parquet` from.
+    /// Worker-oriented document (IB-41b): no per-chunk file list, only [`WRITE_SCHEMA_ID`].
     fn build_worker_document(
         &mut self,
         worker: PeerId,

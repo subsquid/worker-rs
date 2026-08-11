@@ -132,7 +132,7 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
-    /// Which input-side bindings the scheduler serves and the worker reads.
+    /// Set on both the scheduler and the worker.
     pub format: Format,
 }
 
@@ -224,8 +224,7 @@ impl Harness {
         spawn_subsystems(
             &worker,
             &allocations,
-            // In worker format the bundle is the only schema source, so the CDN loop must not
-            // run — the two would overwrite each other's registry contents (IB-44 / IB-44b).
+            // The bundle is the only schema source; the CDN loop would clobber it (IB-44 / IB-44b).
             (config.format == Format::Legacy)
                 .then(|| (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH))),
             worker_id,
@@ -267,8 +266,7 @@ impl Harness {
             data_dir,
             _reporter: reporter,
         };
-        // Worker format has no schema source until the first assignment arrives carrying its
-        // bundle, so there is nothing to wait for here.
+        // Worker format has no schema source until the first assignment brings its bundle.
         if harness.format == Format::Legacy {
             harness.await_schemas_loaded().await;
         }
@@ -321,8 +319,7 @@ impl Harness {
                 .expect("assignment stream is still open");
             match update {
                 assignments::NetworkUpdate::Assignment(update) => break update,
-                // A bundle that moved without the assignment: install it and keep waiting, as
-                // the production loop does.
+                // Bundle moved without the assignment: install and keep waiting, like production.
                 assignments::NetworkUpdate::SchemaBundle(bundle) => {
                     self.install_schema_bundle(&bundle)
                         .await
@@ -346,8 +343,7 @@ impl Harness {
                 }
             }
             Format::Worker => {
-                // IB-44b: the bundle is a prerequisite, installed before the assignment it
-                // accompanies. A failure here must leave the assignment unapplied (FM-53b).
+                // IB-44b: bundle first; a failure leaves the assignment unapplied (FM-53b).
                 let bundle = update
                     .schema_bundle
                     .as_ref()
@@ -586,8 +582,7 @@ impl Drop for Harness {
     }
 }
 
-/// `cdn_schemas` is `None` in worker format, where the schema bundle supersedes the CDN
-/// manifest and the refresh loop must not run.
+/// `cdn_schemas` is `None` in worker format, where the bundle replaces the CDN manifest.
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,

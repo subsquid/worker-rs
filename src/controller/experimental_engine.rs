@@ -1,9 +1,8 @@
 //! Support for the experimental query engine (`sqd-query-engine`), which executes queries
 //! against dataset schemas held in [`QuerySchemaRegistry`].
 //!
-//! Those schemas come from one of two sources, never both: the CDN manifest polled by
-//! [`run_schemas_refresh_loop`] (legacy assignments), or the network's schema bundle
-//! (worker assignments) — see `super::schema_bundle`.
+//! Schemas come from exactly one source, never both: the CDN manifest (legacy assignments)
+//! or `super::schema_bundle` (worker assignments).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -34,7 +33,7 @@ struct Manifest {
 #[derive(Default)]
 struct Schemas {
     by_type: HashMap<String, Arc<DatasetDescription>>,
-    /// Empty for CDN-sourced schemas, which have no ids. Populated from the schema bundle.
+    /// Empty for CDN-sourced schemas, which have no ids.
     by_id: HashMap<u32, Arc<DatasetDescription>>,
 }
 
@@ -45,13 +44,9 @@ pub struct QuerySchemaRegistry {
 }
 
 impl QuerySchemaRegistry {
-    /// Looks a schema up the way queries currently ask for one: by the dataset type named in the
-    /// query.
-    ///
-    /// This holds only while a bundle carries at most one schema per type. Once schemas are
-    /// versioned per chunk, two ids will name the same type and the query's type will no longer
-    /// identify a schema on its own — [`Self::get_by_id`] is the interface to move to, resolving
-    /// the chunk's `write_schema_id` instead.
+    /// Looks a schema up by the dataset type named in the query. Only valid while a bundle
+    /// carries at most one schema per type — once schemas are versioned per chunk, callers must
+    /// resolve the chunk's `write_schema_id` via [`Self::get_by_id`].
     pub fn get(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
         self.loaded_schemas()?
             .by_type
@@ -64,8 +59,7 @@ impl QuerySchemaRegistry {
             })
     }
 
-    /// Looks a schema up by the id assignments reference it with — the interface for per-chunk
-    /// schemas. Only ever finds anything when the schemas came from a bundle.
+    /// Looks a schema up by the id assignments reference it with; only ever populated by a bundle.
     pub fn get_by_id(&self, schema_id: u32) -> Result<Arc<DatasetDescription>, QueryError> {
         self.loaded_schemas()?
             .by_id
@@ -87,17 +81,14 @@ impl QuerySchemaRegistry {
         Ok(self.schemas.load())
     }
 
-    /// Installs schemas from the network's schema bundle, indexed both ways.
+    /// Installs schemas from the network's schema bundle, indexed by id and by type.
     ///
-    /// Ids in `still_in_use` that the new bundle omits are carried over from the schemas already
-    /// loaded. A bundle is replaced wholesale, but the chunks on disk are not: dropping a schema
-    /// some live chunk was written with would break every query against it, so a bundle that
-    /// does so is honoured for everything else and complained about.
+    /// Ids in `still_in_use` that the new bundle omits are carried over: bundles are replaced
+    /// wholesale, the chunks on disk are not, and dropping a schema a live chunk was written
+    /// with would break every query against it.
     ///
-    /// Where two ids name the same dataset type the highest id wins the type-keyed slot. That is
-    /// a deterministic stand-in, not a correct answer — the query's type genuinely cannot pick
-    /// between two versions of a schema. Callers that can resolve a chunk's `write_schema_id`
-    /// should use [`Self::get_by_id`] instead.
+    /// Where two ids share a dataset type the highest wins the type-keyed slot — deterministic,
+    /// but only [`Self::get_by_id`] tells the versions apart.
     pub fn store_bundle(
         &self,
         mut by_id: HashMap<u32, Arc<DatasetDescription>>,
@@ -250,7 +241,6 @@ async fn refresh_schemas(
         schemas.insert(dataset_type, Arc::new(desc));
     }
 
-    // CDN schemas have no ids, so only the type-keyed index is populated.
     registry.store(Schemas {
         by_type: schemas,
         by_id: HashMap::new(),
@@ -703,9 +693,7 @@ tables:
         assert!(registry.get_by_id(9).is_err());
     }
 
-    /// A bundle is replaced wholesale but the chunks on disk are not, so a schema some live
-    /// chunk was written with has to outlive a bundle that stopped carrying it — otherwise every
-    /// query against those chunks breaks the moment the bundle rolls forward.
+    /// A schema a live chunk was written with must outlive a bundle that stopped carrying it.
     #[test]
     fn a_schema_still_in_use_survives_a_bundle_that_drops_it() {
         let registry = QuerySchemaRegistry::default();
@@ -714,7 +702,6 @@ tables:
             &HashSet::new(),
         );
 
-        // The next bundle drops 7, but the active assignment still has chunks written with it.
         registry.store_bundle(
             HashMap::from([(12, description("solana"))]),
             &HashSet::from([7]),
@@ -725,7 +712,6 @@ tables:
         assert_eq!(registry.get("evm").unwrap().name, "evm");
     }
 
-    /// Retention is scoped to what is in use, so a schema nothing references is not kept alive.
     #[test]
     fn a_schema_no_longer_in_use_is_dropped() {
         let registry = QuerySchemaRegistry::default();
@@ -744,10 +730,7 @@ tables:
         assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
     }
 
-    /// Today a bundle carries one schema per type. When that stops being true the type-keyed
-    /// index can no longer represent the bundle, so it resolves deterministically to the highest
-    /// id rather than to whichever entry happened to be visited last — but both remain reachable
-    /// by id, which is how callers should be resolving them by then.
+    /// Duplicate types resolve the type-keyed slot to the highest id; both stay reachable by id.
     #[test]
     fn several_schemas_for_one_type_stay_reachable_by_id() {
         let registry = QuerySchemaRegistry::default();

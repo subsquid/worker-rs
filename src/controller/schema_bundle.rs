@@ -1,10 +1,6 @@
 //! The network's schema bundle: a gzipped tar of `<schema_id>.yaml` query-engine schemas,
-//! published alongside the assignments that reference those ids.
-//!
-//! In worker-assignment mode this replaces the CDN manifest as the source of query schemas: an
-//! installed bundle is pushed into the [`QuerySchemaRegistry`] the experimental engine reads.
-//! Chunk downloads don't consult it — a worker assignment carries its own table rosters — so the
-//! bundle's only consumer is query execution.
+//! published alongside the assignments that reference those ids. In worker-assignment mode it
+//! replaces the CDN manifest as the source of query schemas; only query execution reads it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,9 +16,8 @@ use sqd_query_engine::metadata::DatasetDescription;
 use super::experimental_engine::QuerySchemaRegistry;
 use crate::metrics;
 
-/// Caps both the download and the unpacked total. Published bundles are tens of kilobytes of
-/// YAML; this exists only so a corrupt or hostile archive can't fill the data directory. The
-/// hash is verified after the download, so the cap is the only thing bounding it before that.
+/// Caps both the download and the unpacked total: the only bound on a corrupt or hostile archive
+/// before the hash is verified. Published bundles are tens of kilobytes.
 const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Directory holding a bundle's unpacked schemas, named after its content hash.
@@ -34,23 +29,18 @@ const TEMP_PREFIX: &str = "temp-";
 pub struct SchemaBundleStore {
     dir: Utf8PathBuf,
     registry: Arc<QuerySchemaRegistry>,
-    /// Hash of the bundle currently in `registry`. Only set once schemas are actually installed,
-    /// so a failed install leaves this on the previous value and the next poll retries.
+    /// Hash of the bundle in `registry`. Set only after a successful install, so a failure leaves
+    /// the previous value and the next poll retries.
     installed_hash: ArcSwapOption<String>,
 }
 
 impl SchemaBundleStore {
-    /// Sweeps staging directories a crashed unpack left behind. Nothing else would:
-    /// [`Self::prune`] only runs after a successful install, which may never come — a worker
-    /// running legacy assignments never installs a bundle at all.
-    ///
-    /// Only `temp-*` goes. An unpacked `sha256-*` is not garbage: it is very likely the bundle
-    /// this run is about to reuse, and removing it here would turn every restart into a
-    /// re-download. Superseded ones are pruned by the first successful install instead.
+    /// Sweeps staging directories a crashed unpack left behind; nothing else does, since
+    /// [`Self::prune`] runs only after a successful install (legacy assignments never install one).
+    /// Unpacked `sha256-*` dirs stay — they make a restart cheap; prune drops superseded ones.
     pub fn new(dir: impl Into<Utf8PathBuf>, registry: Arc<QuerySchemaRegistry>) -> Self {
         let dir = dir.into();
-        // Blocking, but this is startup and the directory holds a handful of small files — the
-        // same trade-off `StateManager::new` makes with `remove_temps`.
+        // Blocking, but it's startup and the files are few and small (as in `StateManager::new`).
         let swept = remove_bundle_dirs(&dir, &[TEMP_PREFIX], None);
         if swept > 0 {
             tracing::debug!(swept, "Removed staging directories left by an earlier run");
@@ -66,15 +56,10 @@ impl SchemaBundleStore {
         self.installed_hash.load_full().map(|h| h.to_string())
     }
 
-    /// Installs `bundle`'s schemas into the registry, downloading and unpacking only if needed.
-    ///
-    /// A bundle already installed is a no-op, and one already unpacked on disk (from an earlier
-    /// run) is read back rather than re-downloaded — the hash names the directory, so a match
-    /// means the content matches. Directories for other bundles are pruned once the new one is
-    /// live.
-    ///
-    /// `still_in_use` names write schemas the current assignment relies on, which survive the
-    /// replacement even if the new bundle drops them — see [`QuerySchemaRegistry::store_bundle`].
+    /// Installs `bundle`'s schemas into the registry, downloading and unpacking only if the
+    /// hash-named directory isn't already on disk. `still_in_use` names write schemas the current
+    /// assignment relies on; they survive the replacement even if the new bundle drops them — see
+    /// [`QuerySchemaRegistry::store_bundle`].
     pub async fn ensure(
         &self,
         bundle: &SchemaBundle,
@@ -130,13 +115,9 @@ impl SchemaBundleStore {
         Ok(())
     }
 
-    /// Reads back a bundle an earlier run unpacked, or `None` if there isn't a usable one.
-    ///
-    /// A directory that exists but won't load is discarded rather than treated as fatal. The
-    /// unpack is atomic, so this means damage after the fact — a [`Self::prune`] that failed
-    /// partway, say. Without this the hash-named directory would suppress the re-download that
-    /// would fix it, and in worker-assignment mode a bundle that never installs blocks every
-    /// assignment: the worker would wedge permanently on a state it can't recover from.
+    /// Reads back a bundle an earlier run unpacked, or `None` if there isn't a usable one. One
+    /// that exists but won't load is discarded rather than fatal: it would otherwise suppress the
+    /// re-download that fixes it, and a bundle that never installs blocks every assignment.
     async fn load_unpacked(&self, dir: &Utf8Path) -> Option<HashMap<u32, Arc<DatasetDescription>>> {
         if !dir.exists() {
             return None;
@@ -157,8 +138,7 @@ impl SchemaBundleStore {
         }
     }
 
-    /// Removes every unpacked or half-unpacked bundle other than `keep`. Best-effort: a stale
-    /// directory wastes a few kilobytes, which isn't worth failing an otherwise-good bundle over.
+    /// Removes every unpacked or half-unpacked bundle other than `keep`. Best-effort.
     async fn prune(&self, keep: Utf8PathBuf) {
         let dir = self.dir.clone();
         let removed = tokio::task::spawn_blocking(move || {
@@ -172,9 +152,8 @@ impl SchemaBundleStore {
     }
 }
 
-/// Removes every directory under `dir` whose name starts with one of `prefixes`, except `keep`,
-/// returning how many went. Failures are logged rather than propagated: a leftover directory
-/// costs a few kilobytes and the next successful install sweeps it.
+/// Removes directories under `dir` whose name starts with one of `prefixes`, except `keep`,
+/// returning how many went. Failures are logged, not propagated: the next install sweeps them.
 fn remove_bundle_dirs(dir: &Utf8Path, prefixes: &[&str], keep: Option<&Utf8Path>) -> usize {
     let mut removed = 0usize;
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -201,8 +180,7 @@ fn remove_bundle_dirs(dir: &Utf8Path, prefixes: &[&str], keep: Option<&Utf8Path>
     removed
 }
 
-/// Splits `algorithm:hex`, accepting only sha256. Unknown algorithms are rejected rather than
-/// skipped — silently not checking an integrity hash is worse than refusing the bundle.
+/// Splits `algorithm:hex`; only sha256. Unknown algorithms fail rather than skip verification.
 fn parse_sha256(hash: &str) -> anyhow::Result<&str> {
     let (algorithm, hex) = hash
         .split_once(':')
@@ -234,8 +212,7 @@ fn hex_encode(bytes: &[u8]) -> String {
         })
 }
 
-/// Buffers the bundle in memory: it must be hashed as a whole before any of it is trusted, and
-/// the published bundles are far smaller than [`MAX_BUNDLE_SIZE`].
+/// Buffers in memory: nothing can be trusted until the whole thing is hashed.
 async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
     let response = client.get(url).send().await?.error_for_status()?;
     let mut buf = Vec::with_capacity(
@@ -254,8 +231,8 @@ async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>
     Ok(buf)
 }
 
-/// Extracts into a staging directory under `parent`, then renames it onto `dest` so a crash
-/// mid-unpack can never leave a partial bundle under a hash that claims to be complete.
+/// Extracts into a staging directory, then renames it onto `dest`, so a crash mid-unpack can't
+/// leave a partial bundle under a hash that claims to be complete.
 async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf, dest: Utf8PathBuf) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         let name = dest.file_name().unwrap_or("bundle");
@@ -280,11 +257,9 @@ async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf, dest: Utf8PathBuf) -> anyho
     .context("unpack task panicked")?
 }
 
-/// Writes out every `<id>.yaml` at the archive root.
-///
-/// Anything else — nested paths, a manifest added later, and by construction any `..` or absolute
-/// path — is skipped rather than rejected, so a bundle that grows new entries still loads on an
-/// older worker.
+/// Writes out every `<id>.yaml` at the archive root. Anything else — nested paths, a later
+/// manifest, and by construction any `..` or absolute path — is skipped rather than rejected, so
+/// a bundle that grows new entries still loads on an older worker.
 fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut total = 0usize;
@@ -324,11 +299,8 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parses `<id>.yaml` into its id.
-///
-/// Exactly one spelling per id: digits only (rejecting `+7.yaml`, which `str::parse` would
-/// accept) and no leading zeros (rejecting `007.yaml`). Otherwise one bundle could carry both
-/// `7.yaml` and `007.yaml` for id 7, and which one won would come down to directory order.
+/// Parses `<id>.yaml` into its id. Digits only, no leading zeros — `+7.yaml` (which `str::parse`
+/// accepts) and `007.yaml` would let one bundle define id 7 twice, resolved by directory order.
 fn schema_id(file_name: &str) -> Option<u32> {
     let stem = file_name.strip_suffix(".yaml")?;
     if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
@@ -382,9 +354,7 @@ tables:
         type: uint64
 "#;
 
-    /// Writes the entry name straight into the header rather than going through
-    /// `Builder::append_data`, which refuses to *produce* a `..` path. A hostile bundle is not
-    /// built by this crate's tar writer, so the test data can't be either.
+    /// Writes names straight into the header: `Builder::append_data` refuses to produce a `..`.
     fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
             Vec::new(),
@@ -428,8 +398,7 @@ tables:
         url
     }
 
-    /// The store plus the registry it installs into — assertions go through the registry, since
-    /// that is what query execution actually reads.
+    /// The store plus the registry it installs into; assertions read the registry.
     fn store(dir: &tempfile::TempDir) -> (SchemaBundleStore, Arc<QuerySchemaRegistry>) {
         let registry = Arc::new(QuerySchemaRegistry::default());
         let store = SchemaBundleStore::new(
@@ -443,7 +412,6 @@ tables:
     fn parses_only_sha256_hashes() {
         let hex = "a".repeat(64);
         assert_eq!(parse_sha256(&format!("sha256:{hex}")).unwrap(), hex);
-        // An unknown algorithm must fail rather than skip verification.
         assert!(parse_sha256(&format!("md5:{hex}")).is_err());
         assert!(parse_sha256(&hex).is_err(), "bare hex has no algorithm");
         assert!(parse_sha256("sha256:abc").is_err(), "wrong length");
@@ -454,8 +422,7 @@ tables:
     fn schema_ids_come_from_digits_only() {
         assert_eq!(schema_id("7.yaml"), Some(7));
         assert_eq!(schema_id("140000.yaml"), Some(140000));
-        // `str::parse` would accept these as 7; treating them as schema 7 would let one bundle
-        // define the same id twice, with the winner decided by directory order.
+        // `str::parse` would accept these as 7, letting one bundle define the same id twice.
         assert_eq!(schema_id("+7.yaml"), None);
         assert_eq!(schema_id("007.yaml"), None);
         assert_eq!(schema_id("evm.yaml"), None);
@@ -577,10 +544,8 @@ tables:
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
     }
 
-    /// A hash-named directory is normally taken as proof the content is good, which is what
-    /// makes restarts cheap. If it has been damaged since (a prune that failed partway), that
-    /// shortcut would otherwise suppress the very download that fixes it — and because a bundle
-    /// that never installs blocks every assignment, the worker would wedge with no way back.
+    /// A damaged hash-named directory must not suppress the re-download that fixes it, or a
+    /// worker that can't install a bundle wedges with no way back.
     #[tokio::test]
     async fn recovers_from_an_unusable_unpacked_bundle() {
         let dir = tempfile::tempdir().unwrap();
@@ -588,7 +553,7 @@ tables:
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let hash = sha256_of(&archive);
 
-        // Leave behind an empty directory under the hash this bundle will resolve to.
+        // An empty directory under the hash this bundle resolves to: exists, but won't load.
         let hex = hash.strip_prefix("sha256:").unwrap();
         let damaged = dir.path().join(format!("{UNPACKED_PREFIX}{hex}"));
         std::fs::create_dir_all(&damaged).unwrap();
@@ -609,10 +574,8 @@ tables:
         );
     }
 
-    /// Nothing else removes a staging directory a crashed unpack left behind: `prune` only runs
-    /// after a successful install, which may never come (legacy mode never installs a bundle).
-    ///
-    /// An unpacked bundle must survive though — it is what makes a restart cheap.
+    /// Construction is the only thing that sweeps a crashed unpack's staging directory (`prune`
+    /// runs only after an install, which may never come), and it must spare unpacked bundles.
     #[test]
     fn construction_sweeps_staging_directories_but_keeps_unpacked_bundles() {
         let dir = tempfile::tempdir().unwrap();

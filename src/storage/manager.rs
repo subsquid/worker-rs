@@ -45,8 +45,7 @@ pub struct StateManager {
     download_config: DownloadConfig,
 }
 
-/// A chunk locked for the lifetime of `path`, together with the schema its data was written
-/// with — a consistent pair, see [`StateManager::get_query_chunk`].
+/// A locked chunk and the schema its data was written with — see [`StateManager::get_query_chunk`].
 pub struct QueryChunk<F: FnOnce(PathBuf)> {
     pub path: scopeguard::ScopeGuard<PathBuf, F>,
     /// `None` under a legacy assignment, which pins no per-chunk schema.
@@ -248,8 +247,7 @@ impl StateManager {
         }
     }
 
-    /// `schema_available` gates the assignment on its write schemas being loaded — see
-    /// [`DatasetsIndex::new`].
+    /// `schema_available` gates the assignment on its write schemas being loaded.
     pub fn set_assignment(
         &self,
         assignment: AssignmentBlob,
@@ -359,12 +357,9 @@ impl StateManager {
         Some(self.get_query_chunk(dataset, chunk_id)?.path)
     }
 
-    /// Locks a chunk for a query and reports the schema its data was written with.
-    ///
-    /// Both come out of one critical section. Reading the index and the chunk state separately
-    /// could straddle `set_assignment` and pair a schema id from one assignment with chunk state
-    /// from another — the query would then be executed against a schema the data on disk was
-    /// never written with. Lock order is index → state, as in `set_assignment`.
+    /// Index and chunk state are read in one critical section: read separately, they could
+    /// straddle `set_assignment` and pair a schema id with chunk state from another assignment.
+    /// Lock order is index → state, as in `set_assignment`.
     pub fn get_query_chunk(
         self: Arc<Self>,
         dataset: Dataset,
@@ -394,8 +389,7 @@ impl StateManager {
         })
     }
 
-    /// The write schemas the current assignment's chunks reference. Empty when no assignment is
-    /// installed, or under a legacy one.
+    /// Empty when no assignment is installed, or under a legacy one.
     pub fn active_schema_ids(&self) -> std::collections::HashSet<u32> {
         self.datasets_index
             .lock()
@@ -579,7 +573,6 @@ mod tests {
 
     use crate::storage::datasets_index::AssignmentBlob;
 
-    /// Legacy assignments pin no write schema, so the availability check is never consulted.
     fn no_schemas_needed(_: u32) -> bool {
         unreachable!("a legacy assignment references no write schemas")
     }

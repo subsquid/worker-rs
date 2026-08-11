@@ -11,11 +11,8 @@ use tracing::error;
 use crate::types::state::ChunkRef;
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
-/// A downloaded assignment in whichever format the network published it.
-///
-/// The two carry the same chunk assignments but describe a chunk's contents differently: the
-/// legacy blob lists each file explicitly, while the worker blob names a write schema whose
-/// inline roster the file list is derived from.
+/// A downloaded assignment in either published format: `Legacy` lists a chunk's files
+/// explicitly, `Worker` derives them from the write schema's inline table roster.
 pub enum AssignmentBlob {
     Legacy(sqd_assignments::Assignment),
     Worker(sqd_assignments::WorkerAssignment),
@@ -28,9 +25,8 @@ pub struct DatasetsIndex {
     http_headers: reqwest::header::HeaderMap,
     // chunks assigned to this worker
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
-    /// Distinct write schemas this worker's chunks were written with. Empty under legacy
-    /// assignments, which pin no schema. Kept so a schema bundle can be checked against what is
-    /// still in use before it replaces the one in force.
+    /// Write schemas used by this worker's chunks (empty under legacy assignments), so a new
+    /// schema bundle can be checked against them before replacing the one in force.
     schema_ids: HashSet<u32>,
 }
 
@@ -86,10 +82,8 @@ impl DatasetsIndex {
         }
     }
 
-    /// `schema_available` reports whether a write schema's content is loaded and usable. An
-    /// assignment referencing a schema the worker doesn't have is refused rather than applied:
-    /// its chunks would download fine and then fail — or worse, silently resolve to whichever
-    /// schema shares the query's dataset type — at query time.
+    /// Refuses an assignment whose schema `schema_available` reports missing: those chunks would
+    /// download fine, then fail — or silently resolve to the wrong schema — at query time.
     pub fn new(
         assignment: AssignmentBlob,
         id: impl Into<String>,
@@ -119,10 +113,8 @@ impl DatasetsIndex {
                 };
                 let mut chunks = HashMap::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-                    // A chunk whose write schema has no roster has no derivable file list. That
-                    // can only be a malformed assignment, and applying it partially would leave
-                    // the worker quietly short of the data the network believes it holds — so
-                    // reject the whole thing and keep serving the previous assignment.
+                    // No roster means no derivable file list. Reject the whole assignment rather
+                    // than apply it partially, leaving the worker silently short of data.
                     if assignment.chunk_tables(chunk).is_none() {
                         anyhow::bail!(
                             "chunk '{}' references write schema {} which has no roster in the assignment",
@@ -166,11 +158,7 @@ impl DatasetsIndex {
         })
     }
 
-    /// The schema a chunk's data was written with, or `None` under a legacy assignment (which
-    /// pins none) or for a chunk this assignment doesn't cover.
-    ///
-    /// Derived from the assignment rather than stored separately, so it cannot disagree with the
-    /// chunk list it came from.
+    /// `None` under a legacy assignment (which pins no schema) or for a chunk it doesn't cover.
     pub fn write_schema_id(&self, chunk: &ChunkRef) -> Option<u32> {
         let chunk_ref = self.chunks.get(chunk)?;
         match &self.assignment {
@@ -202,7 +190,6 @@ impl DatasetsIndex {
     }
 }
 
-/// The directory a chunk's files live under: `<dataset_base_url>/<chunk prefix>/`.
 fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Option<Url> {
     Url::from_str(dataset_base_url)
         .inspect_err(|e| tracing::warn!("Can't parse dataset base url '{dataset_base_url}': {e}"))
