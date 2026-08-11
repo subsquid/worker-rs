@@ -69,8 +69,13 @@ fn test_chunks_with_same_block_range() {
     let bytes = builder.finish();
     let assignment = sqd_assignments::Assignment::from_owned(bytes).unwrap();
 
-    let index =
-        DatasetsIndex::new(AssignmentBlob::Legacy(assignment), "test-asgn", &keypair).unwrap();
+    let index = DatasetsIndex::new(
+        AssignmentBlob::Legacy(assignment),
+        "test-asgn",
+        &keypair,
+        |_| unreachable!("a legacy assignment references no write schemas"),
+    )
+    .unwrap();
 
     assert_eq!(
         index.chunks().len(),
@@ -122,6 +127,11 @@ mod worker_assignment {
     use crate::storage::datasets_index::{AssignmentBlob, DatasetsIndex, RemoteFile};
     use crate::types::state::ChunkRef;
 
+    /// Stands in for a schema bundle that carries everything the assignment references.
+    fn all_schemas_available(_: u32) -> bool {
+        true
+    }
+
     const CHUNK_ID: &str = "0221000000/0221000000-0221000649-BQJdx";
     const DATASET: &str = "s3://solana-mainnet-2";
     const BASE_URL: &str = "https://solana-mainnet-2.sqd-datasets.io";
@@ -167,7 +177,12 @@ mod worker_assignment {
     /// `DatasetsIndex` holds a self-referencing flatbuffer and so isn't `Debug`, which rules
     /// out `expect_err`.
     fn expect_rejected(assignment: WorkerAssignment, keypair: &Keypair) -> String {
-        match DatasetsIndex::new(AssignmentBlob::Worker(assignment), "test-asgn", keypair) {
+        match DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment),
+            "test-asgn",
+            keypair,
+            all_schemas_available,
+        ) {
             Err(e) => format!("{e:#}"),
             Ok(_) => panic!("assignment should have been rejected"),
         }
@@ -180,6 +195,7 @@ mod worker_assignment {
             AssignmentBlob::Worker(assignment(peer_id, schema_id, tables_present)),
             "test-asgn",
             &keypair,
+            all_schemas_available,
         )
         .expect("assignment is well-formed");
 
@@ -252,6 +268,89 @@ mod worker_assignment {
         );
     }
 
+    /// The chunk's write schema has to reach query execution, or a query would be run against
+    /// whichever schema happens to share its dataset type.
+    #[test]
+    fn the_chunks_write_schema_is_recoverable_from_the_index() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let index = DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment(peer_id, 7, None)),
+            "test-asgn",
+            &keypair,
+            all_schemas_available,
+        )
+        .unwrap();
+
+        let chunk = index.chunks().keys().next().unwrap().clone();
+        assert_eq!(index.write_schema_id(&chunk), Some(7));
+        assert_eq!(index.schema_ids(), &std::collections::HashSet::from([7]));
+
+        let absent = ChunkRef {
+            dataset: std::sync::Arc::new(DATASET.to_owned()),
+            chunk: std::sync::Arc::from("nope"),
+        };
+        assert_eq!(index.write_schema_id(&absent), None);
+    }
+
+    /// An assignment whose schemas the worker doesn't have would download fine and then fail —
+    /// or silently resolve to another version of the same dataset type — at query time.
+    #[test]
+    fn an_assignment_referencing_an_unavailable_schema_is_rejected() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+
+        let message = match DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment(peer_id, 7, None)),
+            "test-asgn",
+            &keypair,
+            |_| false,
+        ) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("assignment should have been rejected"),
+        };
+        assert!(
+            message.contains("write schema 7") && message.contains("schema bundle"),
+            "{message}"
+        );
+    }
+
+    /// Legacy assignments pin no schema, so query-time resolution falls back to the dataset type.
+    #[test]
+    fn legacy_assignments_expose_no_write_schema() {
+        use sqd_assignments::AssignmentBuilder;
+
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut builder = AssignmentBuilder::new("test-secret").check_continuity(false);
+        builder
+            .new_chunk()
+            .id(CHUNK_ID)
+            .dataset_id(DATASET)
+            .dataset_base_url(BASE_URL)
+            .block_range(0..=1000)
+            .size(1)
+            .worker_indexes(&[0])
+            .files(&["blocks.parquet".to_owned()])
+            .finish()
+            .unwrap();
+        builder.finish_dataset();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0]);
+        let assignment = sqd_assignments::Assignment::from_owned(builder.finish()).unwrap();
+
+        let index = DatasetsIndex::new(
+            AssignmentBlob::Legacy(assignment),
+            "test-asgn",
+            &keypair,
+            |_| unreachable!("a legacy assignment references no write schemas"),
+        )
+        .unwrap();
+
+        let chunk = index.chunks().keys().next().unwrap().clone();
+        assert_eq!(index.write_schema_id(&chunk), None);
+        assert!(index.schema_ids().is_empty());
+    }
+
     /// The index is keyed by (dataset, chunk id) exactly as the legacy path is, so the storage
     /// manager's desired-chunk bookkeeping is unaffected by the format switch.
     #[test]
@@ -262,6 +361,7 @@ mod worker_assignment {
             AssignmentBlob::Worker(assignment(peer_id, 7, None)),
             "test-asgn",
             &keypair,
+            all_schemas_available,
         )
         .unwrap();
 

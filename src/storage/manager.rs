@@ -45,6 +45,14 @@ pub struct StateManager {
     download_config: DownloadConfig,
 }
 
+/// A chunk locked for the lifetime of `path`, together with the schema its data was written
+/// with — a consistent pair, see [`StateManager::get_query_chunk`].
+pub struct QueryChunk<F: FnOnce(PathBuf)> {
+    pub path: scopeguard::ScopeGuard<PathBuf, F>,
+    /// `None` under a legacy assignment, which pins no per-chunk schema.
+    pub write_schema_id: Option<u32>,
+}
+
 #[derive(Debug)]
 pub struct Status {
     pub unavailability_map: Vec<bool>,
@@ -240,15 +248,18 @@ impl StateManager {
         }
     }
 
+    /// `schema_available` gates the assignment on its write schemas being loaded — see
+    /// [`DatasetsIndex::new`].
     pub fn set_assignment(
         &self,
         assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
+        schema_available: impl Fn(u32) -> bool,
     ) -> bool {
         let id = id.into();
         let current_assignment_id = id.clone();
-        let datasets_index = match DatasetsIndex::new(assignment, id, key) {
+        let datasets_index = match DatasetsIndex::new(assignment, id, key, schema_available) {
             Ok(result) => result,
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
@@ -345,10 +356,30 @@ impl StateManager {
         dataset: Dataset,
         chunk_id: &str,
     ) -> Option<scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>> {
+        Some(self.get_query_chunk(dataset, chunk_id)?.path)
+    }
+
+    /// Locks a chunk for a query and reports the schema its data was written with.
+    ///
+    /// Both come out of one critical section. Reading the index and the chunk state separately
+    /// could straddle `set_assignment` and pair a schema id from one assignment with chunk state
+    /// from another — the query would then be executed against a schema the data on disk was
+    /// never written with. Lock order is index → state, as in `set_assignment`.
+    pub fn get_query_chunk(
+        self: Arc<Self>,
+        dataset: Dataset,
+        chunk_id: &str,
+    ) -> Option<QueryChunk<impl FnOnce(PathBuf)>> {
+        let index = self.datasets_index.lock();
         let chunk = self
             .state
             .lock()
             .get_and_lock_chunk(Arc::new(dataset), Arc::from(chunk_id.to_string()))?;
+        let write_schema_id = index
+            .as_ref()
+            .and_then(|index| index.write_schema_id(&chunk));
+        drop(index);
+
         let path = self.chunk_path(&chunk);
         let guard = scopeguard::guard(path, move |_| {
             if self.state.lock().unlock_chunk(&chunk) {
@@ -357,7 +388,20 @@ impl StateManager {
                 self.notify.notify_one();
             }
         });
-        Some(guard)
+        Some(QueryChunk {
+            path: guard,
+            write_schema_id,
+        })
+    }
+
+    /// The write schemas the current assignment's chunks reference. Empty when no assignment is
+    /// installed, or under a legacy one.
+    pub fn active_schema_ids(&self) -> std::collections::HashSet<u32> {
+        self.datasets_index
+            .lock()
+            .as_ref()
+            .map(|index| index.schema_ids().clone())
+            .unwrap_or_default()
     }
 
     #[instrument(err, skip(self))]
@@ -535,6 +579,11 @@ mod tests {
 
     use crate::storage::datasets_index::AssignmentBlob;
 
+    /// Legacy assignments pin no write schema, so the availability check is never consulted.
+    fn no_schemas_needed(_: u32) -> bool {
+        unreachable!("a legacy assignment references no write schemas")
+    }
+
     use super::{DownloadConfig, StateManager};
     use crate::types::dataset::encode_dataset;
 
@@ -578,7 +627,8 @@ mod tests {
         assert!(manager.set_assignment(
             AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
             "A",
-            &keypair
+            &keypair,
+            no_schemas_needed,
         ));
         assert_eq!(
             manager.current_status().await.assignment_id.as_deref(),
@@ -590,7 +640,8 @@ mod tests {
         assert!(!manager.set_assignment(
             AssignmentBlob::Legacy(empty_assignment_for(other_worker)),
             "B",
-            &keypair
+            &keypair,
+            no_schemas_needed,
         ));
 
         // ...and the worker keeps reporting A, with no retry path for B
@@ -623,7 +674,8 @@ mod tests {
         assert!(manager.set_assignment(
             AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
             "A",
-            &keypair
+            &keypair,
+            no_schemas_needed,
         ));
 
         // Sabotage the removal: the chunk dir vanishes behind the manager's back

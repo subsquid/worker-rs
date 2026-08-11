@@ -1,4 +1,8 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    sync::Arc,
+};
 
 use reqwest::Url;
 use sqd_network_transport::Keypair;
@@ -24,6 +28,10 @@ pub struct DatasetsIndex {
     http_headers: reqwest::header::HeaderMap,
     // chunks assigned to this worker
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
+    /// Distinct write schemas this worker's chunks were written with. Empty under legacy
+    /// assignments, which pin no schema. Kept so a schema bundle can be checked against what is
+    /// still in use before it replaces the one in force.
+    schema_ids: HashSet<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -78,13 +86,19 @@ impl DatasetsIndex {
         }
     }
 
+    /// `schema_available` reports whether a write schema's content is loaded and usable. An
+    /// assignment referencing a schema the worker doesn't have is refused rather than applied:
+    /// its chunks would download fine and then fail — or worse, silently resolve to whichever
+    /// schema shares the query's dataset type — at query time.
     pub fn new(
         assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
+        schema_available: impl Fn(u32) -> bool,
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
         let mut pool = StringPool::default();
+        let mut schema_ids = HashSet::new();
 
         let (status, headers, chunks) = match &assignment {
             AssignmentBlob::Legacy(assignment) => {
@@ -116,6 +130,13 @@ impl DatasetsIndex {
                             chunk.write_schema_id()
                         );
                     }
+                    let schema_id = chunk.write_schema_id();
+                    if schema_ids.insert(schema_id) && !schema_available(schema_id) {
+                        anyhow::bail!(
+                            "chunk '{}' references write schema {schema_id}, which is not in the loaded schema bundle",
+                            chunk.id(),
+                        );
+                    }
                     chunks.insert(pool.chunk_ref(chunk.dataset_id(), chunk.id()), chunk_ref);
                 }
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
@@ -141,7 +162,27 @@ impl DatasetsIndex {
             assignment_id: id.into(),
             http_headers,
             chunks,
+            schema_ids,
         })
+    }
+
+    /// The schema a chunk's data was written with, or `None` under a legacy assignment (which
+    /// pins none) or for a chunk this assignment doesn't cover.
+    ///
+    /// Derived from the assignment rather than stored separately, so it cannot disagree with the
+    /// chunk list it came from.
+    pub fn write_schema_id(&self, chunk: &ChunkRef) -> Option<u32> {
+        let chunk_ref = self.chunks.get(chunk)?;
+        match &self.assignment {
+            AssignmentBlob::Legacy(_) => None,
+            AssignmentBlob::Worker(assignment) => {
+                Some(assignment.get_chunk(*chunk_ref)?.write_schema_id())
+            }
+        }
+    }
+
+    pub fn schema_ids(&self) -> &HashSet<u32> {
+        &self.schema_ids
     }
 
     pub fn status(&self) -> sqd_assignments::WorkerStatus {

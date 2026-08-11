@@ -6,7 +6,7 @@
 //! Chunk downloads don't consult it — a worker assignment carries its own table rosters — so the
 //! bundle's only consumer is query execution.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
@@ -72,12 +72,16 @@ impl SchemaBundleStore {
     /// run) is read back rather than re-downloaded — the hash names the directory, so a match
     /// means the content matches. Directories for other bundles are pruned once the new one is
     /// live.
+    ///
+    /// `still_in_use` names write schemas the current assignment relies on, which survive the
+    /// replacement even if the new bundle drops them — see [`QuerySchemaRegistry::store_bundle`].
     pub async fn ensure(
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
+        still_in_use: &HashSet<u32>,
     ) -> anyhow::Result<()> {
-        match self.install(bundle, client).await {
+        match self.install(bundle, client, still_in_use).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 metrics::SCHEMA_BUNDLE_FAILURES.inc();
@@ -86,7 +90,12 @@ impl SchemaBundleStore {
         }
     }
 
-    async fn install(&self, bundle: &SchemaBundle, client: &reqwest::Client) -> anyhow::Result<()> {
+    async fn install(
+        &self,
+        bundle: &SchemaBundle,
+        client: &reqwest::Client,
+        still_in_use: &HashSet<u32>,
+    ) -> anyhow::Result<()> {
         let hex = parse_sha256(&bundle.hash)?;
 
         if self.installed_hash().as_deref() == Some(bundle.hash.as_str()) {
@@ -112,7 +121,7 @@ impl SchemaBundleStore {
         };
 
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
-        self.registry.store_bundle(schemas);
+        self.registry.store_bundle(schemas, still_in_use);
         self.installed_hash
             .store(Some(Arc::new(bundle.hash.clone())));
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
@@ -465,7 +474,7 @@ tables:
         };
 
         store
-            .ensure(&bundle, &reqwest::Client::new())
+            .ensure(&bundle, &reqwest::Client::new(), &HashSet::new())
             .await
             .unwrap();
 
@@ -490,7 +499,7 @@ tables:
         };
 
         let err = store
-            .ensure(&bundle, &reqwest::Client::new())
+            .ensure(&bundle, &reqwest::Client::new(), &HashSet::new())
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
@@ -517,7 +526,7 @@ tables:
         };
 
         store
-            .ensure(&bundle, &reqwest::Client::new())
+            .ensure(&bundle, &reqwest::Client::new(), &HashSet::new())
             .await
             .unwrap();
 
@@ -550,6 +559,7 @@ tables:
                     url: url.clone(),
                 },
                 &reqwest::Client::new(),
+                &HashSet::new(),
             )
             .await
             .unwrap();
@@ -557,7 +567,11 @@ tables:
         // The one-shot server is spent, so a second fetch could only succeed from disk.
         let (restarted, registry) = store(&dir);
         restarted
-            .ensure(&SchemaBundle { hash, url }, &reqwest::Client::new())
+            .ensure(
+                &SchemaBundle { hash, url },
+                &reqwest::Client::new(),
+                &HashSet::new(),
+            )
             .await
             .unwrap();
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
@@ -584,7 +598,7 @@ tables:
             url: serve_once(archive).await,
         };
         store
-            .ensure(&bundle, &reqwest::Client::new())
+            .ensure(&bundle, &reqwest::Client::new(), &HashSet::new())
             .await
             .expect("the damaged copy is discarded and the bundle fetched again");
 
@@ -632,7 +646,7 @@ tables:
                 url: serve_once(archive).await,
             };
             store
-                .ensure(&bundle, &reqwest::Client::new())
+                .ensure(&bundle, &reqwest::Client::new(), &HashSet::new())
                 .await
                 .unwrap();
         }

@@ -307,7 +307,11 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
             anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
         })?;
-        self.schema_bundles.ensure(bundle, client).await?;
+        // The assignment in force is still the previous one until this update registers, so its
+        // schemas have to outlive the bundle swap.
+        self.schema_bundles
+            .ensure(bundle, client, &self.worker.active_schema_ids())
+            .await?;
 
         Ok(AssignmentBlob::Worker(
             super::assignments::fetch_worker_assignment(&update.fb_url_v1, client).await?,
@@ -341,7 +345,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     match update {
                         super::assignments::NetworkUpdate::Assignment(update) => Some(update),
                         super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                            if let Err(e) = self.schema_bundles.ensure(&bundle, &client).await {
+                            let in_use = self.worker.active_schema_ids();
+                            if let Err(e) =
+                                self.schema_bundles.ensure(&bundle, &client, &in_use).await
+                            {
                                 warn!(hash = %bundle.hash, error = ?e, "Failed to install schema bundle");
                             }
                             None

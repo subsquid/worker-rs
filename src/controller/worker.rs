@@ -77,7 +77,16 @@ impl Worker {
         id: impl Into<String>,
         key: &Keypair,
     ) -> bool {
-        self.state_manager.set_assignment(assignment, id, key)
+        self.state_manager
+            .set_assignment(assignment, id, key, |schema_id| {
+                self.query_schemas.get_by_id(schema_id).is_ok()
+            })
+    }
+
+    /// The write schemas the current assignment still relies on — schemas that must survive a
+    /// schema-bundle replacement.
+    pub fn active_schema_ids(&self) -> std::collections::HashSet<u32> {
+        self.state_manager.active_schema_ids()
     }
 
     /// Waits until the given assignment settles — fully applied or stalled.
@@ -254,10 +263,33 @@ impl Worker {
         output_format: OutputFormat,
     ) -> QueryResult {
         let dataset_type = experimental_engine::extract_dataset_type(query_str)?;
-        let schema = self.query_schemas.get(&dataset_type)?;
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk_id) else {
+        let Some(chunk) = self
+            .state_manager
+            .clone()
+            .get_query_chunk(dataset, chunk_id)
+        else {
             return Err(QueryError::NotFound);
+        };
+
+        // Prefer the schema the chunk's data was actually written with. The query's dataset type
+        // can't stand in for it: once a bundle carries several versions of one type, the type
+        // names a set rather than a schema, and picking by type would execute against whichever
+        // version happened to win the type-keyed slot.
+        let schema = match chunk.write_schema_id {
+            Some(schema_id) => {
+                let schema = self.query_schemas.get_by_id(schema_id)?;
+                if schema.name != dataset_type {
+                    return Err(QueryError::BadRequest(format!(
+                        "chunk was written with dataset type '{}' (schema {schema_id}), \
+                         but the query asks for '{dataset_type}'",
+                        schema.name
+                    )));
+                }
+                schema
+            }
+            // Legacy assignments pin no schema, so the query's type is all there is.
+            None => self.query_schemas.get(&dataset_type)?,
         };
 
         let query_str = query_str.to_owned();
@@ -266,7 +298,7 @@ impl Worker {
                 &query_str,
                 &schema,
                 block_range,
-                chunk_guard.as_str(),
+                chunk.path.as_str(),
                 output_format,
             )
         })

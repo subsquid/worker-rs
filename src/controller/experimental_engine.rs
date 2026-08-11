@@ -5,7 +5,7 @@
 //! [`run_schemas_refresh_loop`] (legacy assignments), or the network's schema bundle
 //! (worker assignments) — see `super::schema_bundle`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,11 +89,37 @@ impl QuerySchemaRegistry {
 
     /// Installs schemas from the network's schema bundle, indexed both ways.
     ///
+    /// Ids in `still_in_use` that the new bundle omits are carried over from the schemas already
+    /// loaded. A bundle is replaced wholesale, but the chunks on disk are not: dropping a schema
+    /// some live chunk was written with would break every query against it, so a bundle that
+    /// does so is honoured for everything else and complained about.
+    ///
     /// Where two ids name the same dataset type the highest id wins the type-keyed slot. That is
     /// a deterministic stand-in, not a correct answer — the query's type genuinely cannot pick
-    /// between two versions of a schema. It is the signal that the caller needs to resolve
-    /// through the chunk's `write_schema_id` via [`Self::get_by_id`].
-    pub fn store_bundle(&self, by_id: HashMap<u32, Arc<DatasetDescription>>) {
+    /// between two versions of a schema. Callers that can resolve a chunk's `write_schema_id`
+    /// should use [`Self::get_by_id`] instead.
+    pub fn store_bundle(
+        &self,
+        mut by_id: HashMap<u32, Arc<DatasetDescription>>,
+        still_in_use: &HashSet<u32>,
+    ) {
+        let loaded = self.schemas.load();
+        for &id in still_in_use {
+            if by_id.contains_key(&id) {
+                continue;
+            }
+            let Some(description) = loaded.by_id.get(&id) else {
+                continue;
+            };
+            tracing::warn!(
+                schema_id = id,
+                "Schema bundle no longer carries a schema the current assignment still uses; \
+                 keeping the loaded copy"
+            );
+            by_id.insert(id, description.clone());
+        }
+        drop(loaded);
+
         let mut by_type: HashMap<String, (u32, Arc<DatasetDescription>)> =
             HashMap::with_capacity(by_id.len());
         for (&id, description) in &by_id {
@@ -665,16 +691,57 @@ tables:
     #[test]
     fn bundle_schemas_are_reachable_by_id_and_by_type() {
         let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(HashMap::from([
-            (7, description("evm")),
-            (12, description("solana")),
-        ]));
+        registry.store_bundle(
+            HashMap::from([(7, description("evm")), (12, description("solana"))]),
+            &HashSet::new(),
+        );
 
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
         assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
         assert_eq!(registry.get("evm").unwrap().name, "evm");
         assert_eq!(registry.get("solana").unwrap().name, "solana");
         assert!(registry.get_by_id(9).is_err());
+    }
+
+    /// A bundle is replaced wholesale but the chunks on disk are not, so a schema some live
+    /// chunk was written with has to outlive a bundle that stopped carrying it — otherwise every
+    /// query against those chunks breaks the moment the bundle rolls forward.
+    #[test]
+    fn a_schema_still_in_use_survives_a_bundle_that_drops_it() {
+        let registry = QuerySchemaRegistry::default();
+        registry.store_bundle(
+            HashMap::from([(7, description("evm")), (12, description("solana"))]),
+            &HashSet::new(),
+        );
+
+        // The next bundle drops 7, but the active assignment still has chunks written with it.
+        registry.store_bundle(
+            HashMap::from([(12, description("solana"))]),
+            &HashSet::from([7]),
+        );
+
+        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
+        assert_eq!(registry.get("evm").unwrap().name, "evm");
+    }
+
+    /// Retention is scoped to what is in use, so a schema nothing references is not kept alive.
+    #[test]
+    fn a_schema_no_longer_in_use_is_dropped() {
+        let registry = QuerySchemaRegistry::default();
+        registry.store_bundle(
+            HashMap::from([(7, description("evm")), (12, description("solana"))]),
+            &HashSet::new(),
+        );
+
+        registry.store_bundle(
+            HashMap::from([(12, description("solana"))]),
+            &HashSet::from([12]),
+        );
+
+        assert!(registry.get_by_id(7).is_err());
+        assert!(registry.get("evm").is_err());
+        assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
     }
 
     /// Today a bundle carries one schema per type. When that stops being true the type-keyed
@@ -684,10 +751,10 @@ tables:
     #[test]
     fn several_schemas_for_one_type_stay_reachable_by_id() {
         let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(HashMap::from([
-            (7, description("evm")),
-            (9, description("evm")),
-        ]));
+        registry.store_bundle(
+            HashMap::from([(7, description("evm")), (9, description("evm"))]),
+            &HashSet::new(),
+        );
 
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
         assert_eq!(registry.get_by_id(9).unwrap().name, "evm");

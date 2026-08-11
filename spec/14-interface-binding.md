@@ -208,7 +208,16 @@ FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no
 list — each chunk names a `write_schema_id`, and the document's inline `schemas` roster
 maps that id to a sorted table list which the chunk's `tables_present` bitmap narrows.
 Files are then `dataset_base_url + chunk id + <table>.parquet`. A chunk whose
-`write_schema_id` has no roster makes the whole document inapplicable (WP-2).
+`write_schema_id` has no roster, or whose schema content is not in the loaded bundle,
+makes the whole document inapplicable (WP-2) — a partially applied assignment would
+leave the worker silently short of data it is believed to hold.
+
+`write_schema_id` also selects the schema a query is executed against: it is read out
+of the index in the same critical section that locks the chunk, so a schema id and
+chunk state can never be paired across an assignment change. The query's own dataset
+type is then only a cross-check — a disagreement is a typed `bad_request`. Under IB-41
+(legacy) there is no per-chunk schema and the query's dataset type selects it, which is
+sound only while one schema exists per type.
 
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against
