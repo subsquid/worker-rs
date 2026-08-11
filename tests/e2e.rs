@@ -175,3 +175,96 @@ async fn empty_slice_assigns_nothing() {
         "no chunk is assigned, so nothing may be fetched"
     );
 }
+
+/// The worker-oriented bindings end to end (IB-40b/41b/44b): the file list is derived from the
+/// assignment's inline schema roster rather than read from it, and the schema the query executes
+/// against comes from the chunk's `write_schema_id` rather than the query's dataset type.
+///
+/// Mirrors `smoke_assign_download_query_verify_logs` on the other format — the point is that
+/// nothing downstream of intake notices which one was served.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_format_assign_download_query() {
+    use harness::scheduler::Format;
+    use harness::Config;
+
+    let mut h = Harness::with_config(Config {
+        format: Format::Worker,
+        ..Config::default()
+    })
+    .await;
+
+    let chunk = corpus::chunk(2_000, 2_009, 1);
+    let placement = h.host_chunk(&chunk);
+    let assignment = h.publish_and_apply("assignment-1", &[placement]).await;
+
+    let status = h.status().await;
+    assert_eq!(status.assignment_id, assignment.id, "RP-21: applied id");
+    validators::status(&status, 1).assert_none("status after application");
+
+    h.await_all_chunks_available().await;
+
+    // The roster names `blocks` and `logs`, so exactly those two files are fetched — nothing
+    // in the document lists them.
+    for (name, _) in &chunk.files {
+        let served = h
+            .origin
+            .served_bytes(&chunk.id, name)
+            .unwrap_or_else(|| panic!("IB-41b: {name} was never derived from the roster"));
+        let on_disk = std::fs::read(h.chunk_dir(&chunk.id).join(name))
+            .unwrap_or_else(|e| panic!("committed chunk is missing {name}: {e}"));
+        assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
+    }
+
+    // The schemas came from the bundle, not the CDN manifest — that loop never ran.
+    let query = h.all_blocks_query(&chunk.id, (2_000, 2_009));
+    let served = h.serve(query.clone()).await;
+    let (response, _) = served.expect_admitted();
+    validators::query_response(response, &query, h.worker_id).assert_none("query response");
+
+    let query_result::Result::Ok(ok) = response.result.as_ref().unwrap() else {
+        panic!("expected a successful result, got {:?}", response.result);
+    };
+    let blocks: Vec<u64> = std::str::from_utf8(&ok.data)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["header"]["number"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(blocks, (2_000..=2_009).collect::<Vec<_>>(), "RP-12");
+}
+
+/// FM-53b: the schema bundle is a prerequisite, so an assignment whose bundle can't be fetched
+/// must not apply — the worker would otherwise hold chunks it cannot answer queries about.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_format_assignment_waits_for_its_schema_bundle() {
+    use harness::scheduler::{AssignmentFault, Format};
+    use harness::Config;
+
+    let mut h = Harness::with_config(Config {
+        format: Format::Worker,
+        ..Config::default()
+    })
+    .await;
+
+    let chunk = corpus::chunk(4_000, 4_009, 1);
+    let placement = h.host_chunk(&chunk);
+
+    h.scheduler.break_schema_bundle(503);
+    h.publish("assignment-1", &[placement], AssignmentFault::None);
+    assert!(
+        !h.poll_and_apply().await,
+        "FM-53b: the assignment must not apply without its schema bundle"
+    );
+    assert!(
+        h.status().await.assignment_id.is_empty(),
+        "nothing was applied, so no assignment id is reported"
+    );
+    assert_eq!(
+        h.origin.fetch_count(&chunk.id, "blocks.parquet"),
+        0,
+        "no chunk may be fetched for an assignment that never applied"
+    );
+}

@@ -143,7 +143,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-2 | CT-1/2 | P | smoke drives fetch→commit and compares committed bytes against HC-2's ledger; atomicity under interruption still untested (needs HC-7) |
 | REQ-3 | CT-1/3 | P | set-algebra bookkeeping unit-tested; no eviction-under-load test |
 | REQ-4 | CT-1 | P | last_block semantics unit-tested per engine; resumption equivalence untested |
-| REQ-10 | CT-4 | P | happy-path intake driven end-to-end (IB-40 poll → IB-41 fetch → WP-2 apply); the controller's pending queue is outside the harness, and the fault corpus is unwritten |
+| REQ-10 | CT-4 | P | happy-path intake driven end-to-end in both formats (IB-40 poll → IB-41 fetch → WP-2 apply, and IB-40b → IB-44b bundle → IB-41b fetch → WP-2); the controller's pending queue is outside the harness, and the fault corpus is unwritten |
 | REQ-11 | CT-3 | U⊘ | coherence known-violated (GAP-11) |
 | REQ-12 | CT-5 | P | ordering/pagination/cleanup unit-tested in memory; smoke adds a file-backed write-then-read with the RP-22 lag observed; durability across restart untested (HC-7) |
 | REQ-13 | CT-5 | P⊘ | the running-query gauge is now CT-6-checked (rises under load, bounded by the cap, returns to zero); the GAP-17 liars remain |
@@ -305,7 +305,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) plus an unfetchable bundle (FM-53b) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

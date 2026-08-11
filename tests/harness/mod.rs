@@ -27,6 +27,7 @@ use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLim
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, QuerySchemaRegistry};
 use sqd_worker::controller::p2p;
+use sqd_worker::controller::schema_bundle::SchemaBundleStore;
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::datasets_index::AssignmentBlob;
@@ -44,7 +45,7 @@ pub mod validators;
 use origin::Origin;
 use portal::Portal;
 use registry::Registry;
-use scheduler::{Assignment, AssignmentFault, ChunkPlacement, Scheduler};
+use scheduler::{Assignment, AssignmentFault, ChunkPlacement, Format, Scheduler};
 use seed::{Seed, SeedReporter};
 use stub::HttpStub;
 
@@ -111,7 +112,9 @@ pub struct Harness {
     pub worker_id: PeerId,
 
     keypair: Keypair,
+    format: Format,
     schemas: Arc<QuerySchemaRegistry>,
+    schema_bundles: Arc<SchemaBundleStore>,
     schema_stub: HttpStub,
     assignment_stream: std::pin::Pin<Box<dyn futures::Stream<Item = assignments::NetworkUpdate>>>,
     assignment_client: reqwest::Client,
@@ -129,6 +132,8 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
+    /// Which input-side bindings the scheduler serves and the worker reads.
+    pub format: Format,
 }
 
 impl Default for Config {
@@ -141,6 +146,7 @@ impl Default for Config {
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
+            format: Format::Legacy,
         }
     }
 }
@@ -161,7 +167,7 @@ impl Harness {
         let mut portal_rng = seed.stream("portal-identity");
         let portal = Portal::new(&mut portal_rng);
 
-        let scheduler = Scheduler::start(seed.stream("assignment-builder")).await;
+        let scheduler = Scheduler::start(seed.stream("assignment-builder"), config.format).await;
         let origin = Origin::start().await;
         let registry = Registry::new(&[portal.peer_id()], config.compute_units);
 
@@ -209,16 +215,24 @@ impl Harness {
             .await
             .expect("log store opens");
 
+        let schema_bundles = Arc::new(SchemaBundleStore::new(
+            data_path.join("schemas"),
+            schemas.clone(),
+        ));
+
         let shutdown = CancellationToken::new();
         spawn_subsystems(
             &worker,
             &allocations,
-            &schemas,
-            schema_stub.url(SCHEMA_MANIFEST_PATH),
+            // In worker format the bundle is the only schema source, so the CDN loop must not
+            // run — the two would overwrite each other's registry contents (IB-44 / IB-44b).
+            (config.format == Format::Legacy)
+                .then(|| (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH))),
             worker_id,
             shutdown.clone(),
         );
 
+        let installed_hash = schema_bundles.clone();
         let assignment_stream = Box::pin(assignments::new_assignments_stream(
             scheduler.network_state_url(),
             // The production 60 s poll would dominate every test's wall clock.
@@ -226,10 +240,8 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
-            // The harness's scheduler stub publishes the legacy format, which has no schema
-            // bundle — so nothing here ever reports one.
-            false,
-            || None,
+            config.format == Format::Worker,
+            move || installed_hash.installed_hash(),
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
@@ -245,7 +257,9 @@ impl Harness {
             logs,
             worker_id,
             keypair,
+            format: config.format,
             schemas,
+            schema_bundles,
             schema_stub,
             assignment_stream,
             assignment_client,
@@ -253,7 +267,11 @@ impl Harness {
             data_dir,
             _reporter: reporter,
         };
-        harness.await_schemas_loaded().await;
+        // Worker format has no schema source until the first assignment arrives carrying its
+        // bundle, so there is nothing to wait for here.
+        if harness.format == Format::Legacy {
+            harness.await_schemas_loaded().await;
+        }
         harness.await_metering_ready().await;
         harness
     }
@@ -296,22 +314,74 @@ impl Harness {
     /// Waits for the next network-state change, fetches the document and applies it.
     /// Returns what `register_assignment` reported (WP-2: a failed application changes nothing).
     pub async fn poll_and_apply(&mut self) -> bool {
-        let update = tokio::time::timeout(CONVERGE_TIMEOUT, self.assignment_stream.next())
-            .await
-            .expect("HC-1 published an assignment within the convergence timeout")
-            .expect("assignment stream is still open");
-        let assignments::NetworkUpdate::Assignment(update) = update else {
-            panic!("the legacy scheduler stub never publishes a schema bundle");
+        let update = loop {
+            let update = tokio::time::timeout(CONVERGE_TIMEOUT, self.assignment_stream.next())
+                .await
+                .expect("HC-1 published an assignment within the convergence timeout")
+                .expect("assignment stream is still open");
+            match update {
+                assignments::NetworkUpdate::Assignment(update) => break update,
+                // A bundle that moved without the assignment: install it and keep waiting, as
+                // the production loop does.
+                assignments::NetworkUpdate::SchemaBundle(bundle) => {
+                    self.install_schema_bundle(&bundle)
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "schema bundle {} could not be installed: {e:?}",
+                                bundle.hash
+                            )
+                        });
+                }
+            }
         };
 
-        let document =
-            assignments::fetch_assignment(&update.fb_url_v1, &self.assignment_client).await;
-        let document = match document {
-            Ok(document) => document,
-            Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
+        let blob = match self.format {
+            Format::Legacy => {
+                match assignments::fetch_assignment(&update.fb_url_v1, &self.assignment_client)
+                    .await
+                {
+                    Ok(document) => AssignmentBlob::Legacy(document),
+                    Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
+                }
+            }
+            Format::Worker => {
+                // IB-44b: the bundle is a prerequisite, installed before the assignment it
+                // accompanies. A failure here must leave the assignment unapplied (FM-53b).
+                let bundle = update
+                    .schema_bundle
+                    .as_ref()
+                    .expect("worker format publishes a bundle alongside the assignment");
+                if let Err(e) = self.install_schema_bundle(bundle).await {
+                    tracing::warn!("schema bundle could not be installed: {e:?}");
+                    return false;
+                }
+                match assignments::fetch_worker_assignment(
+                    &update.fb_url_v1,
+                    &self.assignment_client,
+                )
+                .await
+                {
+                    Ok(document) => AssignmentBlob::Worker(document),
+                    Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
+                }
+            }
         };
         self.worker
-            .register_assignment(AssignmentBlob::Legacy(document), update.id, &self.keypair)
+            .register_assignment(blob, update.id, &self.keypair)
+    }
+
+    async fn install_schema_bundle(
+        &self,
+        bundle: &sqd_assignments::SchemaBundle,
+    ) -> anyhow::Result<()> {
+        self.schema_bundles
+            .ensure(
+                bundle,
+                &self.assignment_client,
+                &self.worker.active_schema_ids(),
+            )
+            .await
     }
 
     /// Blocks until every assigned chunk is locally available (LIV-1 convergence).
@@ -516,11 +586,12 @@ impl Drop for Harness {
     }
 }
 
+/// `cdn_schemas` is `None` in worker format, where the schema bundle supersedes the CDN
+/// manifest and the refresh loop must not run.
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    schemas: &Arc<QuerySchemaRegistry>,
-    manifest_url: String,
+    cdn_schemas: Option<(Arc<QuerySchemaRegistry>, String)>,
     worker_id: PeerId,
     shutdown: CancellationToken,
 ) {
@@ -532,17 +603,18 @@ fn spawn_subsystems(
     let alloc_token = shutdown.clone();
     tokio::spawn(async move { alloc.run(alloc_token).await });
 
-    let registry = schemas.clone();
-    tokio::spawn(async move {
-        run_schemas_refresh_loop(
-            registry,
-            manifest_url,
-            Duration::from_secs(3600),
-            worker_id,
-            shutdown,
-        )
-        .await
-    });
+    if let Some((registry, manifest_url)) = cdn_schemas {
+        tokio::spawn(async move {
+            run_schemas_refresh_loop(
+                registry,
+                manifest_url,
+                Duration::from_secs(3600),
+                worker_id,
+                shutdown,
+            )
+            .await
+        });
+    }
 }
 
 fn build_args(
@@ -573,6 +645,12 @@ fn build_args(
         "http://127.0.0.1:1/unused",
         "--l1-rpc-url",
         "http://127.0.0.1:1/unused",
+        "--use-worker-assignments",
+        if config.format == Format::Worker {
+            "true"
+        } else {
+            "false"
+        },
     ]);
 
     // Positional/env-only settings (IB-32) have no flag to pass; set them directly.

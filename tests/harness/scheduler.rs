@@ -6,7 +6,8 @@
 
 use std::io::Write;
 
-use sqd_assignments::{AssignmentBuilder, WorkerStatus};
+use sha2::{Digest, Sha256};
+use sqd_assignments::{AssignmentBuilder, WorkerAssignmentBuilder, WorkerStatus};
 use sqd_network_transport::PeerId;
 
 use super::corpus::Chunk;
@@ -14,7 +15,23 @@ use super::seed::SplitMix64;
 use super::stub::{Fault, HttpStub};
 
 const NETWORK_STATE_PATH: &str = "/network-state.json";
+const SCHEMA_BUNDLE_PATH: &str = "/schema-bundle.tar.gz";
 const STORAGE_SECRET: &str = "conformance-storage-secret";
+
+/// The write schema every corpus chunk is pinned to in worker format. Its roster must name
+/// exactly the corpus chunk's files minus `.parquet` — that is what the worker derives the
+/// download list from (IB-41b).
+pub const WRITE_SCHEMA_ID: u32 = 7;
+const WRITE_SCHEMA_TABLES: [&str; 2] = ["blocks", "logs"];
+
+/// Which input-side bindings the simulator serves: the legacy shared assignment (IB-40/41) or
+/// the worker-oriented pair plus its schema bundle (IB-40b/41b/44b).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Format {
+    #[default]
+    Legacy,
+    Worker,
+}
 
 /// How an assignment deviates from well-formed. One knob per registered fault so a test
 /// names the defect it is provoking (spec/13 CT-4).
@@ -56,15 +73,34 @@ pub struct Scheduler {
     stub: HttpStub,
     rng: SplitMix64,
     published: Option<String>,
+    format: Format,
+    /// `sha256:<hex>` of the served bundle. Only in worker format.
+    bundle_hash: Option<String>,
 }
 
 impl Scheduler {
-    pub async fn start(rng: SplitMix64) -> Self {
+    pub async fn start(rng: SplitMix64, format: Format) -> Self {
+        let stub = HttpStub::start().await;
+        // In worker format the bundle is the only source of query schemas, so it has to be
+        // serveable before the first assignment points at it.
+        let bundle_hash = (format == Format::Worker).then(|| {
+            let archive = schema_bundle(&[(WRITE_SCHEMA_ID, super::corpus::SCHEMA_YAML)]);
+            let hash = format!("sha256:{:x}", Sha256::digest(&archive));
+            stub.put(SCHEMA_BUNDLE_PATH, archive);
+            hash
+        });
         Self {
-            stub: HttpStub::start().await,
+            stub,
             rng,
             published: None,
+            format,
+            bundle_hash,
         }
+    }
+
+    /// Makes the schema bundle unfetchable — FM-53b's "the assignment must not apply without it".
+    pub fn break_schema_bundle(&self, status: u16) {
+        self.stub.inject(SCHEMA_BUNDLE_PATH, Fault::Status(status));
     }
 
     /// The `--assignment-url` the worker under test should be pointed at.
@@ -104,7 +140,10 @@ impl Scheduler {
         placements: &[ChunkPlacement],
         fault: AssignmentFault,
     ) -> Assignment {
-        let doc = self.build_document(worker, placements, fault);
+        let doc = match self.format {
+            Format::Legacy => self.build_document(worker, placements, fault),
+            Format::Worker => self.build_worker_document(worker, placements, fault),
+        };
         let path = format!("/assignments/{id}.fb.gz");
 
         let gz = gzip(&doc);
@@ -115,14 +154,25 @@ impl Scheduler {
         };
         self.stub.put(path.clone(), body);
 
-        let state = serde_json::json!({
-            "network": "conformance",
-            "assignment": {
-                "id": id,
-                "fb_url_v1": self.stub.url(&path),
-                "effective_from": 0,
-            }
+        let pointer = serde_json::json!({
+            "id": id,
+            "fb_url_v1": self.stub.url(&path),
+            "effective_from": 0,
         });
+        let state = match self.format {
+            Format::Legacy => serde_json::json!({
+                "network": "conformance",
+                "assignment": pointer,
+            }),
+            Format::Worker => serde_json::json!({
+                "network": "conformance",
+                "worker_assignment": pointer,
+                "schema_bundle": {
+                    "hash": self.bundle_hash.as_deref().expect("worker format publishes a bundle"),
+                    "url": self.stub.url(SCHEMA_BUNDLE_PATH),
+                },
+            }),
+        };
         self.stub
             .put(NETWORK_STATE_PATH, serde_json::to_vec(&state).unwrap());
         self.published = Some(id.to_owned());
@@ -190,6 +240,65 @@ impl Scheduler {
 
         builder.finish()
     }
+
+    /// The worker-oriented document (IB-41b): no per-chunk file list — every chunk pins
+    /// [`WRITE_SCHEMA_ID`], whose inline roster the worker derives `<table>.parquet` from.
+    fn build_worker_document(
+        &mut self,
+        worker: PeerId,
+        placements: &[ChunkPlacement],
+        fault: AssignmentFault,
+    ) -> Vec<u8> {
+        let mut builder = WorkerAssignmentBuilder::new_with_rng(STORAGE_SECRET, self.rng.clone())
+            .check_continuity(false);
+        builder
+            .register_write_schema(WRITE_SCHEMA_ID, &WRITE_SCHEMA_TABLES)
+            .expect("roster is sorted");
+
+        for placement in placements {
+            let base_url = if fault == AssignmentFault::UnparseableFileUrl {
+                "not a url"
+            } else {
+                &placement.dataset_base_url
+            };
+            let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
+            builder
+                .new_chunk()
+                .id(&placement.chunk_id)
+                .dataset_id(&placement.dataset_id)
+                .dataset_base_url(base_url)
+                .block_range(placement.first_block..=placement.last_block)
+                .size(placement.size)
+                .write_schema_id(WRITE_SCHEMA_ID)
+                .worker_indexes(if assigned { &[0] } else { &[] })
+                .finish()
+                .expect("chunk is well-formed");
+        }
+        builder.finish_dataset();
+        builder.add_worker_with_timestamp(worker, WorkerStatus::Ok, 1_700_000_000);
+
+        builder.finish()
+    }
+}
+
+/// A gzipped tar of `<schema_id>.yaml` at the archive root — the layout IB-44b specifies.
+fn schema_bundle(schemas: &[(u32, &str)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (id, yaml) in schemas {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(yaml.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, format!("{id}.yaml"), yaml.as_bytes())
+            .expect("tar entry is well-formed");
+    }
+    tar.into_inner()
+        .expect("tar finish")
+        .finish()
+        .expect("gzip finish")
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {
