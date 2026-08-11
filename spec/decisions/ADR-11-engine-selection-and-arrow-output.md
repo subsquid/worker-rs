@@ -18,8 +18,11 @@ engine; DYNAMIC → the schema-driven engine) and `output_format` (JSONL; ARROW_
 legal only with DYNAMIC). Protobuf's zero-default makes old clients land on
 legacy+JSONL automatically. Both enums are covered by the query signature. Arrow-level
 compression stays off — the worker compresses the whole response. Gating is
-portal-driven: no worker-side flag disables the dynamic engine; the schema registry
-(CDN manifest, hourly refresh, keep-previous-on-failure) is the operational gate.
+portal-driven: no worker-side flag disables the dynamic engine; the schema registry is
+the operational gate. Which registry depends on the assignment format: the CDN manifest
+(hourly refresh, keep-previous-on-failure) in legacy mode, or the network state's schema
+bundle under `USE_WORKER_ASSIGNMENTS` (IB-44b), where a bundle that fails to install
+blocks the assignment rather than degrading (FM-53b).
 
 ## Consequences
 

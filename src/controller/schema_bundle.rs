@@ -18,6 +18,7 @@ use sqd_assignments::SchemaBundle;
 use sqd_query_engine::metadata::DatasetDescription;
 
 use super::experimental_engine::QuerySchemaRegistry;
+use crate::metrics;
 
 /// Caps both the download and the unpacked total. Published bundles are tens of kilobytes of
 /// YAML; this exists only so a corrupt or hostile archive can't fill the data directory. The
@@ -39,9 +40,23 @@ pub struct SchemaBundleStore {
 }
 
 impl SchemaBundleStore {
+    /// Sweeps staging directories a crashed unpack left behind. Nothing else would:
+    /// [`Self::prune`] only runs after a successful install, which may never come — a worker
+    /// running legacy assignments never installs a bundle at all.
+    ///
+    /// Only `temp-*` goes. An unpacked `sha256-*` is not garbage: it is very likely the bundle
+    /// this run is about to reuse, and removing it here would turn every restart into a
+    /// re-download. Superseded ones are pruned by the first successful install instead.
     pub fn new(dir: impl Into<Utf8PathBuf>, registry: Arc<QuerySchemaRegistry>) -> Self {
+        let dir = dir.into();
+        // Blocking, but this is startup and the directory holds a handful of small files — the
+        // same trade-off `StateManager::new` makes with `remove_temps`.
+        let swept = remove_bundle_dirs(&dir, &[TEMP_PREFIX], None);
+        if swept > 0 {
+            tracing::debug!(swept, "Removed staging directories left by an earlier run");
+        }
         Self {
-            dir: dir.into(),
+            dir,
             registry,
             installed_hash: ArcSwapOption::empty(),
         }
@@ -62,6 +77,16 @@ impl SchemaBundleStore {
         bundle: &SchemaBundle,
         client: &reqwest::Client,
     ) -> anyhow::Result<()> {
+        match self.install(bundle, client).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                metrics::SCHEMA_BUNDLE_FAILURES.inc();
+                Err(e)
+            }
+        }
+    }
+
+    async fn install(&self, bundle: &SchemaBundle, client: &reqwest::Client) -> anyhow::Result<()> {
         let hex = parse_sha256(&bundle.hash)?;
 
         if self.installed_hash().as_deref() == Some(bundle.hash.as_str()) {
@@ -70,26 +95,57 @@ impl SchemaBundleStore {
         }
 
         let dir = self.dir.join(format!("{UNPACKED_PREFIX}{hex}"));
-        if !dir.exists() {
-            let bytes = download(&bundle.url, client)
-                .await
-                .with_context(|| format!("couldn't download schema bundle from {}", bundle.url))?;
-            verify_sha256(&bytes, hex)?;
-            unpack(bytes, self.dir.clone(), dir.clone())
-                .await
-                .context("couldn't unpack schema bundle")?;
-        }
+        let schemas = match self.load_unpacked(&dir).await {
+            Some(schemas) => schemas,
+            None => {
+                let bytes = download(&bundle.url, client).await.with_context(|| {
+                    format!("couldn't download schema bundle from {}", bundle.url)
+                })?;
+                verify_sha256(&bytes, hex)?;
+                unpack(bytes, self.dir.clone(), dir.clone())
+                    .await
+                    .context("couldn't unpack schema bundle")?;
+                load_dir(dir.clone())
+                    .await
+                    .with_context(|| format!("couldn't load schema bundle from {dir}"))?
+            }
+        };
 
-        let schemas = load_dir(dir.clone())
-            .await
-            .with_context(|| format!("couldn't load schema bundle from {dir}"))?;
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
         self.registry.store_bundle(schemas);
         self.installed_hash
             .store(Some(Arc::new(bundle.hash.clone())));
+        metrics::SCHEMA_BUNDLE_LOADED.set(1);
 
         self.prune(dir).await;
         Ok(())
+    }
+
+    /// Reads back a bundle an earlier run unpacked, or `None` if there isn't a usable one.
+    ///
+    /// A directory that exists but won't load is discarded rather than treated as fatal. The
+    /// unpack is atomic, so this means damage after the fact — a [`Self::prune`] that failed
+    /// partway, say. Without this the hash-named directory would suppress the re-download that
+    /// would fix it, and in worker-assignment mode a bundle that never installs blocks every
+    /// assignment: the worker would wedge permanently on a state it can't recover from.
+    async fn load_unpacked(&self, dir: &Utf8Path) -> Option<HashMap<u32, Arc<DatasetDescription>>> {
+        if !dir.exists() {
+            return None;
+        }
+        match load_dir(dir.to_owned()).await {
+            Ok(schemas) => Some(schemas),
+            Err(e) => {
+                tracing::warn!(
+                    %dir,
+                    error = ?e,
+                    "Unpacked schema bundle is unusable; discarding it and fetching again"
+                );
+                if let Err(e) = tokio::fs::remove_dir_all(dir).await {
+                    tracing::warn!(%dir, error = %e, "Couldn't remove the unusable schema bundle");
+                }
+                None
+            }
+        }
     }
 
     /// Removes every unpacked or half-unpacked bundle other than `keep`. Best-effort: a stale
@@ -97,27 +153,7 @@ impl SchemaBundleStore {
     async fn prune(&self, keep: Utf8PathBuf) {
         let dir = self.dir.clone();
         let removed = tokio::task::spawn_blocking(move || {
-            let mut removed = 0usize;
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                return removed;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if !name.starts_with(UNPACKED_PREFIX) && !name.starts_with(TEMP_PREFIX) {
-                    continue;
-                }
-                if path == keep.as_std_path() {
-                    continue;
-                }
-                match std::fs::remove_dir_all(&path) {
-                    Ok(()) => removed += 1,
-                    Err(e) => tracing::warn!(path = %path.display(), error = %e, "Couldn't remove stale schema bundle"),
-                }
-            }
-            removed
+            remove_bundle_dirs(&dir, &[UNPACKED_PREFIX, TEMP_PREFIX], Some(&keep))
         })
         .await
         .unwrap_or(0);
@@ -125,6 +161,35 @@ impl SchemaBundleStore {
             tracing::debug!(removed, "Pruned stale schema bundles");
         }
     }
+}
+
+/// Removes every directory under `dir` whose name starts with one of `prefixes`, except `keep`,
+/// returning how many went. Failures are logged rather than propagated: a leftover directory
+/// costs a few kilobytes and the next successful install sweeps it.
+fn remove_bundle_dirs(dir: &Utf8Path, prefixes: &[&str], keep: Option<&Utf8Path>) -> usize {
+    let mut removed = 0usize;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        if keep.is_some_and(|keep| path == keep.as_std_path()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Couldn't remove stale schema bundle")
+            }
+        }
+    }
+    removed
 }
 
 /// Splits `algorithm:hex`, accepting only sha256. Unknown algorithms are rejected rather than
@@ -496,6 +561,63 @@ tables:
             .await
             .unwrap();
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+    }
+
+    /// A hash-named directory is normally taken as proof the content is good, which is what
+    /// makes restarts cheap. If it has been damaged since (a prune that failed partway), that
+    /// shortcut would otherwise suppress the very download that fixes it — and because a bundle
+    /// that never installs blocks every assignment, the worker would wedge with no way back.
+    #[tokio::test]
+    async fn recovers_from_an_unusable_unpacked_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, registry) = store(&dir);
+        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        let hash = sha256_of(&archive);
+
+        // Leave behind an empty directory under the hash this bundle will resolve to.
+        let hex = hash.strip_prefix("sha256:").unwrap();
+        let damaged = dir.path().join(format!("{UNPACKED_PREFIX}{hex}"));
+        std::fs::create_dir_all(&damaged).unwrap();
+
+        let bundle = SchemaBundle {
+            hash,
+            url: serve_once(archive).await,
+        };
+        store
+            .ensure(&bundle, &reqwest::Client::new())
+            .await
+            .expect("the damaged copy is discarded and the bundle fetched again");
+
+        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(
+            store.installed_hash().as_deref(),
+            Some(bundle.hash.as_str())
+        );
+    }
+
+    /// Nothing else removes a staging directory a crashed unpack left behind: `prune` only runs
+    /// after a successful install, which may never come (legacy mode never installs a bundle).
+    ///
+    /// An unpacked bundle must survive though — it is what makes a restart cheap.
+    #[test]
+    fn construction_sweeps_staging_directories_but_keeps_unpacked_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let hex = "a".repeat(64);
+        let unpacked = format!("{UNPACKED_PREFIX}{hex}");
+        std::fs::create_dir_all(dir.path().join(format!("{TEMP_PREFIX}{unpacked}"))).unwrap();
+        std::fs::create_dir_all(dir.path().join(&unpacked)).unwrap();
+        // Anything the store didn't write is left alone.
+        std::fs::write(dir.path().join("unrelated"), b"keep me").unwrap();
+
+        let _ = store(&dir);
+
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [unpacked, "unrelated".to_owned()]);
     }
 
     #[tokio::test]

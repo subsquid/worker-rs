@@ -55,8 +55,26 @@ The worker is configured through command-line flags or the equivalent environmen
 | `--concurrent-downloads` | `CONCURRENT_DOWNLOADS` | `3` | Maximum number of concurrent chunk downloads |
 | `--query-threads` | `QUERY_THREADS` | (CPU count) | Threads used by the query engine |
 | `--assignment-url` | `ASSIGNMENT_URL` | network-dependent | URL of the chunk assignment / network state |
+| `--use-worker-assignments` | `USE_WORKER_ASSIGNMENTS` | `false` | Read the worker-oriented assignment instead of the legacy one (see below) |
 
 Network selection and boot nodes come from the transport arguments (see `--help`). When the network is set to `mainnet` or `tethys`, default boot nodes and the assignment URL are filled in automatically.
+
+### Worker-oriented assignments
+
+With `--use-worker-assignments`, the worker reads the network state's `worker_assignment`
+pointer instead of the legacy shared `assignment`, and ignores the legacy one entirely — there is
+no fallback if `worker_assignment` is absent. This changes three things:
+
+- **Chunk contents** come from the assignment's inline write-schema rosters, narrowed by each
+  chunk's `tables_present` bitmap, rather than from a per-chunk file list.
+- **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
+  `<schema_id>.yaml`, verified against its `sha256:` hash and unpacked under
+  `<data-dir>/schemas/`) rather than from `--query-schemas-url`. That CDN manifest is not polled
+  at all in this mode. A bundle that fails to install blocks the assignment it came with.
+- **Assignments are applied strictly in order**, each waiting for the previous one to settle,
+  instead of immediately on arrival.
+
+The flag is off by default; leaving it off preserves the previous behaviour exactly.
 
 Run `sqd-worker --help` for the full list of options.
 

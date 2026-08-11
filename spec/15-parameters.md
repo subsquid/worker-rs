@@ -67,7 +67,7 @@ batch unless stated).
 | P-LOGS-RESP-MAX | log response page budget (RP-22) | 10 MiB − 100 KiB (margin unexplained — OQ-2) | derive from P-LOGS-RESP-CEIL ⚠ |
 | P-LOGS-RESP-CEIL | transport ceiling for log/status responses (IB-2) | 10 MiB | same |
 | P-LOGS-QUEUE | log-read queue depth (RP-22) | 4 | same |
-| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44) | 3 600 s | same |
+| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44); inert under `USE_WORKER_ASSIGNMENTS`, where schemas arrive with the network state (IB-44b) | 3 600 s | same |
 
 ## Lifecycle and reconciliation bounds
 

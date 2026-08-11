@@ -55,6 +55,12 @@ lazy_static::lazy_static! {
     pub static ref CHUNKS_REMOVED: Counter = Default::default();
     pub static ref STORED_BYTES: Gauge = Default::default();
 
+    /// 1 once a schema bundle is installed. In worker-assignment mode a bundle that never
+    /// installs blocks every assignment, and no other metric moves when that happens — the chunk
+    /// gauges simply freeze, which is indistinguishable from a quiet network.
+    pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
+    pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
+
     static ref QUERY_EXECUTED: Family<QueryExecutedLabels, Counter> = Default::default();
     static ref QUERY_RESULT_SIZE: Histogram = Histogram::new(std::iter::empty());
     static ref READ_CHUNKS: Histogram = Histogram::new(std::iter::empty());
@@ -142,6 +148,16 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "Total bytes stored in the data directory",
         Unit::Bytes,
         STORED_BYTES.clone(),
+    );
+    registry.register(
+        "schema_bundle_loaded",
+        "Whether a schema bundle is currently installed",
+        SCHEMA_BUNDLE_LOADED.clone(),
+    );
+    registry.register(
+        "schema_bundle_failures",
+        "Number of times a schema bundle failed to install",
+        SCHEMA_BUNDLE_FAILURES.clone(),
     );
 
     registry.register(

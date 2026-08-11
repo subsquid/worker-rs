@@ -131,8 +131,11 @@ GET only: `/worker/status` → JSON `{"state":{"available":n,"downloading":n}}` 
 `chunks_downloaded/failed_download/removed` counters (OB-4), `used_storage_bytes`
 (OB-5), `running_queries` (OB-6), `num_queries_executed{status}` (OB-7),
 `query_result_size_bytes` (OB-8), `worker_status{worker_status}` (OB-12 assessed-state
-component), `worker_info_info{version}`. Signals OB-9/10/11/13 and the missing OB-4/7
-breakdowns have no binding yet — GAP-17/GAP-23 track the additions.
+component), `worker_info_info{version}`, `schema_bundle_loaded` /
+`schema_bundle_failures` (IB-44b — whether a bundle is installed, and how often one
+failed to install; a worker blocked on a broken bundle moves no other metric). Signals
+OB-9/10/11/13 and the missing OB-4/7 breakdowns have no binding yet — GAP-17/GAP-23
+track the additions.
 
 **IB-32 — Configuration surface.** Flags/env (defaults live in the registry):
 
@@ -150,7 +153,8 @@ breakdowns have no binding yet — GAP-17/GAP-23 track the additions.
 | (positional) | `DOWNLOADS_MAX_DELAY_SEC` | P-DL-BACKOFF-MAX |
 | (positional) | `ASSIGNMENT_CHECK_INTERVAL_SEC` / `ASSIGNMENT_FETCH_TIMEOUT_SEC` / `ASSIGNMENT_CHECK_MAX_DELAY_SEC` | P-ASSIGN-POLL / P-ASSIGN-FETCH-TIMEOUT / P-ASSIGN-RETRY-MAX |
 | (positional) | `NETWORK_POLLING_INTERVAL_SEC` | P-EPOCH-POLL |
-| `--query-schemas-url` (+ refresh env) | `QUERY_SCHEMAS_URL` | schema registry address / P-SCHEMA-REFRESH |
+| `--query-schemas-url` (+ refresh env) | `QUERY_SCHEMAS_URL` | schema registry address / P-SCHEMA-REFRESH (legacy mode only — IB-44) |
+| (positional) | `USE_WORKER_ASSIGNMENTS` | selects the input-side bindings: IB-40b/41b/44b instead of IB-40/41/44 |
 | `--rpc-url`, `--l1-rpc-url`, `--network`, contract addresses | `RPC_URL` … | chain registry |
 | (positional) | `SENTRY_DSN` / `SENTRY_IS_ENABLED` | crash telemetry (on by default) |
 
@@ -160,7 +164,10 @@ Duration settings parse as whole seconds. Misconfiguration behavior is FM-50.
 
 **IB-40 — Network-state document.** HTTPS GET at the assignment URL returning JSON
 `{network, assignment: {id, fb_url_v1, effective_from, …}}`; `effective_from` is
-currently ignored by the worker (OQ-8). HC-1 serves this.
+currently ignored by the worker (OQ-8). `assignment` is optional — a network that has
+finished migrating stops publishing it, and its absence yields no update rather than an
+error. HC-1 serves this. Under `USE_WORKER_ASSIGNMENTS` this binding is replaced by
+IB-40b.
 
 **IB-41 — Assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
 FlatBuffers document — dataset table (ids, base addresses), per-dataset chunk tables
@@ -168,7 +175,8 @@ FlatBuffers document — dataset table (ids, base addresses), per-dataset chunk 
 worker-index lists — the live chunk→worker mapping), worker roster (peer ids, assessed
 state, encrypted HTTP headers per worker; the roster-side chunk list is deprecated;
 encryption is crypto-box against the worker's identity key). HC-1 must be able to emit
-well-formed and deliberately malformed instances (FM-11/12 corpus).
+well-formed and deliberately malformed instances (FM-11/12 corpus). Under
+`USE_WORKER_ASSIGNMENTS` this binding is replaced by IB-41b.
 
 **IB-42 — Data origin.** Plain HTTPS GET per file at
 `join(dataset_base, chunk_base, file_url)` with the decrypted headers attached;
@@ -180,4 +188,32 @@ and per-operator CU allocations polled every P-EPOCH-POLL. HC-8 stubs these.
 
 **IB-44 — Schema registry.** HTTPS GET YAML manifest mapping dataset types to schema
 documents, refreshed every P-SCHEMA-REFRESH with unchanged-body short-circuit; fetch
-failure keeps previous schemas (FM-53).
+failure keeps previous schemas (FM-53). Legacy mode only: under `USE_WORKER_ASSIGNMENTS`
+the manifest is not polled at all and schemas come from IB-44b.
+
+### Worker-oriented input bindings (`USE_WORKER_ASSIGNMENTS`)
+
+These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are unchanged.
+
+**IB-40b — Network-state document.** Same address as IB-40, but the worker reads
+`worker_assignment: {id, fb_url_v1, effective_from}` and `schema_bundle: {hash, url}`;
+the legacy `assignment` key is ignored and never falls back to. Every key is optional —
+a network mid-migration may publish either, both, or neither — and a state without
+`worker_assignment` yields no update. The two are versioned independently: either can
+change without the other, and the bundle is deduplicated against what the worker has
+installed, not against what it last saw.
+
+**IB-41b — Worker assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
+FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no file
+list — each chunk names a `write_schema_id`, and the document's inline `schemas` roster
+maps that id to a sorted table list which the chunk's `tables_present` bitmap narrows.
+Files are then `dataset_base_url + chunk id + <table>.parquet`. A chunk whose
+`write_schema_id` has no roster makes the whole document inapplicable (WP-2).
+
+**IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
+`<schema_id>.yaml` query-engine schemas at the archive root, verified against
+`schema_bundle.hash` (`sha256:<hex>`) before use and unpacked under `<data-dir>/schemas/`
+keyed by that hash, so a restart reloads rather than re-downloads. Entries that are not
+root-level `<id>.yaml` are ignored. It is fetched *before* the assignment it accompanies
+and is a hard prerequisite for it (FM-53b). HC-1 must be able to emit well-formed and
+deliberately malformed bundles.
