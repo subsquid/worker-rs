@@ -1,9 +1,10 @@
 //! The network's schema bundle: a gzipped tar of `<schema_id>.yaml` query-engine schemas,
 //! published alongside the assignments that reference those ids.
 //!
-//! Nothing reads the cache yet. A worker assignment carries its own table rosters, so chunk
-//! downloads resolve without consulting a schema; the bundle exists here so the fetch, verify,
-//! unpack and cache path is in place (and exercised) before anything depends on it.
+//! In worker-assignment mode this replaces the CDN manifest as the source of query schemas: an
+//! installed bundle is pushed into the [`QuerySchemaRegistry`] the experimental engine reads.
+//! Chunk downloads don't consult it — a worker assignment carries its own table rosters — so the
+//! bundle's only consumer is query execution.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,8 @@ use sha2::{Digest, Sha256};
 use sqd_assignments::SchemaBundle;
 use sqd_query_engine::metadata::DatasetDescription;
 
+use super::experimental_engine::QuerySchemaRegistry;
+
 /// Caps both the download and the unpacked total. Published bundles are tens of kilobytes of
 /// YAML; this exists only so a corrupt or hostile archive can't fill the data directory. The
 /// hash is verified after the download, so the cap is the only thing bounding it before that.
@@ -26,51 +29,31 @@ const UNPACKED_PREFIX: &str = "sha256-";
 /// Staging directory for an unpack in progress, renamed onto its final name once complete.
 const TEMP_PREFIX: &str = "temp-";
 
-/// One bundle's schemas, keyed by the id assignments reference them with.
-pub struct SchemaCache {
-    hash: String,
-    schemas: HashMap<u32, Arc<DatasetDescription>>,
-}
-
-impl SchemaCache {
-    pub fn get(&self, schema_id: u32) -> Option<Arc<DatasetDescription>> {
-        self.schemas.get(&schema_id).cloned()
-    }
-
-    pub fn hash(&self) -> &str {
-        &self.hash
-    }
-
-    pub fn len(&self) -> usize {
-        self.schemas.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.schemas.is_empty()
-    }
-}
-
-/// Keeps the current bundle unpacked under `dir` and parsed in memory.
+/// Keeps the current bundle unpacked under `dir` and its schemas installed in `registry`.
 pub struct SchemaBundleStore {
     dir: Utf8PathBuf,
-    current: ArcSwapOption<SchemaCache>,
+    registry: Arc<QuerySchemaRegistry>,
+    /// Hash of the bundle currently in `registry`. Only set once schemas are actually installed,
+    /// so a failed install leaves this on the previous value and the next poll retries.
+    installed_hash: ArcSwapOption<String>,
 }
 
 impl SchemaBundleStore {
-    pub fn new(dir: impl Into<Utf8PathBuf>) -> Self {
+    pub fn new(dir: impl Into<Utf8PathBuf>, registry: Arc<QuerySchemaRegistry>) -> Self {
         Self {
             dir: dir.into(),
-            current: ArcSwapOption::empty(),
+            registry,
+            installed_hash: ArcSwapOption::empty(),
         }
     }
 
-    pub fn current(&self) -> Option<Arc<SchemaCache>> {
-        self.current.load_full()
+    pub fn installed_hash(&self) -> Option<String> {
+        self.installed_hash.load_full().map(|h| h.to_string())
     }
 
-    /// Makes `bundle` the current schema cache, downloading and unpacking it only if needed.
+    /// Installs `bundle`'s schemas into the registry, downloading and unpacking only if needed.
     ///
-    /// A bundle already in memory is a no-op, and one already unpacked on disk (from an earlier
+    /// A bundle already installed is a no-op, and one already unpacked on disk (from an earlier
     /// run) is read back rather than re-downloaded — the hash names the directory, so a match
     /// means the content matches. Directories for other bundles are pruned once the new one is
     /// live.
@@ -81,7 +64,7 @@ impl SchemaBundleStore {
     ) -> anyhow::Result<()> {
         let hex = parse_sha256(&bundle.hash)?;
 
-        if self.current().is_some_and(|c| c.hash == bundle.hash) {
+        if self.installed_hash().as_deref() == Some(bundle.hash.as_str()) {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
             return Ok(());
         }
@@ -101,10 +84,9 @@ impl SchemaBundleStore {
             .await
             .with_context(|| format!("couldn't load schema bundle from {dir}"))?;
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
-        self.current.store(Some(Arc::new(SchemaCache {
-            hash: bundle.hash.clone(),
-            schemas,
-        })));
+        self.registry.store_bundle(schemas);
+        self.installed_hash
+            .store(Some(Arc::new(bundle.hash.clone())));
 
         self.prune(dir).await;
         Ok(())
@@ -372,8 +354,15 @@ tables:
         url
     }
 
-    fn store(dir: &tempfile::TempDir) -> SchemaBundleStore {
-        SchemaBundleStore::new(Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap())
+    /// The store plus the registry it installs into — assertions go through the registry, since
+    /// that is what query execution actually reads.
+    fn store(dir: &tempfile::TempDir) -> (SchemaBundleStore, Arc<QuerySchemaRegistry>) {
+        let registry = Arc::new(QuerySchemaRegistry::default());
+        let store = SchemaBundleStore::new(
+            Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap(),
+            registry.clone(),
+        );
+        (store, registry)
     }
 
     #[test]
@@ -403,7 +392,7 @@ tables:
     #[tokio::test]
     async fn downloads_verifies_and_caches_a_bundle() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
+        let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: sha256_of(&archive),
@@ -415,17 +404,20 @@ tables:
             .await
             .unwrap();
 
-        let cache = store.current().unwrap();
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(7).unwrap().name, "evm");
-        assert!(cache.get(8).is_none());
-        assert_eq!(cache.hash(), bundle.hash);
+        // Installed where the experimental engine looks, reachable both ways.
+        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(registry.get("evm").unwrap().name, "evm");
+        assert!(registry.get_by_id(8).is_err());
+        assert_eq!(
+            store.installed_hash().as_deref(),
+            Some(bundle.hash.as_str())
+        );
     }
 
     #[tokio::test]
     async fn rejects_a_bundle_whose_hash_does_not_match() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
+        let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: sha256_of(b"something else"),
@@ -437,7 +429,9 @@ tables:
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
-        assert!(store.current().is_none());
+        // Nothing installed, so the next poll offers the same bundle again.
+        assert!(store.installed_hash().is_none());
+        assert!(registry.get("evm").is_err());
         // Nothing is left behind for a later run to mistake for a verified bundle.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -445,7 +439,7 @@ tables:
     #[tokio::test]
     async fn ignores_entries_that_are_not_root_level_id_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
+        let (store, registry) = store(&dir);
         let archive = targz(&[
             ("7.yaml", SCHEMA.as_bytes()),
             ("manifest.json", b"{}"),
@@ -462,10 +456,14 @@ tables:
             .await
             .unwrap();
 
-        let cache = store.current().unwrap();
-        assert_eq!(cache.len(), 1, "only the root-level <id>.yaml is loaded");
-        assert!(cache.get(7).is_some());
-        assert!(cache.get(9).is_none(), "nested entries are not unpacked");
+        assert!(
+            registry.get_by_id(7).is_ok(),
+            "the root-level <id>.yaml is loaded"
+        );
+        assert!(
+            registry.get_by_id(9).is_err(),
+            "nested entries are not unpacked"
+        );
         assert!(
             !dir.path().parent().unwrap().join("escape.yaml").exists(),
             "traversal entries must not escape the store directory"
@@ -480,6 +478,7 @@ tables:
         let url = serve_once(archive).await;
 
         store(&dir)
+            .0
             .ensure(
                 &SchemaBundle {
                     hash: hash.clone(),
@@ -491,18 +490,18 @@ tables:
             .unwrap();
 
         // The one-shot server is spent, so a second fetch could only succeed from disk.
-        let restarted = store(&dir);
+        let (restarted, registry) = store(&dir);
         restarted
             .ensure(&SchemaBundle { hash, url }, &reqwest::Client::new())
             .await
             .unwrap();
-        assert_eq!(restarted.current().unwrap().get(7).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
     }
 
     #[tokio::test]
     async fn prunes_the_previous_bundle() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
+        let (store, registry) = store(&dir);
 
         for body in [SCHEMA, &SCHEMA.replace("name: evm", "name: solana")] {
             let archive = targz(&[("7.yaml", body.as_bytes())]);
@@ -516,7 +515,11 @@ tables:
                 .unwrap();
         }
 
-        assert_eq!(store.current().unwrap().get(7).unwrap().name, "solana");
+        assert_eq!(
+            registry.get_by_id(7).unwrap().name,
+            "solana",
+            "the newer bundle replaced the older one in the registry"
+        );
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             1,

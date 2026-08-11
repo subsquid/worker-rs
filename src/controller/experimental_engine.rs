@@ -1,5 +1,9 @@
-//! Support for the experimental query engine (`sqd-query-engine`), which executes
-//! queries against dataset schemas periodically fetched from the CDN.
+//! Support for the experimental query engine (`sqd-query-engine`), which executes queries
+//! against dataset schemas held in [`QuerySchemaRegistry`].
+//!
+//! Those schemas come from one of two sources, never both: the CDN manifest polled by
+//! [`run_schemas_refresh_loop`] (legacy assignments), or the network's schema bundle
+//! (worker assignments) — see `super::schema_bundle`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,20 +32,29 @@ struct Manifest {
 }
 
 #[derive(Default)]
+struct Schemas {
+    by_type: HashMap<String, Arc<DatasetDescription>>,
+    /// Empty for CDN-sourced schemas, which have no ids. Populated from the schema bundle.
+    by_id: HashMap<u32, Arc<DatasetDescription>>,
+}
+
+#[derive(Default)]
 pub struct QuerySchemaRegistry {
-    schemas: ArcSwap<HashMap<String, Arc<DatasetDescription>>>,
+    schemas: ArcSwap<Schemas>,
     loaded: std::sync::atomic::AtomicBool,
 }
 
 impl QuerySchemaRegistry {
+    /// Looks a schema up the way queries currently ask for one: by the dataset type named in the
+    /// query.
+    ///
+    /// This holds only while a bundle carries at most one schema per type. Once schemas are
+    /// versioned per chunk, two ids will name the same type and the query's type will no longer
+    /// identify a schema on its own — [`Self::get_by_id`] is the interface to move to, resolving
+    /// the chunk's `write_schema_id` instead.
     pub fn get(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
-        if !self.loaded.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(QueryError::Other(
-                "query schemas for the experimental engine have not been loaded yet".to_owned(),
-            ));
-        }
-        self.schemas
-            .load()
+        self.loaded_schemas()?
+            .by_type
             .get(dataset_type)
             .cloned()
             .ok_or_else(|| {
@@ -51,7 +64,65 @@ impl QuerySchemaRegistry {
             })
     }
 
-    fn store(&self, schemas: HashMap<String, Arc<DatasetDescription>>) {
+    /// Looks a schema up by the id assignments reference it with — the interface for per-chunk
+    /// schemas. Only ever finds anything when the schemas came from a bundle.
+    pub fn get_by_id(&self, schema_id: u32) -> Result<Arc<DatasetDescription>, QueryError> {
+        self.loaded_schemas()?
+            .by_id
+            .get(&schema_id)
+            .cloned()
+            .ok_or_else(|| {
+                QueryError::BadRequest(format!(
+                    "schema {schema_id} is not in the loaded schema bundle"
+                ))
+            })
+    }
+
+    fn loaded_schemas(&self) -> Result<arc_swap::Guard<Arc<Schemas>>, QueryError> {
+        if !self.loaded.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(QueryError::Other(
+                "query schemas for the experimental engine have not been loaded yet".to_owned(),
+            ));
+        }
+        Ok(self.schemas.load())
+    }
+
+    /// Installs schemas from the network's schema bundle, indexed both ways.
+    ///
+    /// Where two ids name the same dataset type the highest id wins the type-keyed slot. That is
+    /// a deterministic stand-in, not a correct answer — the query's type genuinely cannot pick
+    /// between two versions of a schema. It is the signal that the caller needs to resolve
+    /// through the chunk's `write_schema_id` via [`Self::get_by_id`].
+    pub fn store_bundle(&self, by_id: HashMap<u32, Arc<DatasetDescription>>) {
+        let mut by_type: HashMap<String, (u32, Arc<DatasetDescription>)> =
+            HashMap::with_capacity(by_id.len());
+        for (&id, description) in &by_id {
+            match by_type.entry(description.name.clone()) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((id, description.clone()));
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let kept = slot.get().0;
+                    tracing::warn!(
+                        dataset_type = %description.name,
+                        ids = ?[kept.min(id), kept.max(id)],
+                        "Schema bundle carries several schemas for one dataset type; type-keyed \
+                         lookup will use the highest id. Queries need per-chunk resolution."
+                    );
+                    if id > kept {
+                        slot.insert((id, description.clone()));
+                    }
+                }
+            }
+        }
+
+        self.store(Schemas {
+            by_type: by_type.into_iter().map(|(k, (_, v))| (k, v)).collect(),
+            by_id,
+        });
+    }
+
+    fn store(&self, schemas: Schemas) {
         self.schemas.store(Arc::new(schemas));
         self.loaded
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -153,7 +224,11 @@ async fn refresh_schemas(
         schemas.insert(dataset_type, Arc::new(desc));
     }
 
-    registry.store(schemas);
+    // CDN schemas have no ids, so only the type-keyed index is populated.
+    registry.store(Schemas {
+        by_type: schemas,
+        by_id: HashMap::new(),
+    });
     *last_manifest = Some(manifest_body);
     Ok(true)
 }
@@ -563,12 +638,66 @@ tables:
     #[test]
     fn registry_get() {
         let registry = QuerySchemaRegistry::default();
+        // Nothing loaded yet is a different failure from a schema that isn't there.
         assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
+        assert!(matches!(registry.get_by_id(7), Err(QueryError::Other(_))));
 
-        registry.store(HashMap::new());
+        registry.store(Schemas::default());
         assert!(matches!(
             registry.get("evm"),
             Err(QueryError::BadRequest(_))
         ));
+        assert!(matches!(
+            registry.get_by_id(7),
+            Err(QueryError::BadRequest(_))
+        ));
+    }
+
+    fn description(name: &str) -> Arc<DatasetDescription> {
+        Arc::new(
+            sqd_query_engine::metadata::parse_dataset_description(
+                &TEST_SCHEMA.replace("name: evm", &format!("name: {name}")),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn bundle_schemas_are_reachable_by_id_and_by_type() {
+        let registry = QuerySchemaRegistry::default();
+        registry.store_bundle(HashMap::from([
+            (7, description("evm")),
+            (12, description("solana")),
+        ]));
+
+        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
+        assert_eq!(registry.get("evm").unwrap().name, "evm");
+        assert_eq!(registry.get("solana").unwrap().name, "solana");
+        assert!(registry.get_by_id(9).is_err());
+    }
+
+    /// Today a bundle carries one schema per type. When that stops being true the type-keyed
+    /// index can no longer represent the bundle, so it resolves deterministically to the highest
+    /// id rather than to whichever entry happened to be visited last — but both remain reachable
+    /// by id, which is how callers should be resolving them by then.
+    #[test]
+    fn several_schemas_for_one_type_stay_reachable_by_id() {
+        let registry = QuerySchemaRegistry::default();
+        registry.store_bundle(HashMap::from([
+            (7, description("evm")),
+            (9, description("evm")),
+        ]));
+
+        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(9).unwrap().name, "evm");
+        assert!(registry.get("evm").is_ok());
+        assert!(
+            Arc::ptr_eq(
+                &registry.get("evm").unwrap(),
+                &registry.get_by_id(9).unwrap()
+            ),
+            "the type-keyed slot resolves to the highest id"
+        );
     }
 }

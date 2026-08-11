@@ -113,8 +113,7 @@ pub struct Harness {
     keypair: Keypair,
     schemas: Arc<QuerySchemaRegistry>,
     schema_stub: HttpStub,
-    assignment_stream:
-        std::pin::Pin<Box<dyn futures::Stream<Item = assignments::AssignmentUpdate>>>,
+    assignment_stream: std::pin::Pin<Box<dyn futures::Stream<Item = assignments::NetworkUpdate>>>,
     assignment_client: reqwest::Client,
     shutdown: CancellationToken,
     // Dropped last: the data dir must outlive every subsystem that writes into it.
@@ -227,8 +226,10 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
-            // The harness's scheduler stub publishes the legacy format.
+            // The harness's scheduler stub publishes the legacy format, which has no schema
+            // bundle — so nothing here ever reports one.
             false,
+            || None,
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
@@ -299,6 +300,9 @@ impl Harness {
             .await
             .expect("HC-1 published an assignment within the convergence timeout")
             .expect("assignment stream is still open");
+        let assignments::NetworkUpdate::Assignment(update) = update else {
+            panic!("the legacy scheduler stub never publishes a schema bundle");
+        };
 
         let document =
             assignments::fetch_assignment(&update.fb_url_v1, &self.assignment_client).await;

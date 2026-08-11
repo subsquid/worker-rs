@@ -137,6 +137,9 @@ pub async fn create_p2p_controller(
     let (sql_queries_tx, sql_queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
+    // Taken before `worker` is moved into the struct below.
+    let query_schemas = worker.query_schemas();
+
     Ok(P2PController {
         worker,
         worker_status: RwLock::new(worker_status),
@@ -151,7 +154,10 @@ pub async fn create_p2p_controller(
         keypair,
         assignment_url: args.assignment_url,
         use_worker_assignments: args.use_worker_assignments,
-        schema_bundles: schema_bundle::SchemaBundleStore::new(args.data_dir.join("schemas")),
+        schema_bundles: schema_bundle::SchemaBundleStore::new(
+            args.data_dir.join("schemas"),
+            query_schemas,
+        ),
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
@@ -192,15 +198,20 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         start_loop(s, "assignments", |t| {
             self.run_assignments_loop(t, self.assignment_check_interval)
         });
-        start_loop(s, "query_schemas", |t| {
-            experimental_engine::run_schemas_refresh_loop(
-                self.worker.query_schemas(),
-                self.query_schemas_url.clone(),
-                self.query_schemas_refresh_interval,
-                self.worker_id,
-                t,
-            )
-        });
+        // The CDN manifest is the legacy source of query schemas. In worker-assignment mode the
+        // schema bundle supersedes it, and running both would have them overwrite each other's
+        // registry contents.
+        if !self.use_worker_assignments {
+            start_loop(s, "query_schemas", |t| {
+                experimental_engine::run_schemas_refresh_loop(
+                    self.worker.query_schemas(),
+                    self.query_schemas_url.clone(),
+                    self.query_schemas_refresh_interval,
+                    self.worker_id,
+                    t,
+                )
+            });
+        }
         start_loop(s, "logs", |t| self.run_logs_loop(t));
         start_loop(s, "logs_cleanup", |t| {
             self.run_logs_cleanup_loop(t, LOGS_CLEANUP_INTERVAL)
@@ -308,6 +319,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         cancellation_token: CancellationToken,
         assignment_check_interval: Duration,
     ) {
+        let assignment_client =
+            super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
+        let bundle_client = assignment_client.clone();
+        // A bundle that moved without the assignment is installed here and filtered out, so the
+        // queue below only ever holds assignments. On failure the store keeps its previous hash,
+        // so the next poll offers the same bundle again — the retry needs no bookkeeping.
         let mut assignments = Box::pin(
             super::assignments::new_assignments_stream(
                 self.assignment_url.clone(),
@@ -316,12 +333,25 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_fetch_max_delay,
                 self.worker_id,
                 self.use_worker_assignments,
+                || self.schema_bundles.installed_hash(),
             )
+            .filter_map(move |update| {
+                let client = bundle_client.clone();
+                async move {
+                    match update {
+                        super::assignments::NetworkUpdate::Assignment(update) => Some(update),
+                        super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
+                            if let Err(e) = self.schema_bundles.ensure(&bundle, &client).await {
+                                warn!(hash = %bundle.hash, error = ?e, "Failed to install schema bundle");
+                            }
+                            None
+                        }
+                    }
+                }
+            })
             .take_until(cancellation_token.clone().cancelled_owned())
             .fuse(),
         );
-        let assignment_client =
-            super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
         // The assignment currently being applied; stays `None` when assignments are applied
         // immediately in arrival order rather than strictly in order.
