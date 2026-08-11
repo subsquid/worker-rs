@@ -117,8 +117,8 @@ error. Note the hash-basis asymmetry with IB-13's success signature (OQ-5).
 **IB-22 — `Heartbeat` message.** `{version, assignment_id, missing_chunks: BitString,
 stored_bytes?, current_epoch?, last_applied_assignment_id?}`. `missing_chunks` is the
 DEF-13 map, deflate-compressed bit bytes with declared size and ones-count; bit order
-is chunk-ref order (OQ-1). `assignment_id` is `""` before the first application.
-`last_applied_assignment_id` is absent in shipped builds (OQ-3).
+is chunk-ref order (OQ-1). `assignment_id` is `""` before the first application, and
+`last_applied_assignment_id` is absent until one settles.
 
 ## Operator surface
 
@@ -132,10 +132,8 @@ GET only: `/worker/status` → JSON `{"state":{"available":n,"downloading":n}}` 
 (OB-5), `running_queries` (OB-6), `num_queries_executed{status}` (OB-7),
 `query_result_size_bytes` (OB-8), `worker_status{worker_status}` (OB-12 assessed-state
 component), `worker_info_info{version}`, `schema_bundle_loaded` /
-`schema_bundle_failures` (IB-44b — whether a bundle is installed, and how often one
-failed to install; a worker blocked on a broken bundle moves no other metric). Signals
-OB-9/10/11/13 and the missing OB-4/7 breakdowns have no binding yet — GAP-17/GAP-23
-track the additions.
+`schema_bundle_failures` (OB-16, over the IB-44b bundle). Signals OB-9/10/11/13 and the
+missing OB-4/7 breakdowns have no binding yet — GAP-17/GAP-23 track the additions.
 
 **IB-32 — Configuration surface.** Flags/env (defaults live in the registry):
 

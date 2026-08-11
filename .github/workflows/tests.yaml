@@ -54,9 +54,11 @@ jobs:
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
       # Unit tier only — building the conformance binaries here too would double the
-      # heaviest link work for no extra coverage.
+      # heaviest link work for no extra coverage. `state_pbt`/`state_regression` are unit
+      # tier in everything but the file they live in (no harness, no I/O), and until now
+      # no job ran them at all.
       - name: Run tests
-        run: cargo test --all-features --lib --bins
+        run: cargo test --all-features --lib --bins --test state_pbt --test state_regression
 
   # MG-4: the PR conformance subset, kept as its own job so its wall clock is visible
   # against P-GATE-PR-TIME instead of hiding inside the unit-test run.

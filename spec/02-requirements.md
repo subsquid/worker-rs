@@ -161,7 +161,6 @@ Tests MUST NOT pin any of the following; each is free to change without notice:
 |---|---|---|---|
 | OQ-1 | Is the availability map's bit order (worker's sorted chunk order) identical to the scheduler's assignment chunk order for suffix-forked chunks? A mismatch silently corrupts scheduler-side interpretation. | REQ-11 acceptance; IB-12 | network/scheduler team |
 | OQ-2 | The log response ceiling reserves a margin below the transport maximum (P-LOGS-RESP-MAX); why the margin is needed is unrecorded. Right-size or document. | IB-20 | worker team |
-| OQ-3 | The multi-version chunk-application feature (staged assignment tracking) is compiled out of shipped builds while tests exercise it. Ship it or retire it? | 13 matrix honesty | worker team |
 | OQ-4 | Status reports are unsigned. Is unauthenticated status by design, or should it be signed like results? | RP-21 | network team |
 | OQ-5 | The worker's log records hash the uncompressed result while the portal's records hash the compressed bytes; cross-checking will systematically mismatch. Which is canonical? | INV-23, GAP-14 | network team |
 | OQ-6 | No per-query execution deadline exists (P-Q-DEADLINE ⚠). What bound should the network promise? Portals abandon an attempt at 60 s, so the worker bound must sit strictly below (target: 55 s) for timeout verdicts to ever be observed by them. | LIV-3, GAP-8 | worker team |

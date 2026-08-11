@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-07-25**
-(baseline commit `42d9aa1`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-11**
+(baseline commit `c49adc9`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -121,13 +121,15 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-07-25)
+## Traceability matrix (as of 2026-08-11)
 
-Statuses reflect the actual test inventory: inline unit tests, all built unconditionally,
-plus the conformance tier over the harness in `tests/harness/`: one binary per subject —
-`e2e` (the smoke path), `query_surface` (admission outcomes and the RP-20 taxonomy) and
-`query_concurrency` (separate by necessity, not topic: the OB signals are process-global,
-so a gauge assertion cannot share a process with other query-running tests).
+Statuses reflect the actual test inventory: inline unit tests, all built unconditionally;
+`state_pbt` / `state_regression` over the chunk state machine and assignment
+confirmation; plus the conformance tier over the harness in `tests/harness/`: one binary
+per subject — `e2e` (the smoke path, both assignment formats), `query_surface`
+(admission outcomes and the RP-20 taxonomy) and `query_concurrency` (separate by
+necessity, not topic: the OB signals are process-global, so a gauge assertion cannot
+share a process with other query-running tests).
 WP/RP/CN/RS rows are enforced through the INV/LIV rows that encode them
 (see 07 §reading the catalog).
 
@@ -167,7 +169,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-11 | CT-2 | U | |
 | INV-12 | CT-1/3 | P | retain-if-locked unit-tested; never raced |
 | INV-13 | CT-1 | P⊘ | smoke compares committed bytes against HC-2's ledger on the happy path; refusing corrupt origin bytes still doesn't exist (GAP-5) |
-| INV-14 | CT-3 | P | one hand-built interleaving test (feature-gated, not in shipped config — OQ-3) |
+| INV-14 | CT-3 | P | one hand-built interleaving test plus `state_pbt`'s randomized runs over the confirmation critical section, all in the default build; the CT-3 race proper — status reads against assignment flips — is still absent |
 | INV-15 | CT-1/5 | P | unit-tested (charge, refund, overload-keep, fractional put); chip-parse hole GAP-13 |
 | INV-20 | CT-5 | U | |
 | INV-21 | CT-1/3 | U | |
@@ -224,11 +226,13 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-51 | CT-2 | U⊘ | sweep-before-check (GAP-16) |
 | FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
 | FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
+| FM-53b | CT-4 | P | `e2e` drives the block end to end: an unfetchable bundle leaves the assignment unapplied and no chunk fetched. Hash mismatch, damaged cache and retry-until-installed are unit-tested; the metrics half (OB) is unasserted |
+| FM-53c | CT-4 | P | unit-tested both ways: an assignment naming a schema the bundle lacks is refused whole, and a schema the assignment in force still uses survives a bundle that drops it. Not driven through the harness |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-07-25)
+## Gap register (as of 2026-08-11)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.

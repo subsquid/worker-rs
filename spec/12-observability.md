@@ -65,6 +65,13 @@ worker-clock offset from authenticated queries' timestamps, so a skewed worker i
 diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12) has
 a level-readable witness. Scalar signals only (OB-14).
 
+**OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, and a
+counter of failures to load one. Under `USE_WORKER_ASSIGNMENTS` a bundle that never
+installs blocks every assignment (FM-53b) while no other signal moves — the chunk gauges
+simply freeze, which reads exactly like a quiet network — so this is the only witness
+that separates the two. Scalar signals only (OB-14). Bound in IB-31; the legacy
+manifest's fetch failures (FM-53) have no signal yet.
+
 ## Property → observable mapping
 
 Every LIV property must be decidable from exported signals:
