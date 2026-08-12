@@ -35,6 +35,10 @@ struct Schemas {
     by_type: HashMap<String, Arc<DatasetDescription>>,
     /// Empty for CDN-sourced schemas, which have no ids.
     by_id: HashMap<u32, Arc<DatasetDescription>>,
+    /// Hash of the bundle these came from; `None` for CDN-sourced schemas. Lives here rather
+    /// than beside the store so it is published by the same swap as the schemas it describes —
+    /// a hash naming a bundle other than the one in force is what the dedup would act on.
+    bundle_hash: Option<String>,
 }
 
 #[derive(Default)]
@@ -81,7 +85,15 @@ impl QuerySchemaRegistry {
         Ok(self.schemas.load())
     }
 
-    /// Installs schemas from the network's schema bundle, indexed by id and by type.
+    /// Hash of the bundle whose schemas are loaded, or `None` when they came from the CDN
+    /// manifest or nothing is loaded yet. Read out of the same cell as the schemas, so it
+    /// cannot name a bundle other than the one a query would resolve against.
+    pub fn bundle_hash(&self) -> Option<String> {
+        self.schemas.load().bundle_hash.clone()
+    }
+
+    /// Installs schemas from the network's schema bundle, indexed by id and by type, and
+    /// records `hash` as the installed bundle in the same swap.
     ///
     /// Ids in `still_in_use` that the new bundle omits are carried over: bundles are replaced
     /// wholesale, the chunks on disk are not, and dropping a schema a live chunk was written
@@ -89,10 +101,15 @@ impl QuerySchemaRegistry {
     ///
     /// Where two ids share a dataset type the highest wins the type-keyed slot — deterministic,
     /// but only [`Self::get_by_id`] tells the versions apart.
+    ///
+    /// Not atomic against a concurrent call: the carry-over reads the current schemas before
+    /// replacing them. [`SchemaBundleStore`](super::schema_bundle::SchemaBundleStore) is the
+    /// only caller and serializes them.
     pub fn store_bundle(
         &self,
         mut by_id: HashMap<u32, Arc<DatasetDescription>>,
         still_in_use: &HashSet<u32>,
+        hash: &str,
     ) {
         let loaded = self.schemas.load();
         for &id in still_in_use {
@@ -136,6 +153,7 @@ impl QuerySchemaRegistry {
         self.store(Schemas {
             by_type: by_type.into_iter().map(|(k, (_, v))| (k, v)).collect(),
             by_id,
+            bundle_hash: Some(hash.to_owned()),
         });
     }
 
@@ -244,6 +262,7 @@ async fn refresh_schemas(
     registry.store(Schemas {
         by_type: schemas,
         by_id: HashMap::new(),
+        bundle_hash: None,
     });
     *last_manifest = Some(manifest_body);
     Ok(true)
@@ -684,6 +703,7 @@ tables:
         registry.store_bundle(
             HashMap::from([(7, description("evm")), (12, description("solana"))]),
             &HashSet::new(),
+            "sha256:aa",
         );
 
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
@@ -693,6 +713,39 @@ tables:
         assert!(registry.get_by_id(9).is_err());
     }
 
+    /// The hash and the schemas it names are one value, so no reader can pair a hash with a
+    /// different bundle's schemas. CDN-sourced schemas have no bundle, hence no hash.
+    #[test]
+    fn the_bundle_hash_travels_with_the_schemas_it_names() {
+        let registry = QuerySchemaRegistry::default();
+        assert_eq!(registry.bundle_hash(), None, "nothing loaded yet");
+
+        registry.store_bundle(
+            HashMap::from([(7, description("evm"))]),
+            &HashSet::new(),
+            "a",
+        );
+        assert_eq!(registry.bundle_hash().as_deref(), Some("a"));
+
+        registry.store_bundle(
+            HashMap::from([(12, description("solana"))]),
+            &HashSet::new(),
+            "b",
+        );
+        assert_eq!(registry.bundle_hash().as_deref(), Some("b"));
+        assert!(
+            registry.get_by_id(7).is_err() && registry.get_by_id(12).is_ok(),
+            "hash b must name b's schemas, never a's"
+        );
+
+        registry.store(Schemas::default());
+        assert_eq!(
+            registry.bundle_hash(),
+            None,
+            "the CDN manifest installs no bundle"
+        );
+    }
+
     /// A schema a live chunk was written with must outlive a bundle that stopped carrying it.
     #[test]
     fn a_schema_still_in_use_survives_a_bundle_that_drops_it() {
@@ -700,11 +753,13 @@ tables:
         registry.store_bundle(
             HashMap::from([(7, description("evm")), (12, description("solana"))]),
             &HashSet::new(),
+            "sha256:bb",
         );
 
         registry.store_bundle(
             HashMap::from([(12, description("solana"))]),
             &HashSet::from([7]),
+            "sha256:cc",
         );
 
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
@@ -718,11 +773,13 @@ tables:
         registry.store_bundle(
             HashMap::from([(7, description("evm")), (12, description("solana"))]),
             &HashSet::new(),
+            "sha256:dd",
         );
 
         registry.store_bundle(
             HashMap::from([(12, description("solana"))]),
             &HashSet::from([12]),
+            "sha256:ee",
         );
 
         assert!(registry.get_by_id(7).is_err());
@@ -737,6 +794,7 @@ tables:
         registry.store_bundle(
             HashMap::from([(7, description("evm")), (9, description("evm"))]),
             &HashSet::new(),
+            "sha256:ff",
         );
 
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");

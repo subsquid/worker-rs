@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
-use arc_swap::ArcSwapOption;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::TryStreamExt;
 use sha2::{Digest, Sha256};
@@ -29,9 +28,11 @@ const TEMP_PREFIX: &str = "temp-";
 pub struct SchemaBundleStore {
     dir: Utf8PathBuf,
     registry: Arc<QuerySchemaRegistry>,
-    /// Hash of the bundle in `registry`. Set only after a successful install, so a failure leaves
-    /// the previous value and the next poll retries.
-    installed_hash: ArcSwapOption<String>,
+    /// Held for the whole of [`Self::install`], which is a check-then-act (skip if this hash is
+    /// already installed) wrapping a read-modify-write (the carry-over in `store_bundle`).
+    /// Uncontended today — the assignments loop is the only caller — so this costs nothing and
+    /// stops a second caller from being a silent lost update rather than a compile error.
+    install_lock: tokio::sync::Mutex<()>,
 }
 
 impl SchemaBundleStore {
@@ -48,12 +49,15 @@ impl SchemaBundleStore {
         Self {
             dir,
             registry,
-            installed_hash: ArcSwapOption::empty(),
+            install_lock: tokio::sync::Mutex::new(()),
         }
     }
 
+    /// Hash of the installed bundle, straight from the registry it describes. Set only by a
+    /// successful install, so a failure leaves the previous value and the next poll re-offers
+    /// the bundle rather than deduplicating it away.
     pub fn installed_hash(&self) -> Option<String> {
-        self.installed_hash.load_full().map(|h| h.to_string())
+        self.registry.bundle_hash()
     }
 
     /// Installs `bundle`'s schemas into the registry, downloading and unpacking only if the
@@ -82,6 +86,7 @@ impl SchemaBundleStore {
         still_in_use: &HashSet<u32>,
     ) -> anyhow::Result<()> {
         let hex = parse_sha256(&bundle.hash)?;
+        let _installing = self.install_lock.lock().await;
 
         if self.installed_hash().as_deref() == Some(bundle.hash.as_str()) {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
@@ -106,9 +111,9 @@ impl SchemaBundleStore {
         };
 
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
-        self.registry.store_bundle(schemas, still_in_use);
-        self.installed_hash
-            .store(Some(Arc::new(bundle.hash.clone())));
+        // Schemas and the hash naming them become visible in one swap.
+        self.registry
+            .store_bundle(schemas, still_in_use, &bundle.hash);
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
 
         self.prune(dir).await;
