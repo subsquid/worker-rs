@@ -99,6 +99,14 @@ impl Scheduler {
         self.stub.inject(SCHEMA_BUNDLE_PATH, Fault::Status(status));
     }
 
+    /// Publishes a bundle carrying a schema the assignment does not reference, and omitting the
+    /// one it does — the scheduler shipping a pair that disagrees with itself (FM-53c).
+    pub fn publish_bundle_missing_the_assignment_schema(&mut self) {
+        let archive = schema_bundle(&[(WRITE_SCHEMA_ID + 1, super::corpus::SCHEMA_YAML)]);
+        self.bundle_hash = Some(format!("sha256:{:x}", Sha256::digest(&archive)));
+        self.stub.put(SCHEMA_BUNDLE_PATH, archive);
+    }
+
     /// The `--assignment-url` the worker under test should be pointed at.
     pub fn network_state_url(&self) -> String {
         self.stub.url(NETWORK_STATE_PATH)

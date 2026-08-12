@@ -262,3 +262,46 @@ async fn worker_format_assignment_waits_for_its_schema_bundle() {
         "no chunk may be fetched for an assignment that never applied"
     );
 }
+
+/// FM-53c / ADR-21: the pair is one state. A bundle that does not cover the assignment it is
+/// published with is the scheduler's invariant breaking, and the worker refuses the assignment
+/// rather than covering for it — even where its own store could have answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_format_refuses_an_assignment_its_bundle_does_not_cover() {
+    use harness::scheduler::{AssignmentFault, Format};
+    use harness::Config;
+
+    let mut h = Harness::with_config(Config {
+        format: Format::Worker,
+        ..Config::default()
+    })
+    .await;
+
+    // First the covering pair, so the worker holds the assignment's schema in its store.
+    let first = corpus::chunk(6_000, 6_009, 1);
+    let placement = h.host_chunk(&first);
+    let applied = h.publish_and_apply("assignment-1", &[placement]).await;
+    h.await_all_chunks_available().await;
+    assert_eq!(h.status().await.assignment_id, applied.id);
+
+    // Then a pair that disagrees: the bundle carries a schema the assignment never references.
+    let second = corpus::chunk(7_000, 7_009, 1);
+    let placement = h.host_chunk(&second);
+    h.scheduler.publish_bundle_missing_the_assignment_schema();
+    h.publish("assignment-2", &[placement], AssignmentFault::None);
+
+    assert!(
+        !h.poll_and_apply().await,
+        "the bundle does not cover the assignment, so the pair must not apply"
+    );
+    assert_eq!(
+        h.status().await.assignment_id,
+        applied.id,
+        "the previous assignment stays in force"
+    );
+    assert_eq!(
+        h.origin.fetch_count(&second.id, "blocks.parquet"),
+        0,
+        "and nothing is downloaded for an assignment that never applied"
+    );
+}

@@ -165,8 +165,13 @@ impl SchemaBundleStore {
         self.registry.bundle_ids()
     }
 
-    /// Records schemas the settled assignment doesn't reference as reclaimable. See
-    /// [`Self::unused`]; nothing deletes them yet.
+    /// Schemas recorded as reclaimable. Nothing deletes them yet — see [`Self::unused`].
+    pub fn unused(&self) -> HashSet<SchemaId> {
+        self.unused.lock().clone()
+    }
+
+    /// Records schemas the settled assignment doesn't reference as reclaimable, and un-records
+    /// any that it does — an id can come back into use when a later assignment references it.
     pub fn mark_unused_after_settle(&self, in_use: &HashSet<SchemaId>) {
         let loaded = self.registry.loaded_ids();
         let mut unused = self.unused.lock();
@@ -747,6 +752,41 @@ tables:
         let mut left = stored_all(&dir);
         left.sort();
         assert_eq!(left, vec!["7.yaml", "unrelated"]);
+    }
+
+    /// The recording half of reclamation. Deleting is not implemented, but what may be deleted
+    /// has to be right first — and an id can come back into use, so the set is not append-only.
+    #[tokio::test]
+    async fn a_settled_assignment_records_the_ids_it_no_longer_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = store(&dir);
+        let archive = targz(&[
+            ("7.yaml", SCHEMA.as_bytes()),
+            (
+                "12.yaml",
+                SCHEMA.replace("name: evm", "name: solana").as_bytes(),
+            ),
+        ]);
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(&archive),
+            url: serve_once(archive).await,
+        };
+        store
+            .ensure(&bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        store.mark_unused_after_settle(&HashSet::from([SchemaId::new(7)]));
+        assert_eq!(store.unused(), HashSet::from([SchemaId::new(12)]));
+
+        // Nothing is deleted: 12 still answers for any chunk written with it.
+        assert_eq!(stored(&dir).len(), 2);
+
+        store.mark_unused_after_settle(&HashSet::from([SchemaId::new(7), SchemaId::new(12)]));
+        assert!(
+            store.unused().is_empty(),
+            "an id a later assignment uses stops being reclaimable"
+        );
     }
 
     /// Names in the store directory, `<id>.yaml` only.

@@ -466,6 +466,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             match settled {
                                 None => break,
                                 Some(AssignmentOutcome::Applied) => {
+                                    // Settled means reconciliation has finished its removals, so
+                                    // no chunk on disk was written with a schema this assignment
+                                    // doesn't reference — the one moment those ids are known to
+                                    // be reclaimable.
+                                    self.schema_bundles
+                                        .mark_unused_after_settle(&self.worker.active_schema_ids());
                                     processing_id = None;
                                 }
                                 Some(AssignmentOutcome::Stalled) => {
