@@ -309,7 +309,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) plus an unfetchable bundle (FM-53b) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

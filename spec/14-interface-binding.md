@@ -206,7 +206,8 @@ FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no
 list — each chunk names a `write_schema_id`, and the document's inline `schemas` roster
 maps that id to a sorted table list which the chunk's `tables_present` bitmap narrows.
 Files are then `dataset_base_url + chunk id + <table>.parquet`. A chunk whose
-`write_schema_id` has no roster, or whose schema content is not in the loaded bundle,
+`write_schema_id` has no roster, or whose schema the bundle published with the document
+doesn't carry,
 makes the whole document inapplicable (WP-2) — a partially applied assignment would
 leave the worker silently short of data it is believed to hold.
 
@@ -214,7 +215,7 @@ leave the worker silently short of data it is believed to hold.
 of the index in the same critical section that locks the chunk, so a schema id and
 chunk state can never be paired across an assignment change. The query's own dataset
 type is then only a cross-check — a disagreement is a typed `bad_request`. A pinned id the
-loaded bundle doesn't carry is a `server_error` instead: nothing in the query names that
+schema store doesn't carry is a `server_error` instead: nothing in the query names that
 id, so the fault is the worker's own (INV-26, ADR-20), and FM-53c means it should not be
 reachable at all. Under IB-41 (legacy) there is no per-chunk schema and the query's
 dataset type selects it, which is sound only while one schema exists per type.

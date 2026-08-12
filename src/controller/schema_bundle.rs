@@ -1,6 +1,10 @@
 //! The network's schema bundle: a gzipped tar of `<schema_id>.yaml` query-engine schemas,
-//! published alongside the assignments that reference those ids. In worker-assignment mode it
-//! replaces the CDN manifest as the source of query schemas; only query execution reads it.
+//! published alongside the assignments that reference those ids, and the store they are merged
+//! into. In worker-assignment mode it replaces the CDN manifest as the source of query schemas.
+//!
+//! Two sets come out of it, and they are deliberately different: everything merged, which
+//! answers queries, and the ids of the bundle in force, which is what may admit an assignment
+//! (ADR-21).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

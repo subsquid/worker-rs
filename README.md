@@ -63,14 +63,24 @@ Network selection and boot nodes come from the transport arguments (see `--help`
 
 With `--assignment-source worker`, the worker reads the network state's `worker_assignment`
 pointer instead of the legacy shared `assignment`, and ignores the legacy one entirely — there is
-no fallback if `worker_assignment` is absent. This changes three things:
+no fallback if `worker_assignment` is absent. This changes four things:
 
 - **Chunk contents** come from the assignment's inline write-schema rosters, narrowed by each
   chunk's `tables_present` bitmap, rather than from a per-chunk file list.
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
-  `<schema_id>.yaml`, verified against its `sha256:` hash and unpacked under
-  `<data-dir>/schemas/`) rather than from `--query-schemas-url`. That CDN manifest is not polled
-  at all in this mode. A bundle that fails to install blocks the assignment it came with.
+  `<schema_id>.yaml`, verified against its `sha256:` hash) rather than from
+  `--query-schemas-url`, which is not polled at all in this mode. Bundles are *merged* into
+  `<data-dir>/schemas/<id>.yaml` rather than replacing what is there: chunks on disk outlive the
+  bundle that described them, only the current bundle is published, and no schema can be fetched
+  by id, so a schema dropped locally would strand data permanently. The store is read back at
+  startup, so a restart answers for the chunks it already holds without waiting for a download.
+- **An assignment and its bundle apply together.** The assignment is applied only if its
+  accompanying bundle was fetched *and* carries every schema the assignment references; failing
+  either, neither half applies and the previous assignment stays in force. Schemas accumulated
+  from earlier bundles keep answering queries, but do not stand in for the bundle a new
+  assignment came with — applying half a pair would report an assignment as held that the worker
+  only half-holds. A bundle that does not cover its assignment is a scheduler fault and raises
+  `schema_bundle_mismatches`.
 - **Assignments are applied strictly in order**, each waiting for the previous one to settle,
   instead of immediately on arrival.
 
