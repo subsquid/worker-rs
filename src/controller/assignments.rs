@@ -6,12 +6,15 @@ use rand::Rng;
 use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
 
+use super::schema_bundle::{Bundle, BundleHash};
+use crate::metrics;
+
 /// The assignment and the schema bundle are versioned independently, and reported separately.
 pub enum NetworkUpdate {
     /// A new assignment, carrying whatever bundle was published alongside it.
     Assignment(AssignmentUpdate),
     /// The assignment is unchanged; only the schema bundle moved.
-    SchemaBundle(sqd_assignments::SchemaBundle),
+    SchemaBundle(Bundle),
 }
 
 pub struct AssignmentUpdate {
@@ -19,7 +22,7 @@ pub struct AssignmentUpdate {
     pub fb_url_v1: String,
     pub _effective_from: u64,
     /// `None` outside worker-assignment mode.
-    pub schema_bundle: Option<sqd_assignments::SchemaBundle>,
+    pub schema_bundle: Option<Bundle>,
 }
 
 pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client {
@@ -41,7 +44,7 @@ pub fn new_assignments_stream(
     max_delay: Duration,
     peer_id: PeerId,
     use_worker_assignments: bool,
-    installed_bundle_hash: impl Fn() -> Option<String>,
+    installed_bundle_hash: impl Fn() -> Option<BundleHash>,
 ) -> impl Stream<Item = NetworkUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -79,13 +82,20 @@ async fn poll_network_state(
     reqwest_client: &reqwest::Client,
     last_id: &mut Option<String>,
     use_worker_assignments: bool,
-    installed_bundle_hash: &impl Fn() -> Option<String>,
+    installed_bundle_hash: &impl Fn() -> Option<BundleHash>,
 ) -> anyhow::Result<Option<NetworkUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
+    // Parsed here, at the edge: a hash that isn't `sha256:<hex>` is a malformed network state,
+    // and every comparison downstream is then between two verified hashes.
     let published_bundle = use_worker_assignments
         .then(|| network_state.schema_bundle.take())
-        .flatten();
+        .flatten()
+        .map(Bundle::try_from)
+        .transpose()
+        .inspect_err(|_| {
+            metrics::SCHEMA_BUNDLE_FAILURES.inc();
+        })?;
 
     match changed_assignment(&network_state, last_id.as_deref(), use_worker_assignments) {
         Some(assignment) => {
@@ -103,7 +113,7 @@ async fn poll_network_state(
             Ok(Some(NetworkUpdate::Assignment(update)))
         }
         None => Ok(published_bundle
-            .filter(|bundle| installed_bundle_hash().as_deref() != Some(bundle.hash.as_str()))
+            .filter(|bundle| installed_bundle_hash() != Some(bundle.hash))
             .map(NetworkUpdate::SchemaBundle)),
     }
 }
@@ -282,11 +292,18 @@ mod tests {
         .into_bytes()
     }
 
-    fn worker_state_json(id: &str, bundle_hash: &str) -> Vec<u8> {
+    fn worker_state_json(id: &str, bundle_hash: BundleHash) -> Vec<u8> {
         format!(
             r#"{{"network":"test","worker_assignment":{{"id":"{id}","fb_url_v1":"http://example.com/{id}.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{bundle_hash}","url":"http://example.com/bundle.tar.gz"}}}}"#
         )
         .into_bytes()
+    }
+
+    /// A distinct well-formed hash per byte value; the bundles are never fetched here.
+    fn hash(tag: u8) -> BundleHash {
+        format!("sha256:{}", format!("{tag:02x}").repeat(32))
+            .parse()
+            .unwrap()
     }
 
     fn test_client() -> reqwest::Client {
@@ -296,9 +313,9 @@ mod tests {
     /// All four assignment/bundle change combinations are reported on their own terms.
     #[tokio::test]
     async fn assignment_and_bundle_are_versioned_independently() {
-        let a1b1 = worker_state_json("assignment-1", "sha256:aaa");
-        let a2b1 = worker_state_json("assignment-2", "sha256:aaa");
-        let a2b2 = worker_state_json("assignment-2", "sha256:bbb");
+        let a1b1 = worker_state_json("assignment-1", hash(0xaa));
+        let a2b1 = worker_state_json("assignment-2", hash(0xaa));
+        let a2b2 = worker_state_json("assignment-2", hash(0xbb));
         let url = serve_responses(vec![
             http_ok(&a1b1),
             http_ok(&a2b1),
@@ -307,7 +324,7 @@ mod tests {
         ])
         .await;
         let mut last_id = None;
-        let installed = std::sync::Mutex::new(None::<String>);
+        let installed = std::sync::Mutex::new(None::<BundleHash>);
         let installed_hash = || installed.lock().unwrap().clone();
 
         // Both new: one assignment, carrying its bundle.
@@ -316,8 +333,8 @@ mod tests {
             .unwrap();
         let update = assignment_of(update);
         assert_eq!(update.id, "assignment-1");
-        assert_eq!(update.schema_bundle.unwrap().hash, "sha256:aaa");
-        *installed.lock().unwrap() = Some("sha256:aaa".to_owned());
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
+        *installed.lock().unwrap() = Some(hash(0xaa));
 
         // New assignment, same bundle: the bundle rides along, already installed.
         let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
@@ -325,7 +342,7 @@ mod tests {
             .unwrap();
         let update = assignment_of(update);
         assert_eq!(update.id, "assignment-2");
-        assert_eq!(update.schema_bundle.unwrap().hash, "sha256:aaa");
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
         // Neither moved: nothing to report.
         let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
@@ -338,7 +355,7 @@ mod tests {
             .await
             .unwrap();
         match update {
-            Some(NetworkUpdate::SchemaBundle(bundle)) => assert_eq!(bundle.hash, "sha256:bbb"),
+            Some(NetworkUpdate::SchemaBundle(bundle)) => assert_eq!(bundle.hash, hash(0xbb)),
             other => panic!(
                 "a bundle that moves on its own must be reported: got {}",
                 describe(&other)
@@ -349,7 +366,7 @@ mod tests {
     /// A bundle that failed to install is offered again, not skipped as already seen.
     #[tokio::test]
     async fn an_uninstalled_bundle_is_offered_again() {
-        let state = worker_state_json("assignment-1", "sha256:aaa");
+        let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let mut last_id = None;
 
@@ -363,7 +380,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(update, Some(NetworkUpdate::SchemaBundle(ref b)) if b.hash == "sha256:aaa"),
+            matches!(update, Some(NetworkUpdate::SchemaBundle(ref b)) if b.hash == hash(0xaa)),
             "got {}",
             describe(&update)
         );

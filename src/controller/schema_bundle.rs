@@ -9,11 +9,11 @@ use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::TryStreamExt;
 use sha2::{Digest, Sha256};
-use sqd_assignments::SchemaBundle;
 use sqd_query_engine::metadata::DatasetDescription;
 
 use super::experimental_engine::QuerySchemaRegistry;
 use crate::metrics;
+use crate::types::schema::SchemaId;
 
 /// Caps both the download and the unpacked total: the only bound on a corrupt or hostile archive
 /// before the hash is verified. Published bundles are tens of kilobytes.
@@ -23,6 +23,83 @@ const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 const UNPACKED_PREFIX: &str = "sha256-";
 /// Staging directory for an unpack in progress, renamed onto its final name once complete.
 const TEMP_PREFIX: &str = "temp-";
+
+/// A schema bundle the network published: hash parsed, address left to the fetch to judge.
+#[derive(Clone, Debug)]
+pub struct Bundle {
+    pub hash: BundleHash,
+    pub url: String,
+}
+
+impl TryFrom<sqd_assignments::SchemaBundle> for Bundle {
+    type Error = anyhow::Error;
+
+    fn try_from(bundle: sqd_assignments::SchemaBundle) -> anyhow::Result<Self> {
+        Ok(Self {
+            hash: bundle.hash.parse()?,
+            url: bundle.url,
+        })
+    }
+}
+
+/// The sha256 of a schema bundle, parsed once where it enters from the network so that every
+/// comparison downstream is 32 bytes rather than a string that may or may not be well-formed.
+///
+/// `Display` renders the wire form `sha256:<hex>`; `LowerHex` renders the bare hex the unpacked
+/// directory is named after.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BundleHash([u8; 32]);
+
+impl BundleHash {
+    /// The hash of `bytes`, for checking a download against what the network advertised.
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+}
+
+impl std::str::FromStr for BundleHash {
+    type Err = anyhow::Error;
+
+    /// Only sha256. An unknown algorithm fails rather than skipping verification.
+    fn from_str(hash: &str) -> anyhow::Result<Self> {
+        let (algorithm, hex) = hash.split_once(':').with_context(|| {
+            format!("schema bundle hash '{hash}' is not in 'algorithm:hex' form")
+        })?;
+        if algorithm != "sha256" {
+            bail!("unsupported schema bundle hash algorithm '{algorithm}', expected sha256");
+        }
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("schema bundle hash '{hex}' is not 64 hex digits");
+        }
+        let mut bytes = [0u8; 32];
+        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl std::fmt::Display for BundleHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sha256:{self:x}")
+    }
+}
+
+/// Same as `Display`: a hash has one readable form, and logs carry it either way.
+impl std::fmt::Debug for BundleHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl std::fmt::LowerHex for BundleHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
 
 /// Keeps the current bundle unpacked under `dir` and its schemas installed in `registry`.
 pub struct SchemaBundleStore {
@@ -56,7 +133,7 @@ impl SchemaBundleStore {
     /// Hash of the installed bundle, straight from the registry it describes. Set only by a
     /// successful install, so a failure leaves the previous value and the next poll re-offers
     /// the bundle rather than deduplicating it away.
-    pub fn installed_hash(&self) -> Option<String> {
+    pub fn installed_hash(&self) -> Option<BundleHash> {
         self.registry.bundle_hash()
     }
 
@@ -66,9 +143,9 @@ impl SchemaBundleStore {
     /// [`QuerySchemaRegistry::store_bundle`].
     pub async fn ensure(
         &self,
-        bundle: &SchemaBundle,
+        bundle: &Bundle,
         client: &reqwest::Client,
-        still_in_use: &HashSet<u32>,
+        still_in_use: &HashSet<SchemaId>,
     ) -> anyhow::Result<()> {
         match self.install(bundle, client, still_in_use).await {
             Ok(()) => Ok(()),
@@ -81,26 +158,31 @@ impl SchemaBundleStore {
 
     async fn install(
         &self,
-        bundle: &SchemaBundle,
+        bundle: &Bundle,
         client: &reqwest::Client,
-        still_in_use: &HashSet<u32>,
+        still_in_use: &HashSet<SchemaId>,
     ) -> anyhow::Result<()> {
-        let hex = parse_sha256(&bundle.hash)?;
         let _installing = self.install_lock.lock().await;
 
-        if self.installed_hash().as_deref() == Some(bundle.hash.as_str()) {
+        if self.installed_hash() == Some(bundle.hash) {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
             return Ok(());
         }
 
-        let dir = self.dir.join(format!("{UNPACKED_PREFIX}{hex}"));
+        let dir = self.dir.join(format!("{UNPACKED_PREFIX}{:x}", bundle.hash));
         let schemas = match self.load_unpacked(&dir).await {
             Some(schemas) => schemas,
             None => {
                 let bytes = download(&bundle.url, client).await.with_context(|| {
                     format!("couldn't download schema bundle from {}", bundle.url)
                 })?;
-                verify_sha256(&bytes, hex)?;
+                let actual = BundleHash::of(&bytes);
+                if actual != bundle.hash {
+                    bail!(
+                        "schema bundle hash mismatch: expected {}, got {actual}",
+                        bundle.hash
+                    );
+                }
                 unpack(bytes, self.dir.clone(), dir.clone())
                     .await
                     .context("couldn't unpack schema bundle")?;
@@ -112,7 +194,7 @@ impl SchemaBundleStore {
 
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
         self.registry
-            .store_bundle(schemas, still_in_use, &bundle.hash);
+            .store_bundle(schemas, still_in_use, bundle.hash);
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
 
         self.prune(dir).await;
@@ -122,7 +204,10 @@ impl SchemaBundleStore {
     /// Reads back a bundle an earlier run unpacked, or `None` if there isn't a usable one. One
     /// that exists but won't load is discarded rather than fatal: it would otherwise suppress the
     /// re-download that fixes it, and a bundle that never installs blocks every assignment.
-    async fn load_unpacked(&self, dir: &Utf8Path) -> Option<HashMap<u32, Arc<DatasetDescription>>> {
+    async fn load_unpacked(
+        &self,
+        dir: &Utf8Path,
+    ) -> Option<HashMap<SchemaId, Arc<DatasetDescription>>> {
         if !dir.exists() {
             return None;
         }
@@ -182,38 +267,6 @@ fn remove_bundle_dirs(dir: &Utf8Path, prefixes: &[&str], keep: Option<&Utf8Path>
         }
     }
     removed
-}
-
-/// Splits `algorithm:hex`; only sha256. Unknown algorithms fail rather than skip verification.
-fn parse_sha256(hash: &str) -> anyhow::Result<&str> {
-    let (algorithm, hex) = hash
-        .split_once(':')
-        .with_context(|| format!("schema bundle hash '{hash}' is not in 'algorithm:hex' form"))?;
-    if algorithm != "sha256" {
-        bail!("unsupported schema bundle hash algorithm '{algorithm}', expected sha256");
-    }
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("schema bundle hash '{hex}' is not 64 hex digits");
-    }
-    Ok(hex)
-}
-
-fn verify_sha256(bytes: &[u8], expected_hex: &str) -> anyhow::Result<()> {
-    let actual = hex_encode(&Sha256::digest(bytes));
-    if !actual.eq_ignore_ascii_case(expected_hex) {
-        bail!("schema bundle hash mismatch: expected {expected_hex}, got {actual}");
-    }
-    Ok(())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 /// Buffers in memory: nothing can be trusted until the whole thing is hashed.
@@ -307,7 +360,7 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
 
 /// Parses `<id>.yaml` into its id. Digits only, no leading zeros — `+7.yaml` (which `str::parse`
 /// accepts) and `007.yaml` would let one bundle define id 7 twice, resolved by directory order.
-fn schema_id(file_name: &str) -> Option<u32> {
+fn schema_id(file_name: &str) -> Option<SchemaId> {
     let stem = file_name.strip_suffix(".yaml")?;
     if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -315,10 +368,10 @@ fn schema_id(file_name: &str) -> Option<u32> {
     if stem.starts_with('0') && stem.len() > 1 {
         return None;
     }
-    stem.parse().ok()
+    stem.parse().ok().map(SchemaId::new)
 }
 
-async fn load_dir(dir: Utf8PathBuf) -> anyhow::Result<HashMap<u32, Arc<DatasetDescription>>> {
+async fn load_dir(dir: Utf8PathBuf) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDescription>>> {
     tokio::task::spawn_blocking(move || {
         let mut schemas = HashMap::new();
         for entry in std::fs::read_dir(&dir)? {
@@ -379,10 +432,6 @@ tables:
         builder.into_inner().unwrap().finish().unwrap()
     }
 
-    fn sha256_of(bytes: &[u8]) -> String {
-        format!("sha256:{}", hex_encode(&Sha256::digest(bytes)))
-    }
-
     async fn serve_once(body: Vec<u8>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -416,17 +465,25 @@ tables:
     #[test]
     fn parses_only_sha256_hashes() {
         let hex = "a".repeat(64);
-        assert_eq!(parse_sha256(&format!("sha256:{hex}")).unwrap(), hex);
-        assert!(parse_sha256(&format!("md5:{hex}")).is_err());
-        assert!(parse_sha256(&hex).is_err(), "bare hex has no algorithm");
-        assert!(parse_sha256("sha256:abc").is_err(), "wrong length");
-        assert!(parse_sha256(&format!("sha256:{}", "z".repeat(64))).is_err());
+        let parsed: BundleHash = format!("sha256:{hex}").parse().unwrap();
+        assert_eq!(parsed.to_string(), format!("sha256:{hex}"), "round-trips");
+        assert_eq!(
+            format!("{parsed:x}"),
+            hex,
+            "bare hex names the unpacked dir"
+        );
+
+        let bad = |s: String| s.parse::<BundleHash>().is_err();
+        assert!(bad(format!("md5:{hex}")));
+        assert!(bad(hex.clone()), "bare hex has no algorithm");
+        assert!(bad("sha256:abc".to_owned()), "wrong length");
+        assert!(bad(format!("sha256:{}", "z".repeat(64))));
     }
 
     #[test]
     fn schema_ids_come_from_digits_only() {
-        assert_eq!(schema_id("7.yaml"), Some(7));
-        assert_eq!(schema_id("140000.yaml"), Some(140000));
+        assert_eq!(schema_id("7.yaml"), Some(SchemaId::new(7)));
+        assert_eq!(schema_id("140000.yaml"), Some(SchemaId::new(140_000)));
         // `str::parse` would accept these as 7, letting one bundle define the same id twice.
         assert_eq!(schema_id("+7.yaml"), None);
         assert_eq!(schema_id("007.yaml"), None);
@@ -440,8 +497,8 @@ tables:
         let dir = tempfile::tempdir().unwrap();
         let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: sha256_of(&archive),
+        let bundle = Bundle {
+            hash: BundleHash::of(&archive),
             url: serve_once(archive).await,
         };
 
@@ -450,13 +507,10 @@ tables:
             .await
             .unwrap();
 
-        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
         assert_eq!(registry.get("evm").unwrap().name, "evm");
-        assert!(registry.get_by_id(8).is_err());
-        assert_eq!(
-            store.installed_hash().as_deref(),
-            Some(bundle.hash.as_str())
-        );
+        assert!(registry.get_by_id(SchemaId::new(8)).is_err());
+        assert_eq!(store.installed_hash(), Some(bundle.hash));
     }
 
     #[tokio::test]
@@ -464,8 +518,8 @@ tables:
         let dir = tempfile::tempdir().unwrap();
         let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: sha256_of(b"something else"),
+        let bundle = Bundle {
+            hash: BundleHash::of(b"something else"),
             url: serve_once(archive).await,
         };
 
@@ -491,8 +545,8 @@ tables:
             ("nested/9.yaml", SCHEMA.as_bytes()),
             ("../escape.yaml", b"nope"),
         ]);
-        let bundle = SchemaBundle {
-            hash: sha256_of(&archive),
+        let bundle = Bundle {
+            hash: BundleHash::of(&archive),
             url: serve_once(archive).await,
         };
 
@@ -502,11 +556,11 @@ tables:
             .unwrap();
 
         assert!(
-            registry.get_by_id(7).is_ok(),
+            registry.get_by_id(SchemaId::new(7)).is_ok(),
             "the root-level <id>.yaml is loaded"
         );
         assert!(
-            registry.get_by_id(9).is_err(),
+            registry.get_by_id(SchemaId::new(9)).is_err(),
             "nested entries are not unpacked"
         );
         assert!(
@@ -519,13 +573,13 @@ tables:
     async fn reuses_the_unpacked_copy_after_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let hash = sha256_of(&archive);
+        let hash = BundleHash::of(&archive);
         let url = serve_once(archive).await;
 
         store(&dir)
             .0
             .ensure(
-                &SchemaBundle {
+                &Bundle {
                     hash: hash.clone(),
                     url: url.clone(),
                 },
@@ -539,13 +593,13 @@ tables:
         let (restarted, registry) = store(&dir);
         restarted
             .ensure(
-                &SchemaBundle { hash, url },
+                &Bundle { hash, url },
                 &reqwest::Client::new(),
                 &HashSet::new(),
             )
             .await
             .unwrap();
-        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
     }
 
     /// A damaged hash-named directory must not suppress the re-download that fixes it, or a
@@ -555,14 +609,13 @@ tables:
         let dir = tempfile::tempdir().unwrap();
         let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let hash = sha256_of(&archive);
+        let hash = BundleHash::of(&archive);
 
         // An empty directory under the hash this bundle resolves to: exists, but won't load.
-        let hex = hash.strip_prefix("sha256:").unwrap();
-        let damaged = dir.path().join(format!("{UNPACKED_PREFIX}{hex}"));
+        let damaged = dir.path().join(format!("{UNPACKED_PREFIX}{hash:x}"));
         std::fs::create_dir_all(&damaged).unwrap();
 
-        let bundle = SchemaBundle {
+        let bundle = Bundle {
             hash,
             url: serve_once(archive).await,
         };
@@ -571,11 +624,8 @@ tables:
             .await
             .expect("the damaged copy is discarded and the bundle fetched again");
 
-        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
-        assert_eq!(
-            store.installed_hash().as_deref(),
-            Some(bundle.hash.as_str())
-        );
+        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+        assert_eq!(store.installed_hash(), Some(bundle.hash));
     }
 
     /// Construction is the only thing that sweeps a crashed unpack's staging directory (`prune`
@@ -607,8 +657,8 @@ tables:
 
         for body in [SCHEMA, &SCHEMA.replace("name: evm", "name: solana")] {
             let archive = targz(&[("7.yaml", body.as_bytes())]);
-            let bundle = SchemaBundle {
-                hash: sha256_of(&archive),
+            let bundle = Bundle {
+                hash: BundleHash::of(&archive),
                 url: serve_once(archive).await,
             };
             store
@@ -618,7 +668,7 @@ tables:
         }
 
         assert_eq!(
-            registry.get_by_id(7).unwrap().name,
+            registry.get_by_id(SchemaId::new(7)).unwrap().name,
             "solana",
             "the newer bundle replaced the older one in the registry"
         );

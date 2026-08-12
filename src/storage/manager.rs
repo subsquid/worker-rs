@@ -13,6 +13,7 @@ use crate::{
     metrics,
     types::{
         dataset::{self, Dataset},
+        schema::SchemaId,
         state::{ChunkRef, ChunkSet},
     },
 };
@@ -49,7 +50,7 @@ pub struct StateManager {
 pub struct QueryChunk<F: FnOnce(PathBuf)> {
     pub path: scopeguard::ScopeGuard<PathBuf, F>,
     /// `None` under a legacy assignment, which pins no per-chunk schema.
-    pub write_schema_id: Option<u32>,
+    pub write_schema_id: Option<SchemaId>,
 }
 
 #[derive(Debug)]
@@ -252,7 +253,7 @@ impl StateManager {
         assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
-        schema_available: impl Fn(u32) -> bool,
+        schema_available: impl Fn(SchemaId) -> bool,
     ) -> bool {
         let id = id.into();
         let current_assignment_id = id.clone();
@@ -389,7 +390,7 @@ impl StateManager {
     }
 
     /// Empty when no assignment is installed, or under a legacy one.
-    pub fn active_schema_ids(&self) -> std::collections::HashSet<u32> {
+    pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
         self.datasets_index
             .lock()
             .as_ref()
@@ -572,7 +573,7 @@ mod tests {
 
     use crate::storage::datasets_index::AssignmentBlob;
 
-    fn no_schemas_needed(_: u32) -> bool {
+    fn no_schemas_needed(_: crate::types::schema::SchemaId) -> bool {
         unreachable!("a legacy assignment references no write schemas")
     }
 

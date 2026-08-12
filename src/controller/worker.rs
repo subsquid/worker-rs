@@ -27,7 +27,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::manager::{self, StateManager},
-    types::dataset::Dataset,
+    types::{dataset::Dataset, schema::SchemaId},
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -84,7 +84,7 @@ impl Worker {
     }
 
     /// Write schemas the current assignment relies on — must survive a schema-bundle replacement.
-    pub fn active_schema_ids(&self) -> std::collections::HashSet<u32> {
+    pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
         self.state_manager.active_schema_ids()
     }
 

@@ -8,6 +8,7 @@ use reqwest::Url;
 use sqd_network_transport::Keypair;
 use tracing::error;
 
+use crate::types::schema::SchemaId;
 use crate::types::state::ChunkRef;
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
@@ -27,7 +28,7 @@ pub struct DatasetsIndex {
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
     /// Write schemas used by this worker's chunks (empty under legacy assignments), so a new
     /// schema bundle can be checked against them before replacing the one in force.
-    schema_ids: HashSet<u32>,
+    schema_ids: HashSet<SchemaId>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,7 +89,7 @@ impl DatasetsIndex {
         assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
-        schema_available: impl Fn(u32) -> bool,
+        schema_available: impl Fn(SchemaId) -> bool,
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
         let mut pool = StringPool::default();
@@ -122,7 +123,7 @@ impl DatasetsIndex {
                             chunk.write_schema_id()
                         );
                     }
-                    let schema_id = chunk.write_schema_id();
+                    let schema_id = SchemaId::from(chunk.write_schema_id());
                     if schema_ids.insert(schema_id) && !schema_available(schema_id) {
                         anyhow::bail!(
                             "chunk '{}' references write schema {schema_id}, which is not in the loaded schema bundle",
@@ -159,17 +160,17 @@ impl DatasetsIndex {
     }
 
     /// `None` under a legacy assignment (which pins no schema) or for a chunk it doesn't cover.
-    pub fn write_schema_id(&self, chunk: &ChunkRef) -> Option<u32> {
+    pub fn write_schema_id(&self, chunk: &ChunkRef) -> Option<SchemaId> {
         let chunk_ref = self.chunks.get(chunk)?;
         match &self.assignment {
             AssignmentBlob::Legacy(_) => None,
-            AssignmentBlob::Worker(assignment) => {
-                Some(assignment.get_chunk(*chunk_ref)?.write_schema_id())
-            }
+            AssignmentBlob::Worker(assignment) => Some(SchemaId::from(
+                assignment.get_chunk(*chunk_ref)?.write_schema_id(),
+            )),
         }
     }
 
-    pub fn schema_ids(&self) -> &HashSet<u32> {
+    pub fn schema_ids(&self) -> &HashSet<SchemaId> {
         &self.schema_ids
     }
 

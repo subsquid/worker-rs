@@ -27,7 +27,7 @@ use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLim
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, QuerySchemaRegistry};
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::SchemaBundleStore;
+use sqd_worker::controller::schema_bundle::{Bundle, SchemaBundleStore};
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::datasets_index::AssignmentBlob;
@@ -367,10 +367,7 @@ impl Harness {
             .register_assignment(blob, update.id, &self.keypair)
     }
 
-    async fn install_schema_bundle(
-        &self,
-        bundle: &sqd_assignments::SchemaBundle,
-    ) -> anyhow::Result<()> {
+    async fn install_schema_bundle(&self, bundle: &Bundle) -> anyhow::Result<()> {
         self.schema_bundles
             .ensure(
                 bundle,

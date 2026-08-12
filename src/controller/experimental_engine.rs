@@ -19,8 +19,10 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::controller::assignments::new_reqwest_client;
+use crate::controller::schema_bundle::BundleHash;
 use crate::controller::worker::OutputFormat;
 use crate::query::result::{QueryError, QueryOk, QueryResult};
+use crate::types::schema::SchemaId;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -34,11 +36,11 @@ struct Manifest {
 struct Schemas {
     by_type: HashMap<String, Arc<DatasetDescription>>,
     /// Empty for CDN-sourced schemas, which have no ids.
-    by_id: HashMap<u32, Arc<DatasetDescription>>,
+    by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
     /// Hash of the bundle these came from; `None` for CDN-sourced schemas. Lives here rather
     /// than beside the store so it is published by the same swap as the schemas it describes —
     /// a hash naming a bundle other than the one in force is what the dedup would act on.
-    bundle_hash: Option<String>,
+    bundle_hash: Option<BundleHash>,
 }
 
 #[derive(Default)]
@@ -65,7 +67,7 @@ impl QuerySchemaRegistry {
     }
 
     /// Looks a schema up by the id assignments reference it with; only ever populated by a bundle.
-    pub fn get_by_id(&self, schema_id: u32) -> Result<Arc<DatasetDescription>, QueryError> {
+    pub fn get_by_id(&self, schema_id: SchemaId) -> Result<Arc<DatasetDescription>, QueryError> {
         self.loaded_schemas()?
             .by_id
             .get(&schema_id)
@@ -88,8 +90,8 @@ impl QuerySchemaRegistry {
     /// Hash of the bundle whose schemas are loaded, or `None` when they came from the CDN
     /// manifest or nothing is loaded yet. Read out of the same cell as the schemas, so it
     /// cannot name a bundle other than the one a query would resolve against.
-    pub fn bundle_hash(&self) -> Option<String> {
-        self.schemas.load_full()?.bundle_hash.clone()
+    pub fn bundle_hash(&self) -> Option<BundleHash> {
+        self.schemas.load_full()?.bundle_hash
     }
 
     /// Installs schemas from the network's schema bundle, indexed by id and by type, and
@@ -107,9 +109,9 @@ impl QuerySchemaRegistry {
     /// only caller and serializes them.
     pub fn store_bundle(
         &self,
-        mut by_id: HashMap<u32, Arc<DatasetDescription>>,
-        still_in_use: &HashSet<u32>,
-        hash: &str,
+        mut by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
+        still_in_use: &HashSet<SchemaId>,
+        hash: BundleHash,
     ) {
         let loaded = self.schemas.load_full().unwrap_or_default();
         for &id in still_in_use {
@@ -120,7 +122,7 @@ impl QuerySchemaRegistry {
                 continue;
             };
             tracing::warn!(
-                schema_id = id,
+                schema_id = %id,
                 "Schema bundle no longer carries a schema the current assignment still uses; \
                  keeping the loaded copy"
             );
@@ -128,7 +130,7 @@ impl QuerySchemaRegistry {
         }
         drop(loaded);
 
-        let mut by_type: HashMap<String, (u32, Arc<DatasetDescription>)> =
+        let mut by_type: HashMap<String, (SchemaId, Arc<DatasetDescription>)> =
             HashMap::with_capacity(by_id.len());
         for (&id, description) in &by_id {
             match by_type.entry(description.name.clone()) {
@@ -153,7 +155,7 @@ impl QuerySchemaRegistry {
         self.store(Schemas {
             by_type: by_type.into_iter().map(|(k, (_, v))| (k, v)).collect(),
             by_id,
-            bundle_hash: Some(hash.to_owned()),
+            bundle_hash: Some(hash),
         });
     }
 
@@ -673,7 +675,10 @@ tables:
         let registry = QuerySchemaRegistry::default();
         // Nothing loaded yet is a different failure from a schema that isn't there.
         assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
-        assert!(matches!(registry.get_by_id(7), Err(QueryError::Other(_))));
+        assert!(matches!(
+            registry.get_by_id(id(7)),
+            Err(QueryError::Other(_))
+        ));
 
         registry.store(Schemas::default());
         assert!(matches!(
@@ -681,9 +686,20 @@ tables:
             Err(QueryError::BadRequest(_))
         ));
         assert!(matches!(
-            registry.get_by_id(7),
+            registry.get_by_id(id(7)),
             Err(QueryError::BadRequest(_))
         ));
+    }
+
+    /// A distinct well-formed hash per byte value; these tests never fetch a bundle.
+    fn hash(tag: u8) -> BundleHash {
+        format!("sha256:{}", format!("{tag:02x}").repeat(32))
+            .parse()
+            .unwrap()
+    }
+
+    fn id(n: u32) -> SchemaId {
+        SchemaId::new(n)
     }
 
     fn description(name: &str) -> Arc<DatasetDescription> {
@@ -699,16 +715,16 @@ tables:
     fn bundle_schemas_are_reachable_by_id_and_by_type() {
         let registry = QuerySchemaRegistry::default();
         registry.store_bundle(
-            HashMap::from([(7, description("evm")), (12, description("solana"))]),
+            HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
             &HashSet::new(),
-            "sha256:aa",
+            hash(0xaa),
         );
 
-        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
-        assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
+        assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
         assert_eq!(registry.get("evm").unwrap().name, "evm");
         assert_eq!(registry.get("solana").unwrap().name, "solana");
-        assert!(registry.get_by_id(9).is_err());
+        assert!(registry.get_by_id(id(9)).is_err());
     }
 
     /// The hash and the schemas it names are one value, so no reader can pair a hash with a
@@ -719,21 +735,21 @@ tables:
         assert_eq!(registry.bundle_hash(), None, "nothing loaded yet");
 
         registry.store_bundle(
-            HashMap::from([(7, description("evm"))]),
+            HashMap::from([(id(7), description("evm"))]),
             &HashSet::new(),
-            "a",
+            hash(0x0a),
         );
-        assert_eq!(registry.bundle_hash().as_deref(), Some("a"));
+        assert_eq!(registry.bundle_hash(), Some(hash(0x0a)));
 
         registry.store_bundle(
-            HashMap::from([(12, description("solana"))]),
+            HashMap::from([(id(12), description("solana"))]),
             &HashSet::new(),
-            "b",
+            hash(0x0b),
         );
-        assert_eq!(registry.bundle_hash().as_deref(), Some("b"));
+        assert_eq!(registry.bundle_hash(), Some(hash(0x0b)));
         assert!(
-            registry.get_by_id(7).is_err() && registry.get_by_id(12).is_ok(),
-            "hash b must name b's schemas, never a's"
+            registry.get_by_id(id(7)).is_err() && registry.get_by_id(id(12)).is_ok(),
+            "the second hash must name the second bundle's schemas, never the first's"
         );
 
         registry.store(Schemas::default());
@@ -749,19 +765,19 @@ tables:
     fn a_schema_still_in_use_survives_a_bundle_that_drops_it() {
         let registry = QuerySchemaRegistry::default();
         registry.store_bundle(
-            HashMap::from([(7, description("evm")), (12, description("solana"))]),
+            HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
             &HashSet::new(),
-            "sha256:bb",
+            hash(0xbb),
         );
 
         registry.store_bundle(
-            HashMap::from([(12, description("solana"))]),
-            &HashSet::from([7]),
-            "sha256:cc",
+            HashMap::from([(id(12), description("solana"))]),
+            &HashSet::from([id(7)]),
+            hash(0xcc),
         );
 
-        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
-        assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
+        assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
         assert_eq!(registry.get("evm").unwrap().name, "evm");
     }
 
@@ -769,20 +785,20 @@ tables:
     fn a_schema_no_longer_in_use_is_dropped() {
         let registry = QuerySchemaRegistry::default();
         registry.store_bundle(
-            HashMap::from([(7, description("evm")), (12, description("solana"))]),
+            HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
             &HashSet::new(),
-            "sha256:dd",
+            hash(0xdd),
         );
 
         registry.store_bundle(
-            HashMap::from([(12, description("solana"))]),
-            &HashSet::from([12]),
-            "sha256:ee",
+            HashMap::from([(id(12), description("solana"))]),
+            &HashSet::from([id(12)]),
+            hash(0xee),
         );
 
-        assert!(registry.get_by_id(7).is_err());
+        assert!(registry.get_by_id(id(7)).is_err());
         assert!(registry.get("evm").is_err());
-        assert_eq!(registry.get_by_id(12).unwrap().name, "solana");
+        assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
     }
 
     /// Duplicate types resolve the type-keyed slot to the highest id; both stay reachable by id.
@@ -790,18 +806,18 @@ tables:
     fn several_schemas_for_one_type_stay_reachable_by_id() {
         let registry = QuerySchemaRegistry::default();
         registry.store_bundle(
-            HashMap::from([(7, description("evm")), (9, description("evm"))]),
+            HashMap::from([(id(7), description("evm")), (id(9), description("evm"))]),
             &HashSet::new(),
-            "sha256:ff",
+            hash(0xff),
         );
 
-        assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
-        assert_eq!(registry.get_by_id(9).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
+        assert_eq!(registry.get_by_id(id(9)).unwrap().name, "evm");
         assert!(registry.get("evm").is_ok());
         assert!(
             Arc::ptr_eq(
                 &registry.get("evm").unwrap(),
-                &registry.get_by_id(9).unwrap()
+                &registry.get_by_id(id(9)).unwrap()
             ),
             "the type-keyed slot resolves to the highest id"
         );

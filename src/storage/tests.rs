@@ -125,9 +125,10 @@ mod worker_assignment {
     use sqd_network_transport::Keypair;
 
     use crate::storage::datasets_index::{AssignmentBlob, DatasetsIndex, RemoteFile};
+    use crate::types::schema::SchemaId;
     use crate::types::state::ChunkRef;
 
-    fn all_schemas_available(_: u32) -> bool {
+    fn all_schemas_available(_: SchemaId) -> bool {
         true
     }
 
@@ -275,8 +276,11 @@ mod worker_assignment {
         .unwrap();
 
         let chunk = index.chunks().keys().next().unwrap().clone();
-        assert_eq!(index.write_schema_id(&chunk), Some(7));
-        assert_eq!(index.schema_ids(), &std::collections::HashSet::from([7]));
+        assert_eq!(index.write_schema_id(&chunk), Some(SchemaId::new(7)));
+        assert_eq!(
+            index.schema_ids(),
+            &std::collections::HashSet::from([SchemaId::new(7)])
+        );
 
         let absent = ChunkRef {
             dataset: std::sync::Arc::new(DATASET.to_owned()),
