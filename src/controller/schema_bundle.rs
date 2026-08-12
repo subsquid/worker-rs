@@ -279,7 +279,9 @@ impl SchemaBundleStore {
                     error = ?e,
                     "Unpacked schema bundle is unusable; discarding it and fetching again"
                 );
-                if let Err(e) = tokio::fs::remove_dir_all(dir).await {
+                let path = dir.to_owned();
+                let discarded = tokio::task::spawn_blocking(move || discard(&path)).await;
+                if let Ok(Err(e)) = discarded {
                     tracing::warn!(%dir, error = %e, "Couldn't remove the unusable schema bundle");
                 }
                 None
@@ -315,7 +317,14 @@ fn remove_bundle_dirs(dir: &Utf8Path, prefixes: &[&str], keep: Option<&Utf8Path>
         if keep.is_some_and(|keep| path == keep.as_std_path()) {
             continue;
         }
-        match std::fs::remove_dir_all(&path) {
+        // A staging directory is already outside the namespace that claims completeness, so it
+        // can go in place; an unpacked one has to leave that namespace first.
+        let outcome = if name.starts_with(UNPACKED_PREFIX) {
+            discard(&dir.join(name))
+        } else {
+            std::fs::remove_dir_all(&path)
+        };
+        match outcome {
             Ok(()) => removed += 1,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "Couldn't remove stale schema bundle")
@@ -323,6 +332,22 @@ fn remove_bundle_dirs(dir: &Utf8Path, prefixes: &[&str], keep: Option<&Utf8Path>
         }
     }
     removed
+}
+
+/// Deletes an unpacked bundle by moving it out of the `sha256-` namespace first, as
+/// `StateManager::drop_chunk` does for chunks. A crash between the rename and the delete then
+/// leaves a `temp-` directory the next startup sweeps — never a half-emptied directory whose
+/// name still asserts a complete, hash-verified bundle, which nothing re-checks and which
+/// `install`'s dedup would go on treating as installed.
+fn discard(path: &Utf8Path) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(Utf8Path::new("."));
+    // An empty directory of its own to rename onto, so this can never collide with a staging
+    // directory in flight. Dropped if the rename fails, taking the empty directory with it.
+    let doomed = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .tempdir_in(parent)?;
+    std::fs::rename(path, doomed.path())?;
+    doomed.close()
 }
 
 /// Buffers in memory: nothing can be trusted until the whole thing is hashed.
@@ -749,10 +774,56 @@ tables:
             "solana",
             "the newer bundle replaced the older one in the registry"
         );
-        assert_eq!(
-            std::fs::read_dir(dir.path()).unwrap().count(),
-            1,
-            "the superseded bundle's directory is removed"
+        // One directory, and it is the installed bundle: the superseded one is gone, and so is
+        // the `temp-` name it was renamed onto on its way out.
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let installed = format!("{UNPACKED_PREFIX}{:x}", store.installed_hash().unwrap());
+        assert_eq!(left, vec![installed]);
+    }
+
+    /// The point of renaming first: an interrupted delete must not leave a directory whose name
+    /// still asserts a complete, hash-verified bundle — nothing re-hashes a cached one, and the
+    /// install dedup would go on treating it as installed.
+    ///
+    /// A crash can't be staged in a unit test, so the delete is made to fail instead: an
+    /// unwritable subdirectory stops `remove_dir_all` halfway, which is the same observable
+    /// aftermath. A plain in-place delete fails this — it leaves the `sha256-` name behind,
+    /// short one file.
+    #[test]
+    fn an_interrupted_discard_leaves_nothing_under_the_unpacked_name() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let unpacked = root.join(format!("{UNPACKED_PREFIX}{}", "a".repeat(64)));
+        let undeletable = unpacked.join("sub");
+        std::fs::create_dir_all(&undeletable).unwrap();
+        std::fs::write(unpacked.join("7.yaml"), SCHEMA).unwrap();
+        std::fs::write(undeletable.join("pinned"), b"x").unwrap();
+        // Its entries can't be unlinked, so the removal stops partway through.
+        std::fs::set_permissions(&undeletable, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        assert!(discard(&unpacked).is_err(), "the delete must not complete");
+
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 1, "one leftover: {left:?}");
+        assert!(
+            left[0].starts_with(TEMP_PREFIX),
+            "the leftover must be swept at startup, not read back as a bundle: {left:?}"
         );
+
+        // The leftover moved, so restore write access at its new name — otherwise the enclosing
+        // temp dir can't be cleaned up either.
+        std::fs::set_permissions(
+            root.join(&left[0]).join("sub"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 }
