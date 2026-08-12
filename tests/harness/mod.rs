@@ -239,7 +239,7 @@ impl Harness {
             shutdown.clone(),
         );
 
-        let installed_hash = schema_bundles.clone();
+        let in_force = (schema_bundles.clone(), worker.clone());
         let assignment_stream = Box::pin(assignments::new_assignments_stream(
             scheduler.network_state_url(),
             // The production 60 s poll would dominate every test's wall clock.
@@ -248,7 +248,10 @@ impl Harness {
             Duration::from_millis(200),
             worker_id,
             assignment_source(config.format),
-            move || installed_hash.installed_hash(),
+            move || assignments::AppliedPair {
+                assignment_id: in_force.1.registered_assignment_id(),
+                bundle_hash: in_force.0.installed_hash(),
+            },
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);

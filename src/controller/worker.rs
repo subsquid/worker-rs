@@ -86,6 +86,10 @@ impl Worker {
             .set_assignment(assignment, id, key, covered_by_bundle)
     }
 
+    pub fn registered_assignment_id(&self) -> Option<String> {
+        self.state_manager.registered_assignment_id()
+    }
+
     /// Write schemas the chunks this worker holds were produced with.
     pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
         self.state_manager.active_schema_ids()

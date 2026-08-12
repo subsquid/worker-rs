@@ -389,6 +389,17 @@ impl StateManager {
     }
 
     /// Empty when no assignment is installed, or under a legacy one.
+    /// Id of the assignment currently registered, or `None` before the first one.
+    ///
+    /// This is what the network state is reconciled against — not the last id *seen*, which
+    /// cannot tell an assignment that applied from one that was refused.
+    pub fn registered_assignment_id(&self) -> Option<String> {
+        self.datasets_index
+            .lock()
+            .as_ref()
+            .map(|index| index.assignment_id().to_owned())
+    }
+
     pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
         self.datasets_index
             .lock()

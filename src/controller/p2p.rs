@@ -308,7 +308,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         ))
     }
 
-    /// Takes one network update: an assignment joins the queue, a bundle is merged now.
+    /// Takes one update: an assignment joins the queue, a bundle is merged where it stands.
     /// Returns whether the queue overflowed, which tells the caller to abandon what it holds.
     ///
     /// Merged here rather than inside the update stream. A future parked in the stream resumes
@@ -341,8 +341,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let assignment_client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let bundle_client = assignment_client.clone();
-        // On a merge failure the store keeps its previous hash, so the next poll re-offers the
-        // bundle rather than deduplicating it away.
+        // A merge failure leaves the store's hash unchanged, and a refused assignment leaves the
+        // registered id unchanged, so either sends the same half round again on the next poll
+        // instead of it being consumed by having been seen.
         let mut assignments = Box::pin(
             super::assignments::new_assignments_stream(
                 self.assignment_url.clone(),
@@ -351,7 +352,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_fetch_max_delay,
                 self.worker_id,
                 self.assignment_source,
-                || self.schema_bundles.installed_hash(),
+                || super::assignments::AppliedPair {
+                    assignment_id: self.worker.registered_assignment_id(),
+                    bundle_hash: self.schema_bundles.installed_hash(),
+                },
             )
             .take_until(cancellation_token.clone().cancelled_owned())
             .fuse(),
@@ -383,7 +387,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                                         let Some(next_update) = next_update else {
                                             break 'assignments;
                                         };
-                                        if self.absorb_update(next_update, &mut pending, &bundle_client).await {
+                                        if self
+                                            .absorb_update(next_update, &mut pending, &bundle_client)
+                                            .await
+                                        {
                                             skip_retry = true;
                                         }
                                     }
@@ -1132,6 +1139,16 @@ fn push_pending_assignment(
     pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
     update: super::assignments::AssignmentUpdate,
 ) -> bool {
+    // The poll reconciles against what applied, so an assignment still being fetched is offered
+    // again every interval until it registers. Queueing those copies would re-apply it once per
+    // poll; the offers are the same state, and one of them is enough.
+    if pending
+        .back()
+        .is_some_and(|queued| queued.pair() == update.pair())
+    {
+        tracing::debug!(assignment_id = %update.id, "Already queued");
+        return false;
+    }
     if let Some(skipped) = push_pending_item(pending, update) {
         warn!(
             "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
