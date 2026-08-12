@@ -213,9 +213,11 @@ leave the worker silently short of data it is believed to hold.
 `write_schema_id` also selects the schema a query is executed against: it is read out
 of the index in the same critical section that locks the chunk, so a schema id and
 chunk state can never be paired across an assignment change. The query's own dataset
-type is then only a cross-check — a disagreement is a typed `bad_request`. Under IB-41
-(legacy) there is no per-chunk schema and the query's dataset type selects it, which is
-sound only while one schema exists per type.
+type is then only a cross-check — a disagreement is a typed `bad_request`. A pinned id the
+loaded bundle doesn't carry is a `server_error` instead: nothing in the query names that
+id, so the fault is the worker's own (INV-26, ADR-20), and FM-53c means it should not be
+reachable at all. Under IB-41 (legacy) there is no per-chunk schema and the query's
+dataset type selects it, which is sound only while one schema exists per type.
 
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against

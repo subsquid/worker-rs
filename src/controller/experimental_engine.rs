@@ -67,13 +67,19 @@ impl QuerySchemaRegistry {
     }
 
     /// Looks a schema up by the id assignments reference it with; only ever populated by a bundle.
+    ///
+    /// A miss is a worker fault, never the client's: the id comes from the chunk's own
+    /// `write_schema_id` in the applied assignment, so no query can provoke or avoid it. It
+    /// should not be reachable at all — FM-53c refuses an assignment whose schemas the bundle
+    /// lacks, and a replacement carries over the ones still in use — so if it fires, one of those
+    /// two has broken and the right answer is a retryable `server_error` (INV-26, ADR-20).
     pub fn get_by_id(&self, schema_id: SchemaId) -> Result<Arc<DatasetDescription>, QueryError> {
         self.loaded_schemas()?
             .by_id
             .get(&schema_id)
             .cloned()
             .ok_or_else(|| {
-                QueryError::BadRequest(format!(
+                QueryError::Other(format!(
                     "schema {schema_id} is not in the loaded schema bundle"
                 ))
             })
@@ -687,8 +693,45 @@ tables:
         ));
         assert!(matches!(
             registry.get_by_id(id(7)),
-            Err(QueryError::BadRequest(_))
+            Err(QueryError::Other(_))
         ));
+    }
+
+    /// Who is blamed follows who supplied the input. The query names a dataset type, so asking
+    /// for one that doesn't exist is the client's error; nothing in a query names a schema id —
+    /// it comes from the chunk's own `write_schema_id` — so a miss there is the worker's, and
+    /// must stay retryable rather than terminal (INV-26). Both are unreachable by design;
+    /// the point is which way they fail when a bookkeeping invariant slips.
+    #[test]
+    fn a_missing_schema_id_is_a_worker_fault_and_a_missing_type_is_the_client_s() {
+        use sqd_messages::query_error::Err as WireErr;
+
+        let registry = QuerySchemaRegistry::default();
+        registry.store_bundle(
+            HashMap::from([(id(7), description("evm"))]),
+            &HashSet::new(),
+            hash(0xaa),
+        );
+
+        // Assert the wire verdict rather than the internal variant: what matters is what a
+        // routing client sees, and `bad_request` is the one it treats as terminal.
+        let wire = WireErr::from;
+
+        assert!(
+            matches!(
+                wire(registry.get("solana").unwrap_err()),
+                WireErr::BadRequest(_)
+            ),
+            "the query named the type, so the query is what is wrong"
+        );
+        assert!(
+            matches!(
+                wire(registry.get_by_id(id(9)).unwrap_err()),
+                WireErr::ServerError(_)
+            ),
+            "no query names a schema id: a miss is the worker's own bookkeeping, and a \
+             client-blamed bad_request would tell routing clients not to retry elsewhere"
+        );
     }
 
     /// A distinct well-formed hash per byte value; these tests never fetch a bundle.

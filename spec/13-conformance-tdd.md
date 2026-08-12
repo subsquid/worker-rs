@@ -177,7 +177,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-23 | CT-5 | P | downgrade-agreement + log-summary unit tests |
 | INV-24 | CT-4/6 | U | boundary corpus absent |
 | INV-25 | CT-5 | P | HC-5 verifies the response signature on every response it sees, success and error alike |
-| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness) |
+| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness). The bundle path attributes correctly and is unit-tested both ways: a pinned schema id the loaded bundle lacks is `server_error`, an unknown dataset type stays `bad_request` |
 | INV-30 | CT-3 | U⊘ | known-violated (GAP-11). HC-5 checks map length and ones-count per read, but tearing needs a racing test |
 | INV-31 | CT-1/6 | P⊘ | running-query gauge covered; the remaining counters are still known-violated (GAP-17) |
 | INV-32 | CT-5/7 | P⊘ | admitted-always-logged unit-tested and now end-to-end (admitted → exactly one record; pre-admission → none); duplicate/oversize drop known (GAP-12/14) |
