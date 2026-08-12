@@ -21,7 +21,7 @@ compression stays off — the worker compresses the whole response. Gating is
 portal-driven: no worker-side flag disables the dynamic engine; the schema registry is
 the operational gate. Which registry depends on the assignment format: the CDN manifest
 (hourly refresh, keep-previous-on-failure) in legacy mode, or the network state's schema
-bundle under `USE_WORKER_ASSIGNMENTS` (IB-44b), where a bundle that fails to install
+bundle under `--assignment-source worker` (IB-44b), where a bundle that fails to install
 blocks the assignment rather than degrading (FM-53b).
 
 ## Consequences

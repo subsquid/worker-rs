@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-11**
-(baseline commit `c49adc9`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-12**
+(baseline commit `d98b494`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -121,7 +121,7 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-08-11)
+## Traceability matrix (as of 2026-08-12)
 
 Statuses reflect the actual test inventory: inline unit tests, all built unconditionally;
 `state_pbt` / `state_regression` over the chunk state machine and assignment
@@ -232,7 +232,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-08-11)
+## Gap register (as of 2026-08-12)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.

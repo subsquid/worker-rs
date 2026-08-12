@@ -11,6 +11,31 @@ use sqd_network_transport::TransportArgs;
 /// in a tight loop.
 pub const DEFAULT_MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
 
+/// Which assignment the worker reads, and with it which input bindings apply (spec/14).
+/// Exactly one pointer is read; neither mode falls back to the other, because the documents
+/// behind them are different formats.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AssignmentSource {
+    /// The shared `assignment` pointer, with query schemas from the CDN manifest
+    /// (IB-40/41/44).
+    #[default]
+    Legacy,
+    /// The dedicated `worker_assignment` pointer, with query schemas from the network state's
+    /// schema bundle (IB-40b/41b/44b).
+    Worker,
+}
+
+/// Needed by `default_value_t`. Delegated to the `ValueEnum` metadata rather than spelled out
+/// again, so what is printed is by construction what the flag accepts.
+impl std::fmt::Display for AssignmentSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
+}
+
 #[derive(Parser, Clone)]
 #[command(version)]
 pub struct Args {
@@ -56,11 +81,9 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub assignment_url: String,
 
-    /// Read the network state's dedicated `worker_assignment` (plus schema bundle) instead of the
-    /// legacy shared `assignment`. No fallback if `worker_assignment` is absent.
-    // `ArgAction::Set` so USE_WORKER_ASSIGNMENTS=false parses as a value — see `sentry_is_enabled`.
-    #[clap(long, env, hide(true), default_value_t = false, action = clap::ArgAction::Set)]
-    pub use_worker_assignments: bool,
+    /// Which pointer in the network state the worker reads its assignment from.
+    #[clap(long, env, hide(true), default_value_t = AssignmentSource::Legacy, value_enum)]
+    pub assignment_source: AssignmentSource,
 
     /// URL of the query schemas manifest for the experimental query engine
     /// (defaults to a per-network CDN location)

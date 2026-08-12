@@ -152,7 +152,7 @@ missing OB-4/7 breakdowns have no binding yet — GAP-17/GAP-23 track the additi
 | (positional) | `ASSIGNMENT_CHECK_INTERVAL_SEC` / `ASSIGNMENT_FETCH_TIMEOUT_SEC` / `ASSIGNMENT_CHECK_MAX_DELAY_SEC` | P-ASSIGN-POLL / P-ASSIGN-FETCH-TIMEOUT / P-ASSIGN-RETRY-MAX |
 | (positional) | `NETWORK_POLLING_INTERVAL_SEC` | P-EPOCH-POLL |
 | `--query-schemas-url` (+ refresh env) | `QUERY_SCHEMAS_URL` | schema registry address / P-SCHEMA-REFRESH (legacy mode only — IB-44) |
-| (positional) | `USE_WORKER_ASSIGNMENTS` | selects the input-side bindings: IB-40b/41b/44b instead of IB-40/41/44 |
+| `--assignment-source` | `ASSIGNMENT_SOURCE` | `legacy` \| `worker`; `worker` selects the input-side bindings IB-40b/41b/44b instead of IB-40/41/44 |
 | `--rpc-url`, `--l1-rpc-url`, `--network`, contract addresses | `RPC_URL` … | chain registry |
 | (positional) | `SENTRY_DSN` / `SENTRY_IS_ENABLED` | crash telemetry (on by default) |
 
@@ -164,7 +164,7 @@ Duration settings parse as whole seconds. Misconfiguration behavior is FM-50.
 `{network, assignment: {id, fb_url_v1, effective_from, …}}`; `effective_from` is
 currently ignored by the worker (OQ-8). `assignment` is optional — a network that has
 finished migrating stops publishing it, and its absence yields no update rather than an
-error. HC-1 serves this. Under `USE_WORKER_ASSIGNMENTS` this binding is replaced by
+error. HC-1 serves this. Under `--assignment-source worker` this binding is replaced by
 IB-40b.
 
 **IB-41 — Assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
@@ -174,7 +174,7 @@ worker-index lists — the live chunk→worker mapping), worker roster (peer ids
 state, encrypted HTTP headers per worker; the roster-side chunk list is deprecated;
 encryption is crypto-box against the worker's identity key). HC-1 must be able to emit
 well-formed and deliberately malformed instances (FM-11/12 corpus). Under
-`USE_WORKER_ASSIGNMENTS` this binding is replaced by IB-41b.
+`--assignment-source worker` this binding is replaced by IB-41b.
 
 **IB-42 — Data origin.** Plain HTTPS GET per file at
 `join(dataset_base, chunk_base, file_url)` with the decrypted headers attached;
@@ -186,10 +186,10 @@ and per-operator CU allocations polled every P-EPOCH-POLL. HC-8 stubs these.
 
 **IB-44 — Schema registry.** HTTPS GET YAML manifest mapping dataset types to schema
 documents, refreshed every P-SCHEMA-REFRESH with unchanged-body short-circuit; fetch
-failure keeps previous schemas (FM-53). Legacy mode only: under `USE_WORKER_ASSIGNMENTS`
+failure keeps previous schemas (FM-53). Legacy mode only: under `--assignment-source worker`
 the manifest is not polled at all and schemas come from IB-44b.
 
-### Worker-oriented input bindings (`USE_WORKER_ASSIGNMENTS`)
+### Worker-oriented input bindings (`--assignment-source worker`)
 
 These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are unchanged.
 

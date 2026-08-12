@@ -1,6 +1,6 @@
 # 15 — Parameter registry
 
-**Mutable doc #2.** As of: 2026-08-11, baseline `c49adc9`. Every `P-*` symbol used
+**Mutable doc #2.** As of: 2026-08-12, baseline `d98b494`. Every `P-*` symbol used
 anywhere in the suite has a row. **Observed** = what the implementation does today
 (configuration default where operator-settable). **Target** = the intended bound; ⚠ =
 proposed, unratified — ratification lands via the ADR named in the row (ADR-19 for the
@@ -67,7 +67,7 @@ batch unless stated).
 | P-LOGS-RESP-MAX | log response page budget (RP-22) | 10 MiB − 100 KiB (margin unexplained — OQ-2) | derive from P-LOGS-RESP-CEIL ⚠ |
 | P-LOGS-RESP-CEIL | transport ceiling for log/status responses (IB-2) | 10 MiB | same |
 | P-LOGS-QUEUE | log-read queue depth (RP-22) | 4 | same |
-| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44); inert under `USE_WORKER_ASSIGNMENTS`, where schemas arrive with the network state (IB-44b) | 3 600 s | same |
+| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44); inert under `--assignment-source worker`, where schemas arrive with the network state (IB-44b) | 3 600 s | same |
 
 ## Lifecycle and reconciliation bounds
 

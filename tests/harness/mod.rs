@@ -22,7 +22,7 @@ use sqd_messages::{query_error, Query, QueryExecuted, QueryLogs};
 use sqd_network_transport::{protocol, Keypair, PeerId};
 use tokio_util::sync::CancellationToken;
 
-use sqd_worker::cli::Args;
+use sqd_worker::cli::{Args, AssignmentSource};
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, QuerySchemaRegistry};
@@ -122,6 +122,14 @@ pub struct Harness {
     // Dropped last: the data dir must outlive every subsystem that writes into it.
     data_dir: tempfile::TempDir,
     _reporter: SeedReporter,
+}
+
+/// The worker-side setting the scheduler's published format implies.
+fn assignment_source(format: Format) -> AssignmentSource {
+    match format {
+        Format::Legacy => AssignmentSource::Legacy,
+        Format::Worker => AssignmentSource::Worker,
+    }
 }
 
 /// Options a test may vary. Defaults mirror the shipped configuration (spec/15).
@@ -239,7 +247,7 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
-            config.format == Format::Worker,
+            assignment_source(config.format),
             move || installed_hash.installed_hash(),
         ));
         let assignment_client =
@@ -637,12 +645,8 @@ fn build_args(
         "http://127.0.0.1:1/unused",
         "--l1-rpc-url",
         "http://127.0.0.1:1/unused",
-        "--use-worker-assignments",
-        if config.format == Format::Worker {
-            "true"
-        } else {
-            "false"
-        },
+        "--assignment-source",
+        &assignment_source(config.format).to_string(),
     ]);
 
     // Positional/env-only settings (IB-32) have no flag to pass; set them directly.

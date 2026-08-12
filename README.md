@@ -55,13 +55,13 @@ The worker is configured through command-line flags or the equivalent environmen
 | `--concurrent-downloads` | `CONCURRENT_DOWNLOADS` | `3` | Maximum number of concurrent chunk downloads |
 | `--query-threads` | `QUERY_THREADS` | (CPU count) | Threads used by the query engine |
 | `--assignment-url` | `ASSIGNMENT_URL` | network-dependent | URL of the chunk assignment / network state |
-| `--use-worker-assignments` | `USE_WORKER_ASSIGNMENTS` | `false` | Read the worker-oriented assignment instead of the legacy one (see below) |
+| `--assignment-source` | `ASSIGNMENT_SOURCE` | `legacy` | Which assignment the worker reads: `legacy` or `worker` (see below) |
 
 Network selection and boot nodes come from the transport arguments (see `--help`). When the network is set to `mainnet` or `tethys`, default boot nodes and the assignment URL are filled in automatically.
 
 ### Worker-oriented assignments
 
-With `--use-worker-assignments`, the worker reads the network state's `worker_assignment`
+With `--assignment-source worker`, the worker reads the network state's `worker_assignment`
 pointer instead of the legacy shared `assignment`, and ignores the legacy one entirely — there is
 no fallback if `worker_assignment` is absent. This changes three things:
 

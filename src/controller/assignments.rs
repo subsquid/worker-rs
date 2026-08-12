@@ -7,6 +7,7 @@ use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
 
 use super::schema_bundle::{BundleHash, SchemaBundle};
+use crate::cli::AssignmentSource;
 use crate::metrics;
 
 /// The assignment and the schema bundle are versioned independently, and reported separately.
@@ -43,7 +44,7 @@ pub fn new_assignments_stream(
     timeout: Duration,
     max_delay: Duration,
     peer_id: PeerId,
-    use_worker_assignments: bool,
+    assignment_source: AssignmentSource,
     installed_bundle_hash: impl Fn() -> Option<BundleHash>,
 ) -> impl Stream<Item = NetworkUpdate> {
     let mut timer = tokio::time::interval(frequency);
@@ -59,7 +60,7 @@ pub fn new_assignments_stream(
 
             let mut current_delay = Duration::from_secs(1);
             loop {
-                match poll_network_state(&url, &reqwest_client, &mut last_id, use_worker_assignments, &installed_bundle_hash).await {
+                match poll_network_state(&url, &reqwest_client, &mut last_id, assignment_source, &installed_bundle_hash).await {
                     Ok(Some(data)) => {
                         yield data;
                         break;
@@ -81,14 +82,14 @@ async fn poll_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
     last_id: &mut Option<String>,
-    use_worker_assignments: bool,
+    assignment_source: AssignmentSource,
     installed_bundle_hash: &impl Fn() -> Option<BundleHash>,
 ) -> anyhow::Result<Option<NetworkUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
     // Parsed here, at the edge: a hash that isn't `sha256:<hex>` is a malformed network state,
     // and every comparison downstream is then between two verified hashes.
-    let published_bundle = use_worker_assignments
+    let published_bundle = (assignment_source == AssignmentSource::Worker)
         .then(|| network_state.schema_bundle.take())
         .flatten()
         .map(SchemaBundle::try_from)
@@ -97,7 +98,7 @@ async fn poll_network_state(
             metrics::SCHEMA_BUNDLE_FAILURES.inc();
         })?;
 
-    match changed_assignment(&network_state, last_id.as_deref(), use_worker_assignments) {
+    match changed_assignment(&network_state, last_id.as_deref(), assignment_source) {
         Some(assignment) => {
             let update = AssignmentUpdate {
                 fb_url_v1: assignment
@@ -122,15 +123,14 @@ async fn poll_network_state(
 fn changed_assignment<'a>(
     network_state: &'a sqd_assignments::NetworkState,
     last_id: Option<&str>,
-    use_worker_assignments: bool,
+    assignment_source: AssignmentSource,
 ) -> Option<&'a sqd_assignments::NetworkAssignment> {
-    let Some(assignment) = visible_assignment(network_state, use_worker_assignments) else {
+    let Some(assignment) = visible_assignment(network_state, assignment_source) else {
         // Warn, not debug: a worker whose mode the publisher doesn't serve stands still.
         tracing::warn!(
-            expected = if use_worker_assignments {
-                "worker_assignment"
-            } else {
-                "assignment"
+            expected = match assignment_source {
+                AssignmentSource::Worker => "worker_assignment",
+                AssignmentSource::Legacy => "assignment",
             },
             "Network state carries no assignment for this worker's mode; waiting"
         );
@@ -148,12 +148,11 @@ fn changed_assignment<'a>(
 /// Never falls back to the other mode's pointer: its bytes are a different format.
 fn visible_assignment(
     network_state: &sqd_assignments::NetworkState,
-    use_worker_assignments: bool,
+    assignment_source: AssignmentSource,
 ) -> Option<&sqd_assignments::NetworkAssignment> {
-    if use_worker_assignments {
-        network_state.worker_assignment.as_ref()
-    } else {
-        network_state.assignment.as_ref()
+    match assignment_source {
+        AssignmentSource::Worker => network_state.worker_assignment.as_ref(),
+        AssignmentSource::Legacy => network_state.assignment.as_ref(),
     }
 }
 
@@ -235,7 +234,12 @@ mod tests {
         let mut state = network_state();
         state.worker_assignment = Some(assignment("worker"));
 
-        assert_eq!(visible_assignment(&state, false).unwrap().id, "legacy");
+        assert_eq!(
+            visible_assignment(&state, AssignmentSource::Legacy)
+                .unwrap()
+                .id,
+            "legacy"
+        );
     }
 
     #[test]
@@ -243,18 +247,23 @@ mod tests {
         let mut state = network_state();
         state.worker_assignment = Some(assignment("worker"));
 
-        assert_eq!(visible_assignment(&state, true).unwrap().id, "worker");
+        assert_eq!(
+            visible_assignment(&state, AssignmentSource::Worker)
+                .unwrap()
+                .id,
+            "worker"
+        );
     }
 
     #[test]
     fn visible_assignment_never_falls_back_to_the_other_pointer() {
         let legacy_only = network_state();
-        assert!(visible_assignment(&legacy_only, true).is_none());
+        assert!(visible_assignment(&legacy_only, AssignmentSource::Worker).is_none());
 
         let mut worker_only = network_state();
         worker_only.assignment = None;
         worker_only.worker_assignment = Some(assignment("worker"));
-        assert!(visible_assignment(&worker_only, false).is_none());
+        assert!(visible_assignment(&worker_only, AssignmentSource::Legacy).is_none());
     }
 
     /// Serves each queued response to one connection, then stops accepting.
@@ -328,32 +337,56 @@ mod tests {
         let installed_hash = || installed.lock().unwrap().clone();
 
         // Both new: one assignment, carrying its bundle.
-        let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Worker,
+            &installed_hash,
+        )
+        .await
+        .unwrap();
         let update = assignment_of(update);
         assert_eq!(update.id, "assignment-1");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
         *installed.lock().unwrap() = Some(hash(0xaa));
 
         // New assignment, same bundle: the bundle rides along, already installed.
-        let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Worker,
+            &installed_hash,
+        )
+        .await
+        .unwrap();
         let update = assignment_of(update);
         assert_eq!(update.id, "assignment-2");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
         // Neither moved: nothing to report.
-        let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Worker,
+            &installed_hash,
+        )
+        .await
+        .unwrap();
         assert!(update.is_none());
 
         // New bundle, same assignment: reported on its own.
-        let update = poll_network_state(&url, &test_client(), &mut last_id, true, &installed_hash)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Worker,
+            &installed_hash,
+        )
+        .await
+        .unwrap();
         match update {
             Some(NetworkUpdate::SchemaBundle(bundle)) => assert_eq!(bundle.hash, hash(0xbb)),
             other => panic!(
@@ -370,15 +403,27 @@ mod tests {
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let mut last_id = None;
 
-        let update = poll_network_state(&url, &test_client(), &mut last_id, true, &|| None)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Worker,
+            &|| None,
+        )
+        .await
+        .unwrap();
         assert_eq!(assignment_of(update).id, "assignment-1");
 
         // The assignment id is consumed, but nothing was installed: the bundle comes back.
-        let update = poll_network_state(&url, &test_client(), &mut last_id, true, &|| None)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Worker,
+            &|| None,
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(update, Some(NetworkUpdate::SchemaBundle(ref b)) if b.hash == hash(0xaa)),
             "got {}",
@@ -395,9 +440,15 @@ mod tests {
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let mut last_id = None;
 
-        let update = poll_network_state(&url, &test_client(), &mut last_id, false, &|| None)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Legacy,
+            &|| None,
+        )
+        .await
+        .unwrap();
         let update = assignment_of(update);
         assert_eq!(update.id, "a1");
         assert!(
@@ -405,9 +456,15 @@ mod tests {
             "legacy mode drops the bundle"
         );
 
-        let update = poll_network_state(&url, &test_client(), &mut last_id, false, &|| None)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Legacy,
+            &|| None,
+        )
+        .await
+        .unwrap();
         assert!(update.is_none(), "got {}", describe(&update));
     }
 
@@ -442,15 +499,27 @@ mod tests {
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let mut last_id = None;
 
-        let first = poll_network_state(&url, &test_client(), &mut last_id, false, &|| None)
-            .await
-            .unwrap();
+        let first = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Legacy,
+            &|| None,
+        )
+        .await
+        .unwrap();
         assert_eq!(assignment_of(first).id, "assignment-1");
 
         // The same id is now silently skipped — there is no way to ask for a retry
-        let second = poll_network_state(&url, &test_client(), &mut last_id, false, &|| None)
-            .await
-            .unwrap();
+        let second = poll_network_state(
+            &url,
+            &test_client(),
+            &mut last_id,
+            AssignmentSource::Legacy,
+            &|| None,
+        )
+        .await
+        .unwrap();
         assert!(second.is_none());
     }
 

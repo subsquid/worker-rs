@@ -40,6 +40,7 @@ use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::schema_bundle;
 use super::worker::Worker;
+use crate::cli::AssignmentSource;
 use crate::storage::datasets_index::AssignmentBlob;
 use crate::storage::manager::AssignmentOutcome;
 
@@ -96,7 +97,7 @@ pub struct P2PController<EventStream> {
     assignment_url: String,
     /// Read the `worker_assignment` pointer instead of the legacy one, require the schema
     /// bundle, and apply assignments strictly in order instead of as they arrive.
-    use_worker_assignments: bool,
+    assignment_source: AssignmentSource,
     schema_bundles: schema_bundle::SchemaBundleStore,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
@@ -151,7 +152,7 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         assignment_url: args.assignment_url,
-        use_worker_assignments: args.use_worker_assignments,
+        assignment_source: args.assignment_source,
         schema_bundles: schema_bundle::SchemaBundleStore::new(
             args.data_dir.join("schemas"),
             query_schemas,
@@ -197,7 +198,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             self.run_assignments_loop(t, self.assignment_check_interval)
         });
         // Both loops write the same schema registry; the bundle supersedes the CDN manifest.
-        if !self.use_worker_assignments {
+        if self.assignment_source == AssignmentSource::Legacy {
             start_loop(s, "query_schemas", |t| {
                 experimental_engine::run_schemas_refresh_loop(
                     self.worker.query_schemas(),
@@ -291,7 +292,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         update: &super::assignments::AssignmentUpdate,
         client: &reqwest::Client,
     ) -> Result<AssignmentBlob> {
-        if !self.use_worker_assignments {
+        if self.assignment_source == AssignmentSource::Legacy {
             return Ok(AssignmentBlob::Legacy(
                 super::assignments::fetch_assignment(&update.fb_url_v1, client).await?,
             ));
@@ -327,7 +328,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_fetch_timeout,
                 self.assignment_fetch_max_delay,
                 self.worker_id,
-                self.use_worker_assignments,
+                self.assignment_source,
                 || self.schema_bundles.installed_hash(),
             )
             .filter_map(move |update| {
@@ -403,7 +404,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     .await
                     .expect("register_assignment shouldn't panic");
 
-                    if self.use_worker_assignments && registered {
+                    if self.assignment_source == AssignmentSource::Worker && registered {
                         processing_id = Some(id);
                         processing_stalled = false;
                     }

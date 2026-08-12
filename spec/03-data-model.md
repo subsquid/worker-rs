@@ -130,7 +130,7 @@ execution outcome (ADR-8). A **downgrade** replaces a success that cannot be shi
 | logs-request | cursor | request/response | RP-22 read |
 | status-request | — | request/response | RP-21 read |
 | epoch-tick | epoch number + allocations | polled every P-EPOCH-POLL | refreshes DEF-23 buckets |
-| schema-refresh | schema manifest (legacy) or schema bundle (`USE_WORKER_ASSIGNMENTS`) | polled every P-SCHEMA-REFRESH / carried by the network state | updates dynamic-engine registry |
+| schema-refresh | schema manifest (legacy) or schema bundle (`--assignment-source worker`) | polled every P-SCHEMA-REFRESH / carried by the network state | updates dynamic-engine registry |
 | clock-tick | time | — | drives WP-17 log pruning, bucket refill |
 | process-crash / restart | — | — | WP-15 recovery |
 
