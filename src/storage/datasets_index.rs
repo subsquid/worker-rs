@@ -145,8 +145,10 @@ impl DatasetsIndex {
                     }
                     let schema_id = SchemaId::from(chunk.write_schema_id());
                     if schema_ids.insert(schema_id) && !schema_available(schema_id) {
+                        // The scheduler publishes the pair; this is its invariant, not ours.
+                        crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
                         anyhow::bail!(
-                            "chunk '{}' references write schema {schema_id}, which is not in the loaded schema bundle",
+                            "chunk '{}' references write schema {schema_id}, which its schema bundle doesn't carry",
                             chunk.id(),
                         );
                     }

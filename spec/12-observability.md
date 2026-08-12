@@ -65,8 +65,12 @@ worker-clock offset from authenticated queries' timestamps, so a skewed worker i
 diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12) has
 a level-readable witness. Scalar signals only (OB-14).
 
-**OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, and a
-counter of failures to load one. Under `--assignment-source worker` a bundle that never
+**OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, a counter of
+failures to load one, and a counter of assignments refused because the bundle published
+with them did not cover them (FM-53c). The last is the scheduler's invariant breaking
+rather than the worker's, and it must be distinguishable from an ordinary intake failure —
+a worker refusing every assignment because the pair it is served diverges looks identical
+to one that cannot reach the network. Under `--assignment-source worker` a bundle that never
 installs blocks every assignment (FM-53b) while no other signal moves — the chunk gauges
 simply freeze, which reads exactly like a quiet network — so this is the only witness
 that separates the two. Scalar signals only (OB-14). Bound in IB-31; the legacy

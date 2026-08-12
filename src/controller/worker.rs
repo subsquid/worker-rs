@@ -71,19 +71,22 @@ impl Worker {
         self.query_schemas.clone()
     }
 
+    /// `covered_by_bundle` decides whether the assignment's write schemas are ones its
+    /// accompanying bundle carried. Deliberately not "can the worker resolve this id" — the
+    /// accumulated store may well cover an assignment whose bundle does not, and admitting on
+    /// that basis would report an id as applied that this worker only half-holds (ADR-21).
     pub fn register_assignment(
         &self,
         assignment: AssignmentBlob,
         id: impl Into<String>,
         key: &Keypair,
+        covered_by_bundle: impl Fn(SchemaId) -> bool,
     ) -> bool {
         self.state_manager
-            .set_assignment(assignment, id, key, |schema_id| {
-                self.query_schemas.get_by_id(schema_id).is_ok()
-            })
+            .set_assignment(assignment, id, key, covered_by_bundle)
     }
 
-    /// Write schemas the current assignment relies on — must survive a schema-bundle replacement.
+    /// Write schemas the chunks this worker holds were produced with.
     pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
         self.state_manager.active_schema_ids()
     }

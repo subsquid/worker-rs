@@ -308,6 +308,31 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         ))
     }
 
+    /// Takes one network update: an assignment joins the queue, a bundle is merged now.
+    /// Returns whether the queue overflowed, which tells the caller to abandon what it holds.
+    ///
+    /// Merged here rather than inside the update stream. A future parked in the stream resumes
+    /// only when the stream is next polled — after the loop may have applied a different
+    /// assignment — so work started there acts on state that has since moved.
+    async fn absorb_update(
+        &self,
+        update: super::assignments::NetworkUpdate,
+        pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
+        client: &reqwest::Client,
+    ) -> bool {
+        match update {
+            super::assignments::NetworkUpdate::Assignment(update) => {
+                push_pending_assignment(pending, update)
+            }
+            super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
+                if let Err(e) = self.schema_bundles.ensure(&bundle, client).await {
+                    warn!(hash = %bundle.hash, error = ?e, "Failed to merge schema bundle");
+                }
+                false
+            }
+        }
+    }
+
     async fn run_assignments_loop(
         &'static self,
         cancellation_token: CancellationToken,
@@ -316,8 +341,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let assignment_client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let bundle_client = assignment_client.clone();
-        // Bundle-only updates are installed here and filtered out, so the queue below holds only
-        // assignments. On failure the store keeps its old hash and the next poll re-offers it.
+        // On a merge failure the store keeps its previous hash, so the next poll re-offers the
+        // bundle rather than deduplicating it away.
         let mut assignments = Box::pin(
             super::assignments::new_assignments_stream(
                 self.assignment_url.clone(),
@@ -328,20 +353,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_source,
                 || self.schema_bundles.installed_hash(),
             )
-            .filter_map(move |update| {
-                let client = bundle_client.clone();
-                async move {
-                    match update {
-                        super::assignments::NetworkUpdate::Assignment(update) => Some(update),
-                        super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                            if let Err(e) = self.schema_bundles.ensure(&bundle, &client).await {
-                                warn!(hash = %bundle.hash, error = ?e, "Failed to install schema bundle");
-                            }
-                            None
-                        }
-                    }
-                }
-            })
             .take_until(cancellation_token.clone().cancelled_owned())
             .fuse(),
         );
@@ -372,7 +383,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                                         let Some(next_update) = next_update else {
                                             break 'assignments;
                                         };
-                                        if push_pending_assignment(&mut pending, next_update) {
+                                        if self.absorb_update(next_update, &mut pending, &bundle_client).await {
                                             skip_retry = true;
                                         }
                                     }
@@ -391,8 +402,14 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let worker = &self.worker;
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
+                    // ADR-21: the bundle that came with this assignment, not everything the
+                    // worker has accumulated. A schema it can serve but the bundle omits means
+                    // the published pair diverges, which is the scheduler's invariant to keep.
+                    let covered = self.schema_bundles.bundle_ids();
                     let registered = tokio::task::spawn_blocking(move || {
-                        worker.register_assignment(assignment, update.id, &keypair)
+                        worker.register_assignment(assignment, update.id, &keypair, |id| {
+                            covered.contains(&id)
+                        })
                     })
                     .instrument(tracing::info_span!("set_assignment", id))
                     .await
@@ -429,7 +446,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             let Some(update) = update else {
                                 break;
                             };
-                            push_pending_assignment(&mut pending, update);
+                            self.absorb_update(update, &mut pending, &bundle_client).await;
                         }
                         _ = cancellation_token.cancelled() => break,
                     }
@@ -440,7 +457,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             let Some(update) = update else {
                                 break;
                             };
-                            if push_pending_assignment(&mut pending, update) {
+                            if self.absorb_update(update, &mut pending, &bundle_client).await {
                                 warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
                                 processing_id = None;
                             }
@@ -465,7 +482,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             let Some(update) = update else {
                                 break;
                             };
-                            push_pending_assignment(&mut pending, update);
+                            self.absorb_update(update, &mut pending, &bundle_client).await;
                         }
                         _ = cancellation_token.cancelled() => break,
                     }

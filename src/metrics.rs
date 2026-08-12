@@ -60,6 +60,11 @@ lazy_static::lazy_static! {
     /// gauges simply freeze, which is indistinguishable from a quiet network.
     pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
     pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
+    /// A published assignment and its bundle disagreed. The scheduler is supposed to keep them
+    /// consistent, so this is its invariant breaking, not the worker's — and the worker refuses
+    /// the assignment rather than covering for it (ADR-21), which is otherwise indistinguishable
+    /// from an ordinary intake failure.
+    pub static ref SCHEMA_BUNDLE_MISMATCHES: Counter = Default::default();
 
     static ref QUERY_EXECUTED: Family<QueryExecutedLabels, Counter> = Default::default();
     static ref QUERY_RESULT_SIZE: Histogram = Histogram::new(std::iter::empty());
@@ -158,6 +163,11 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "schema_bundle_failures",
         "Number of times a schema bundle failed to install",
         SCHEMA_BUNDLE_FAILURES.clone(),
+    );
+    registry.register(
+        "schema_bundle_mismatches",
+        "Number of assignments refused because their schema bundle did not cover them",
+        SCHEMA_BUNDLE_MISMATCHES.clone(),
     );
 
     registry.register(
