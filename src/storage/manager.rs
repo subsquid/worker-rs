@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    datasets_index::{AssignmentBlob, DatasetsIndex},
+    datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex},
     downloader::{ChunkDownloader, DownloadConfig},
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -49,8 +49,7 @@ pub struct StateManager {
 /// A locked chunk and the schema its data was written with — see [`StateManager::get_query_chunk`].
 pub struct QueryChunk<F: FnOnce(PathBuf)> {
     pub path: scopeguard::ScopeGuard<PathBuf, F>,
-    /// `None` under a legacy assignment, which pins no per-chunk schema.
-    pub write_schema_id: Option<SchemaId>,
+    pub schema: ChunkSchema,
 }
 
 #[derive(Debug)]
@@ -370,9 +369,9 @@ impl StateManager {
             .state
             .lock()
             .get_and_lock_chunk(Arc::new(dataset), Arc::from(chunk_id.to_string()))?;
-        let write_schema_id = index
-            .as_ref()
-            .and_then(|index| index.write_schema_id(&chunk));
+        let schema = index.as_ref().map_or(ChunkSchema::NoAssignment, |index| {
+            index.chunk_schema(&chunk)
+        });
         drop(index);
 
         let path = self.chunk_path(&chunk);
@@ -385,7 +384,7 @@ impl StateManager {
         });
         Some(QueryChunk {
             path: guard,
-            write_schema_id,
+            schema,
         })
     }
 
@@ -600,6 +599,64 @@ mod tests {
         StateManager::new(workdir, 1, worker_id, config)
             .await
             .unwrap()
+    }
+
+    /// The two states that used to share one `None`. A chunk on disk that the applied assignment
+    /// does not cover, and one held before any assignment applies, must both stay distinct from
+    /// a legacy chunk — resolving either by dataset type answers from whichever version of that
+    /// type happens to be loaded, instead of refusing.
+    #[tokio::test]
+    async fn a_chunk_the_assignment_does_not_cover_is_not_reported_as_legacy() {
+        use std::sync::Arc;
+
+        use super::super::datasets_index::ChunkSchema;
+        use super::super::state::State;
+        use crate::types::state::{ChunkRef, ChunkSet};
+
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let manager = Arc::new(test_manager(workdir, worker_id).await);
+
+        // A chunk left on disk, the way a restart finds one.
+        let dataset = "s3://test".to_owned();
+        let chunk = ChunkRef {
+            dataset: Arc::new(dataset.clone()),
+            chunk: Arc::from("0000000000/0000000000-0000000010-aaaaaaaa"),
+        };
+        *manager.state.lock() = State::new(
+            ChunkSet::from([chunk.clone()]),
+            crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        );
+
+        let held = manager
+            .clone()
+            .get_query_chunk(dataset.clone(), &chunk.chunk)
+            .expect("the chunk is available");
+        assert_eq!(
+            held.schema,
+            ChunkSchema::NoAssignment,
+            "nothing has said what this chunk means yet"
+        );
+        drop(held);
+
+        assert!(manager.set_assignment(
+            AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
+            "A",
+            &keypair,
+            no_schemas_needed,
+        ));
+
+        let held = manager
+            .clone()
+            .get_query_chunk(dataset, &chunk.chunk)
+            .expect("still available: removal is a later pass");
+        assert_eq!(
+            held.schema,
+            ChunkSchema::Unassigned,
+            "assignment A covers no chunks, so this one is not ours to answer for"
+        );
     }
 
     // Known limitation (not yet fixed): when registering an assignment fails

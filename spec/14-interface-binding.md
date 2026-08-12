@@ -219,6 +219,12 @@ id, so the fault is the worker's own (INV-26, ADR-20), and FM-53c means it shoul
 reachable at all. Under IB-41 (legacy) there is no per-chunk schema and the query's
 dataset type selects it, which is sound only while one schema exists per type.
 
+Type-keyed selection is available *only* there. A chunk on disk that the assignment in
+force does not cover answers `not_found` — the same verdict it gets once removal catches
+up — and one held before any assignment applies answers `server_error`, since the worker
+cannot yet say what it means. Neither falls back to the dataset type: with several
+versions of a type loaded, that returns a wrong version rather than an error.
+
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against
 `schema_bundle.hash` (`sha256:<hex>`) before use and unpacked under `<data-dir>/schemas/`

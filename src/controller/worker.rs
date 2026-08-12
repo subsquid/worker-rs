@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use crate::storage::datasets_index::AssignmentBlob;
+use crate::storage::datasets_index::{AssignmentBlob, ChunkSchema};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use polars::{
     io::SerWriter,
@@ -271,10 +271,11 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        // Use the schema the chunk was written with: a bundle can carry several versions of one
-        // dataset type, so the type-keyed lookup could pick the wrong one.
-        let schema = match chunk.write_schema_id {
-            Some(schema_id) => {
+        // Resolve by what the chunk was written with. Resolving by dataset type instead would
+        // pick whichever version of that type is loaded, which is a wrong answer rather than an
+        // error — so only a legacy assignment, which has one schema per type, may do it.
+        let schema = match chunk.schema {
+            ChunkSchema::Pinned(schema_id) => {
                 let schema = self.query_schemas.get_by_id(schema_id)?;
                 if schema.name != dataset_type {
                     return Err(QueryError::BadRequest(format!(
@@ -285,8 +286,17 @@ impl Worker {
                 }
                 schema
             }
-            // Legacy assignments pin no schema.
-            None => self.query_schemas.get(&dataset_type)?,
+            ChunkSchema::Unpinned => self.query_schemas.get(&dataset_type)?,
+            // On disk but not ours to serve: it is waiting to be removed, and this is the same
+            // answer the worker gives once it is.
+            ChunkSchema::Unassigned => return Err(QueryError::NotFound),
+            // Held over from a previous run with nothing yet to say what it means. Transient and
+            // the worker's own state, so it is retryable, not the client's fault.
+            ChunkSchema::NoAssignment => {
+                return Err(QueryError::Other(
+                    "no assignment is applied yet, so this chunk's schema is unknown".to_owned(),
+                ))
+            }
         };
 
         let query_str = query_str.to_owned();

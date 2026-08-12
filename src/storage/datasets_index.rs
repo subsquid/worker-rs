@@ -31,6 +31,26 @@ pub struct DatasetsIndex {
     schema_ids: HashSet<SchemaId>,
 }
 
+/// Which schema a chunk's data should be read with, as far as the applied assignment knows.
+///
+/// Every variant but [`Self::Pinned`] used to be `None`, which is how an on-disk chunk that no
+/// assignment covers ended up resolving by dataset type — silently answering from a different
+/// version of the same type instead of refusing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkSchema {
+    /// A worker assignment pins the write schema the chunk's files were produced with.
+    Pinned(SchemaId),
+    /// A legacy assignment covers the chunk but pins nothing; the query's dataset type selects
+    /// the schema, which is sound only while one schema exists per type.
+    Unpinned,
+    /// The assignment in force does not cover this chunk. It is on disk because it is waiting
+    /// to be removed, so the honest answer is that the worker does not serve it.
+    Unassigned,
+    /// No assignment is installed yet. The chunks on disk are whatever the previous run left;
+    /// nothing says what they mean until the first assignment applies.
+    NoAssignment,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteFile {
     pub url: Url,
@@ -159,14 +179,22 @@ impl DatasetsIndex {
         })
     }
 
-    /// `None` under a legacy assignment (which pins no schema) or for a chunk it doesn't cover.
-    pub fn write_schema_id(&self, chunk: &ChunkRef) -> Option<SchemaId> {
-        let chunk_ref = self.chunks.get(chunk)?;
+    /// What this assignment says a chunk's data was written with.
+    ///
+    /// The distinction between [`ChunkSchema::Unpinned`] and [`ChunkSchema::Unassigned`] is
+    /// load-bearing: both used to be `None`, and resolving an unassigned chunk the way a legacy
+    /// one is resolved picks a schema by dataset type, which is a different *version* of the
+    /// same type rather than an error.
+    pub fn chunk_schema(&self, chunk: &ChunkRef) -> ChunkSchema {
+        let Some(chunk_ref) = self.chunks.get(chunk) else {
+            return ChunkSchema::Unassigned;
+        };
         match &self.assignment {
-            AssignmentBlob::Legacy(_) => None,
-            AssignmentBlob::Worker(assignment) => Some(SchemaId::from(
-                assignment.get_chunk(*chunk_ref)?.write_schema_id(),
-            )),
+            AssignmentBlob::Legacy(_) => ChunkSchema::Unpinned,
+            AssignmentBlob::Worker(assignment) => assignment
+                .get_chunk(*chunk_ref)
+                .map(|c| ChunkSchema::Pinned(SchemaId::from(c.write_schema_id())))
+                .unwrap_or(ChunkSchema::Unassigned),
         }
     }
 

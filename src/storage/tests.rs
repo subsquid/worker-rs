@@ -124,7 +124,7 @@ mod worker_assignment {
     use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
     use sqd_network_transport::Keypair;
 
-    use crate::storage::datasets_index::{AssignmentBlob, DatasetsIndex, RemoteFile};
+    use crate::storage::datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex, RemoteFile};
     use crate::types::schema::SchemaId;
     use crate::types::state::ChunkRef;
 
@@ -276,7 +276,10 @@ mod worker_assignment {
         .unwrap();
 
         let chunk = index.chunks().keys().next().unwrap().clone();
-        assert_eq!(index.write_schema_id(&chunk), Some(SchemaId::new(7)));
+        assert_eq!(
+            index.chunk_schema(&chunk),
+            ChunkSchema::Pinned(SchemaId::new(7))
+        );
         assert_eq!(
             index.schema_ids(),
             &std::collections::HashSet::from([SchemaId::new(7)])
@@ -286,7 +289,8 @@ mod worker_assignment {
             dataset: std::sync::Arc::new(DATASET.to_owned()),
             chunk: std::sync::Arc::from("nope"),
         };
-        assert_eq!(index.write_schema_id(&absent), None);
+        // Distinct from `Unpinned`: an unassigned chunk must not resolve by dataset type.
+        assert_eq!(index.chunk_schema(&absent), ChunkSchema::Unassigned);
     }
 
     /// Otherwise the failure — or a silent wrong-version match — surfaces only at query time.
@@ -342,7 +346,7 @@ mod worker_assignment {
         .unwrap();
 
         let chunk = index.chunks().keys().next().unwrap().clone();
-        assert_eq!(index.write_schema_id(&chunk), None);
+        assert_eq!(index.chunk_schema(&chunk), ChunkSchema::Unpinned);
         assert!(index.schema_ids().is_empty());
     }
 

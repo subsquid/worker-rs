@@ -141,7 +141,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 
 | ID | CT | Status | Note |
 |---|---|---|---|
-| REQ-1 | CT-1/5 | P | engine-level output tests, plus an end-to-end signed query over a downloaded chunk (dynamic engine, JSONL only) |
+| REQ-1 | CT-1/5 | P | engine-level output tests, plus an end-to-end signed query over a downloaded chunk (dynamic engine, JSONL only). Per-chunk schema selection unit-tested at the seam: a chunk outside the assignment in force, and one held with no assignment, are each distinct from a legacy chunk rather than resolving by dataset type |
 | REQ-2 | CT-1/2 | P | smoke drives fetch→commit and compares committed bytes against HC-2's ledger; atomicity under interruption still untested (needs HC-7) |
 | REQ-3 | CT-1/3 | P | set-algebra bookkeeping unit-tested; no eviction-under-load test |
 | REQ-4 | CT-1 | P | last_block semantics unit-tested per engine; resumption equivalence untested |
