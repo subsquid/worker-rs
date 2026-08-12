@@ -71,12 +71,15 @@ jobs:
       fail-fast: false
       matrix:
         # The image ships default features (Dockerfile), so that is the configuration under
-        # test. There is no second config: the worker-assignment path that `mvcc-chunks` used
-        # to gate is now compiled unconditionally and selected at runtime by
-        # --use-worker-assignments, so it is covered by the default build.
+        # test. The second config is a standing guard rather than a claim about today: with
+        # `mvcc-chunks` gone, `--all-features` only raises a dependency's tracing level and
+        # runs the same code. Keeping the row means the next feature is covered the day it
+        # lands, instead of depending on whoever adds it remembering this file.
         include:
           - config: default
             features: ""
+          - config: all-features
+            features: "--all-features"
     # Three test binaries over the same heavy dependency graph — see the `test` job.
     env:
       CARGO_BUILD_JOBS: "2"
