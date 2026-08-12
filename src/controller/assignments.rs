@@ -388,7 +388,6 @@ mod tests {
             "legacy mode drops the bundle"
         );
 
-        // Nothing installed, yet still no bundle update.
         let update = poll_network_state(&url, &test_client(), &mut last_id, false, &|| None)
             .await
             .unwrap();

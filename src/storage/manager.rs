@@ -247,7 +247,6 @@ impl StateManager {
         }
     }
 
-    /// `schema_available` gates the assignment on its write schemas being loaded.
     pub fn set_assignment(
         &self,
         assignment: AssignmentBlob,

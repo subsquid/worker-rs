@@ -111,7 +111,6 @@ impl SchemaBundleStore {
         };
 
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
-        // Schemas and the hash naming them become visible in one swap.
         self.registry
             .store_bundle(schemas, still_in_use, &bundle.hash);
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
@@ -403,7 +402,6 @@ tables:
         url
     }
 
-    /// The store plus the registry it installs into; assertions read the registry.
     fn store(dir: &tempfile::TempDir) -> (SchemaBundleStore, Arc<QuerySchemaRegistry>) {
         let registry = Arc::new(QuerySchemaRegistry::default());
         let store = SchemaBundleStore::new(
@@ -450,7 +448,6 @@ tables:
             .await
             .unwrap();
 
-        // Installed where the experimental engine looks, reachable both ways.
         assert_eq!(registry.get_by_id(7).unwrap().name, "evm");
         assert_eq!(registry.get("evm").unwrap().name, "evm");
         assert!(registry.get_by_id(8).is_err());
@@ -588,7 +585,6 @@ tables:
         let unpacked = format!("{UNPACKED_PREFIX}{hex}");
         std::fs::create_dir_all(dir.path().join(format!("{TEMP_PREFIX}{unpacked}"))).unwrap();
         std::fs::create_dir_all(dir.path().join(&unpacked)).unwrap();
-        // Anything the store didn't write is left alone.
         std::fs::write(dir.path().join("unrelated"), b"keep me").unwrap();
 
         let _ = store(&dir);
