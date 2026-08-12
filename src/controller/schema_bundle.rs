@@ -10,6 +10,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::TryStreamExt;
 use sha2::{Digest, Sha256};
 use sqd_query_engine::metadata::DatasetDescription;
+use tempfile::TempDir;
 
 use super::experimental_engine::QuerySchemaRegistry;
 use crate::metrics;
@@ -105,23 +106,18 @@ impl std::fmt::LowerHex for BundleHash {
 pub struct SchemaBundleStore {
     dir: Utf8PathBuf,
     registry: Arc<QuerySchemaRegistry>,
-    /// Held for the whole of [`Self::install`], including the download — not because the transfer
-    /// needs exclusion, but because everything it touches is named after the hash and shared:
-    /// `unpack` stages at `temp-<hash>` and deletes a stale one first, so two installs of the same
-    /// bundle would wipe each other's staging directory mid-extract, and [`Self::prune`] removes
-    /// every directory but the one it just published, including another install's. The registry
-    /// side (check-then-act on the installed hash, read-modify-write in `store_bundle`) is the
-    /// third thing it covers, and the only one that would be fixed by locking the publish alone.
-    ///
-    /// Uncontended today — the assignments loop is the only caller — so the cost is nothing and
-    /// the benefit is that a second caller becomes slow instead of a lost update.
-    install_lock: tokio::sync::Mutex<()>,
+    /// Guards [`Self::publish`] only — the rename that installs a bundle and the registry swap
+    /// that publishes it. The fetch and unpack that precede it need no exclusion: they write into
+    /// a directory only their own attempt can name. Blocking rather than async because nothing
+    /// under the guard awaits; it is held for a rename and a pointer swap.
+    install_lock: parking_lot::Mutex<()>,
 }
 
 impl SchemaBundleStore {
-    /// Sweeps staging directories a crashed unpack left behind; nothing else does, since
-    /// [`Self::prune`] runs only after a successful install (legacy assignments never install one).
-    /// Unpacked `sha256-*` dirs stay — they make a restart cheap; prune drops superseded ones.
+    /// Sweeps staging directories a crashed unpack left behind. An attempt that merely fails
+    /// removes its own (the directory is a [`TempDir`]); only a killed process skips that, so
+    /// this is the crash path and nothing else. Unpacked `sha256-*` dirs stay — they make a
+    /// restart cheap; a successful install drops the superseded ones.
     pub fn new(dir: impl Into<Utf8PathBuf>, registry: Arc<QuerySchemaRegistry>) -> Self {
         let dir = dir.into();
         // Blocking, but it's startup and the files are few and small (as in `StateManager::new`).
@@ -132,7 +128,7 @@ impl SchemaBundleStore {
         Self {
             dir,
             registry,
-            install_lock: tokio::sync::Mutex::new(()),
+            install_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -168,42 +164,100 @@ impl SchemaBundleStore {
         client: &reqwest::Client,
         still_in_use: &HashSet<SchemaId>,
     ) -> anyhow::Result<()> {
-        let _installing = self.install_lock.lock().await;
-
         if self.installed_hash() == Some(bundle.hash) {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
             return Ok(());
         }
 
         let dir = self.dir.join(format!("{UNPACKED_PREFIX}{:x}", bundle.hash));
-        let schemas = match self.load_unpacked(&dir).await {
-            Some(schemas) => schemas,
-            None => {
-                let bytes = download(&bundle.url, client).await.with_context(|| {
-                    format!("couldn't download schema bundle from {}", bundle.url)
-                })?;
-                let actual = BundleHash::of(&bytes);
-                if actual != bundle.hash {
-                    bail!(
-                        "schema bundle hash mismatch: expected {}, got {actual}",
-                        bundle.hash
-                    );
-                }
-                unpack(bytes, self.dir.clone(), dir.clone())
-                    .await
-                    .context("couldn't unpack schema bundle")?;
-                load_dir(dir.clone())
-                    .await
-                    .with_context(|| format!("couldn't load schema bundle from {dir}"))?
-            }
+        // Fetch, unpack and parse hold no lock: the result is a directory only this attempt
+        // knows the name of, so nothing else can observe or collide with it.
+        let staged = match self.load_unpacked(&dir).await {
+            Some(schemas) => Staged {
+                schemas,
+                temp: None,
+            },
+            None => self.stage(bundle, client).await?,
         };
 
-        tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Loaded schema bundle");
+        tracing::info!(hash = %bundle.hash, schemas = staged.schemas.len(), "Loaded schema bundle");
+        self.publish(bundle.hash, &dir, staged, still_in_use)
+    }
+
+    /// Downloads into a directory of this attempt's own and parses it, leaving nothing behind on
+    /// failure. Naming the staging directory after the bundle would make an abandoned attempt
+    /// indistinguishable from one in progress — and make a retry delete the wrong one.
+    async fn stage(
+        &self,
+        bundle: &SchemaBundle,
+        client: &reqwest::Client,
+    ) -> anyhow::Result<Staged> {
+        let bytes = download(&bundle.url, client)
+            .await
+            .with_context(|| format!("couldn't download schema bundle from {}", bundle.url))?;
+        let actual = BundleHash::of(&bytes);
+        if actual != bundle.hash {
+            bail!(
+                "schema bundle hash mismatch: expected {}, got {actual}",
+                bundle.hash
+            );
+        }
+
+        let temp = unpack(bytes, self.dir.clone())
+            .await
+            .context("couldn't unpack schema bundle")?;
+        // A failure here drops `temp`, which removes it — no cleanup path to forget.
+        let path = Utf8Path::from_path(temp.path())
+            .context("staging directory path is not UTF-8")?
+            .to_owned();
+        let schemas = load_dir(path)
+            .await
+            .context("couldn't load the staged schema bundle")?;
+        Ok(Staged {
+            schemas,
+            temp: Some(temp),
+        })
+    }
+
+    /// The install proper, and the only part that needs exclusion. Two steps: rename the staged
+    /// directory onto its hash, which is the point the bundle becomes durable, then swap it into
+    /// the registry. Neither awaits, so the lock is a blocking one and is held for microseconds.
+    fn publish(
+        &self,
+        hash: BundleHash,
+        dir: &Utf8Path,
+        staged: Staged,
+        still_in_use: &HashSet<SchemaId>,
+    ) -> anyhow::Result<()> {
+        let _installing = self.install_lock.lock();
+
+        if self.installed_hash() == Some(hash) {
+            // Another attempt installed this same bundle while this one was staging; dropping
+            // `staged` takes its directory with it.
+            return Ok(());
+        }
+
+        if let Some(temp) = staged.temp {
+            // Same hash means same bytes, so an existing directory is already this bundle.
+            if !dir.exists() {
+                // The rename is the durability point: before it nothing sits under the hash,
+                // after it a complete bundle does. A failure drops `temp` and cleans up.
+                std::fs::rename(temp.path(), dir)?;
+                // Renamed away, so nothing is left for the drop to remove.
+                let _ = temp.into_path();
+            }
+        }
+
         self.registry
-            .store_bundle(schemas, still_in_use, bundle.hash);
+            .store_bundle(staged.schemas, still_in_use, hash);
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
 
-        self.prune(dir).await;
+        // Unpacked bundles only: another attempt's staging directory is live, and it is not
+        // ours to collect. Whatever a crash leaves behind is swept at startup.
+        let removed = remove_bundle_dirs(&self.dir, &[UNPACKED_PREFIX], Some(dir));
+        if removed > 0 {
+            tracing::debug!(removed, "Pruned stale schema bundles");
+        }
         Ok(())
     }
 
@@ -232,19 +286,15 @@ impl SchemaBundleStore {
             }
         }
     }
+}
 
-    /// Removes every unpacked or half-unpacked bundle other than `keep`. Best-effort.
-    async fn prune(&self, keep: Utf8PathBuf) {
-        let dir = self.dir.clone();
-        let removed = tokio::task::spawn_blocking(move || {
-            remove_bundle_dirs(&dir, &[UNPACKED_PREFIX, TEMP_PREFIX], Some(&keep))
-        })
-        .await
-        .unwrap_or(0);
-        if removed > 0 {
-            tracing::debug!(removed, "Pruned stale schema bundles");
-        }
-    }
+/// A bundle parsed and ready to install: its schemas, plus the staging directory holding them
+/// when this attempt is the one that fetched it.
+struct Staged {
+    schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
+    /// Removed when this is dropped, unless [`SchemaBundleStore::publish`] renames it into place.
+    /// `None` when the bundle was already unpacked on disk and nothing was staged.
+    temp: Option<TempDir>,
 }
 
 /// Removes directories under `dir` whose name starts with one of `prefixes`, except `keep`,
@@ -296,25 +346,20 @@ async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>
 
 /// Extracts into a staging directory, then renames it onto `dest`, so a crash mid-unpack can't
 /// leave a partial bundle under a hash that claims to be complete.
-async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf, dest: Utf8PathBuf) -> anyhow::Result<()> {
+async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> anyhow::Result<TempDir> {
     tokio::task::spawn_blocking(move || {
-        let name = dest.file_name().unwrap_or("bundle");
-        let temp = parent.join(format!("{TEMP_PREFIX}{name}"));
         std::fs::create_dir_all(&parent)?;
-        if temp.exists() {
-            std::fs::remove_dir_all(&temp)?;
-        }
-        std::fs::create_dir(&temp)?;
+        // Named, not adopted, so the directory is exclusively this attempt's, and dropped on
+        // every failure path, so only a success or a crash leaves one behind. The prefix is what
+        // the startup sweep looks for, since a crash skips the drop.
+        let temp = tempfile::Builder::new()
+            .prefix(TEMP_PREFIX)
+            .tempdir_in(&parent)?;
+        let path = Utf8Path::from_path(temp.path())
+            .ok_or_else(|| anyhow::anyhow!("staging directory path is not UTF-8"))?;
 
-        let result = extract_schemas(&bytes, &temp);
-        if result.is_err() {
-            let _ = std::fs::remove_dir_all(&temp);
-        }
-        result?;
-
-        std::fs::rename(&temp, &dest)
-            .with_context(|| format!("couldn't move unpacked bundle into {dest}"))?;
-        Ok(())
+        extract_schemas(&bytes, path)?;
+        Ok(temp)
     })
     .await
     .context("unpack task panicked")?
@@ -539,6 +584,32 @@ tables:
         assert!(registry.get("evm").is_err());
         // Nothing is left behind for a later run to mistake for a verified bundle.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// A staging directory outlives its attempt only if the attempt succeeded. This is the case
+    /// the hash check can't catch — the bytes are what was advertised, and unusable anyway.
+    #[tokio::test]
+    async fn a_bundle_that_unpacks_but_will_not_parse_leaves_nothing_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, registry) = store(&dir);
+        let archive = targz(&[("7.yaml", b"this is not a dataset description")]);
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(&archive),
+            url: serve_once(archive).await,
+        };
+
+        let err = store
+            .ensure(&bundle, &reqwest::Client::new(), &HashSet::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("couldn't load"), "{err:#}");
+        assert!(store.installed_hash().is_none());
+        assert!(registry.get("evm").is_err());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a staged directory must not survive the attempt that made it"
+        );
     }
 
     #[tokio::test]
