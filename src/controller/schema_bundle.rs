@@ -105,10 +105,16 @@ impl std::fmt::LowerHex for BundleHash {
 pub struct SchemaBundleStore {
     dir: Utf8PathBuf,
     registry: Arc<QuerySchemaRegistry>,
-    /// Held for the whole of [`Self::install`], which is a check-then-act (skip if this hash is
-    /// already installed) wrapping a read-modify-write (the carry-over in `store_bundle`).
-    /// Uncontended today — the assignments loop is the only caller — so this costs nothing and
-    /// stops a second caller from being a silent lost update rather than a compile error.
+    /// Held for the whole of [`Self::install`], including the download — not because the transfer
+    /// needs exclusion, but because everything it touches is named after the hash and shared:
+    /// `unpack` stages at `temp-<hash>` and deletes a stale one first, so two installs of the same
+    /// bundle would wipe each other's staging directory mid-extract, and [`Self::prune`] removes
+    /// every directory but the one it just published, including another install's. The registry
+    /// side (check-then-act on the installed hash, read-modify-write in `store_bundle`) is the
+    /// third thing it covers, and the only one that would be fixed by locking the publish alone.
+    ///
+    /// Uncontended today — the assignments loop is the only caller — so the cost is nothing and
+    /// the benefit is that a second caller becomes slow instead of a lost update.
     install_lock: tokio::sync::Mutex<()>,
 }
 
