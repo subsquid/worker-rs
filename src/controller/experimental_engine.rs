@@ -34,13 +34,18 @@ struct Manifest {
 
 #[derive(Default)]
 struct Schemas {
+    /// Populated only by the CDN manifest. Type-keyed lookup is legacy-only (IB-41b): with
+    /// several versions of a type accumulated, choosing by type would answer from the wrong one.
     by_type: HashMap<String, Arc<DatasetDescription>>,
-    /// Empty for CDN-sourced schemas, which have no ids.
+    /// Every schema this worker has ever merged, not just the current bundle's. Chunks on disk
+    /// outlive the bundle that described them, and no schema can be fetched back once dropped.
     by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
-    /// Hash of the bundle these came from; `None` for CDN-sourced schemas. Lives here rather
-    /// than beside the store so it is published by the same swap as the schemas it describes —
-    /// a hash naming a bundle other than the one in force is what the dedup would act on.
+    /// Hash of the last bundle merged, and the ids it carried. Published by the same swap as
+    /// the schemas, so neither can name a bundle the other doesn't. `bundle_ids` is what an
+    /// assignment's coverage is judged against (ADR-21) — the accumulated set is for serving,
+    /// and is deliberately not a substitute.
     bundle_hash: Option<BundleHash>,
+    bundle_ids: HashSet<SchemaId>,
 }
 
 #[derive(Default)]
@@ -100,69 +105,89 @@ impl QuerySchemaRegistry {
         self.schemas.load_full()?.bundle_hash
     }
 
-    /// Installs schemas from the network's schema bundle, indexed by id and by type, and
-    /// records `hash` as the installed bundle in the same swap.
+    /// Every id currently resolvable, across all merged bundles and adopted files.
+    pub fn loaded_ids(&self) -> HashSet<SchemaId> {
+        self.schemas
+            .load_full()
+            .map(|s| s.by_id.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Ids the last merged bundle carried. An assignment is admitted against this, never
+    /// against the accumulated set (ADR-21).
+    pub fn bundle_ids(&self) -> HashSet<SchemaId> {
+        self.schemas
+            .load_full()
+            .map(|s| s.bundle_ids.clone())
+            .unwrap_or_default()
+    }
+
+    /// Merges a bundle's schemas into the accumulated set and records it as the bundle in force.
     ///
-    /// Ids in `still_in_use` that the new bundle omits are carried over: bundles are replaced
-    /// wholesale, the chunks on disk are not, and dropping a schema a live chunk was written
-    /// with would break every query against it.
+    /// Ids are merged, never replaced wholesale. Chunks on disk outlive the bundle that
+    /// described them, and the network publishes only its current bundle — so a schema dropped
+    /// here is unrecoverable, and every chunk written with it becomes unreadable. Merging also
+    /// removes the question of which schemas to preserve across a replacement, which is a
+    /// question with a wrong answer available.
     ///
-    /// Where two ids share a dataset type the highest wins the type-keyed slot — deterministic,
-    /// but only [`Self::get_by_id`] tells the versions apart.
+    /// An id already present is overwritten: ids are stable in practice, but republishing one
+    /// is the sanctioned way to correct a schema in place, and a correction changes the bundle
+    /// hash, so it arrives here rather than being deduplicated away.
     ///
-    /// Not atomic against a concurrent call: the carry-over reads the current schemas before
-    /// replacing them. [`SchemaBundleStore`](super::schema_bundle::SchemaBundleStore) is the
-    /// only caller and serializes them.
-    pub fn store_bundle(
+    /// Not atomic against a concurrent call — [`SchemaBundleStore`](super::schema_bundle::SchemaBundleStore)
+    /// is the only caller and serializes them.
+    pub fn merge_bundle(
         &self,
-        mut by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
-        still_in_use: &HashSet<SchemaId>,
+        bundle: HashMap<SchemaId, Arc<DatasetDescription>>,
         hash: BundleHash,
     ) {
+        let bundle_ids: HashSet<SchemaId> = bundle.keys().copied().collect();
+        let by_id = self.merged(bundle);
         let loaded = self.schemas.load_full().unwrap_or_default();
-        for &id in still_in_use {
-            if by_id.contains_key(&id) {
-                continue;
-            }
-            let Some(description) = loaded.by_id.get(&id) else {
-                continue;
-            };
-            tracing::warn!(
-                schema_id = %id,
-                "Schema bundle no longer carries a schema the current assignment still uses; \
-                 keeping the loaded copy"
-            );
-            by_id.insert(id, description.clone());
-        }
-        drop(loaded);
-
-        let mut by_type: HashMap<String, (SchemaId, Arc<DatasetDescription>)> =
-            HashMap::with_capacity(by_id.len());
-        for (&id, description) in &by_id {
-            match by_type.entry(description.name.clone()) {
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert((id, description.clone()));
-                }
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    let kept = slot.get().0;
-                    tracing::warn!(
-                        dataset_type = %description.name,
-                        ids = ?[kept.min(id), kept.max(id)],
-                        "Schema bundle carries several schemas for one dataset type; type-keyed \
-                         lookup will use the highest id. Queries need per-chunk resolution."
-                    );
-                    if id > kept {
-                        slot.insert((id, description.clone()));
-                    }
-                }
-            }
-        }
-
         self.store(Schemas {
-            by_type: by_type.into_iter().map(|(k, (_, v))| (k, v)).collect(),
+            by_type: loaded.by_type.clone(),
             by_id,
             bundle_hash: Some(hash),
+            bundle_ids,
         });
+    }
+
+    /// Adopts schemas an earlier run left on disk. They belong to no bundle this process has
+    /// merged, so they can serve chunks but cannot admit an assignment (ADR-21).
+    pub fn adopt_local(&self, schemas: HashMap<SchemaId, Arc<DatasetDescription>>) {
+        if schemas.is_empty() {
+            return;
+        }
+        let by_id = self.merged(schemas);
+        let loaded = self.schemas.load_full().unwrap_or_default();
+        self.store(Schemas {
+            by_type: loaded.by_type.clone(),
+            by_id,
+            bundle_hash: loaded.bundle_hash,
+            bundle_ids: loaded.bundle_ids.clone(),
+        });
+    }
+
+    fn merged(
+        &self,
+        incoming: HashMap<SchemaId, Arc<DatasetDescription>>,
+    ) -> HashMap<SchemaId, Arc<DatasetDescription>> {
+        let loaded = self.schemas.load_full().unwrap_or_default();
+        let mut by_id = loaded.by_id.clone();
+        for (id, description) in incoming {
+            if let Some(previous) = by_id.get(&id) {
+                if previous.name != description.name {
+                    tracing::warn!(
+                        schema_id = %id,
+                        was = %previous.name,
+                        now = %description.name,
+                        "A schema id was republished for a different dataset type"
+                    );
+                }
+            }
+            by_id.insert(id, description);
+        }
+        by_id
     }
 
     fn store(&self, schemas: Schemas) {
@@ -269,6 +294,7 @@ async fn refresh_schemas(
         by_type: schemas,
         by_id: HashMap::new(),
         bundle_hash: None,
+        bundle_ids: HashSet::new(),
     });
     *last_manifest = Some(manifest_body);
     Ok(true)
@@ -707,11 +733,7 @@ tables:
         use sqd_messages::query_error::Err as WireErr;
 
         let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(
-            HashMap::from([(id(7), description("evm"))]),
-            &HashSet::new(),
-            hash(0xaa),
-        );
+        registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0xaa));
 
         // Assert the wire verdict rather than the internal variant: what matters is what a
         // routing client sees, and `bad_request` is the one it treats as terminal.
@@ -754,115 +776,81 @@ tables:
         )
     }
 
+    /// Bundle schemas are reachable by id only. Type-keyed lookup is the legacy path (IB-41b):
+    /// with versions of a type accumulated, choosing by type would answer from the wrong one.
     #[test]
-    fn bundle_schemas_are_reachable_by_id_and_by_type() {
+    fn bundle_schemas_are_reachable_by_id_and_not_by_type() {
         let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(
+        registry.merge_bundle(
             HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
-            &HashSet::new(),
             hash(0xaa),
         );
 
         assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
         assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
-        assert_eq!(registry.get("evm").unwrap().name, "evm");
-        assert_eq!(registry.get("solana").unwrap().name, "solana");
         assert!(registry.get_by_id(id(9)).is_err());
+        assert!(registry.get("evm").is_err(), "a bundle fills no type index");
     }
 
-    /// The hash and the schemas it names are one value, so no reader can pair a hash with a
-    /// different bundle's schemas. CDN-sourced schemas have no bundle, hence no hash.
+    /// The hash and the schemas it named are published together, so no reader can pair a hash
+    /// with a bundle other than the one it describes.
     #[test]
-    fn the_bundle_hash_travels_with_the_schemas_it_names() {
+    fn the_bundle_hash_and_its_ids_travel_together() {
         let registry = QuerySchemaRegistry::default();
         assert_eq!(registry.bundle_hash(), None, "nothing loaded yet");
+        assert!(registry.bundle_ids().is_empty());
 
-        registry.store_bundle(
-            HashMap::from([(id(7), description("evm"))]),
-            &HashSet::new(),
-            hash(0x0a),
-        );
+        registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0x0a));
         assert_eq!(registry.bundle_hash(), Some(hash(0x0a)));
+        assert_eq!(registry.bundle_ids(), HashSet::from([id(7)]));
 
-        registry.store_bundle(
-            HashMap::from([(id(12), description("solana"))]),
-            &HashSet::new(),
-            hash(0x0b),
-        );
+        registry.merge_bundle(HashMap::from([(id(12), description("solana"))]), hash(0x0b));
         assert_eq!(registry.bundle_hash(), Some(hash(0x0b)));
-        assert!(
-            registry.get_by_id(id(7)).is_err() && registry.get_by_id(id(12)).is_ok(),
-            "the second hash must name the second bundle's schemas, never the first's"
+        assert_eq!(
+            registry.bundle_ids(),
+            HashSet::from([id(12)]),
+            "the ids of the bundle in force, not everything accumulated"
+        );
+        assert_eq!(
+            registry.loaded_ids(),
+            HashSet::from([id(7), id(12)]),
+            "which is a different set from what can be served"
         );
 
         registry.store(Schemas::default());
         assert_eq!(
             registry.bundle_hash(),
             None,
-            "the CDN manifest installs no bundle"
+            "the CDN manifest merges no bundle"
         );
     }
 
-    /// A schema a live chunk was written with must outlive a bundle that stopped carrying it.
+    /// A schema outlives the bundle that introduced it. Chunks on disk were written with it and
+    /// no older bundle can be fetched back, so dropping one strands data permanently.
     #[test]
-    fn a_schema_still_in_use_survives_a_bundle_that_drops_it() {
+    fn a_schema_survives_a_later_bundle_that_omits_it() {
         let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(
+        registry.merge_bundle(
             HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
-            &HashSet::new(),
-            hash(0xbb),
+            hash(0xaa),
         );
-
-        registry.store_bundle(
-            HashMap::from([(id(12), description("solana"))]),
-            &HashSet::from([id(7)]),
-            hash(0xcc),
-        );
+        registry.merge_bundle(HashMap::from([(id(12), description("solana"))]), hash(0xbb));
 
         assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
         assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
-        assert_eq!(registry.get("evm").unwrap().name, "evm");
     }
 
-    #[test]
-    fn a_schema_no_longer_in_use_is_dropped() {
-        let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(
-            HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
-            &HashSet::new(),
-            hash(0xdd),
-        );
-
-        registry.store_bundle(
-            HashMap::from([(id(12), description("solana"))]),
-            &HashSet::from([id(12)]),
-            hash(0xee),
-        );
-
-        assert!(registry.get_by_id(id(7)).is_err());
-        assert!(registry.get("evm").is_err());
-        assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
-    }
-
-    /// Duplicate types resolve the type-keyed slot to the highest id; both stay reachable by id.
+    /// Two ids naming one dataset type is the state per-chunk resolution exists for. Both stay
+    /// reachable; nothing has to choose between them.
     #[test]
     fn several_schemas_for_one_type_stay_reachable_by_id() {
         let registry = QuerySchemaRegistry::default();
-        registry.store_bundle(
+        registry.merge_bundle(
             HashMap::from([(id(7), description("evm")), (id(9), description("evm"))]),
-            &HashSet::new(),
-            hash(0xff),
+            hash(0xcc),
         );
 
-        assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
-        assert_eq!(registry.get_by_id(id(9)).unwrap().name, "evm");
-        assert!(registry.get("evm").is_ok());
-        assert!(
-            Arc::ptr_eq(
-                &registry.get("evm").unwrap(),
-                &registry.get_by_id(id(9)).unwrap()
-            ),
-            "the type-keyed slot resolves to the highest id"
-        );
+        assert!(registry.get_by_id(id(7)).is_ok());
+        assert!(registry.get_by_id(id(9)).is_ok());
     }
 }

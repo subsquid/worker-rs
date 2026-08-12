@@ -227,7 +227,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
 | FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
 | FM-53b | CT-4 | P | `e2e` drives the block end to end: an unfetchable bundle leaves the assignment unapplied and no chunk fetched. Hash mismatch, damaged cache and retry-until-installed are unit-tested; the metrics half (OB) is unasserted |
-| FM-53c | CT-4 | P | unit-tested both ways: an assignment naming a schema the bundle lacks is refused whole, and a schema the assignment in force still uses survives a bundle that drops it. ADR-21's stricter rule — refuse and alarm even when the loaded schemas would have covered it — is not yet asserted, and neither is the alarm. Not driven through the harness |
+| FM-53c | CT-4 | P | unit-tested: an assignment naming a schema the bundle lacks is refused whole, and a schema survives a later bundle that omits it (bundles merge — IB-44b). ADR-21's stricter rule — refuse and alarm even when the accumulated store would have covered it — is not yet asserted, and neither is the alarm. Not driven through the harness |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |

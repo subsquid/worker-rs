@@ -377,11 +377,7 @@ impl Harness {
 
     async fn install_schema_bundle(&self, bundle: &SchemaBundle) -> anyhow::Result<()> {
         self.schema_bundles
-            .ensure(
-                bundle,
-                &self.assignment_client,
-                &self.worker.active_schema_ids(),
-            )
+            .ensure(bundle, &self.assignment_client)
             .await
     }
 

@@ -227,8 +227,22 @@ versions of a type loaded, that returns a wrong version rather than an error.
 
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against
-`schema_bundle.hash` (`sha256:<hex>`) before use and unpacked under `<data-dir>/schemas/`
-keyed by that hash, so a restart reloads rather than re-downloads. Entries that are not
-root-level `<id>.yaml` are ignored. It is fetched *before* the assignment it accompanies
-and is a hard prerequisite for it (FM-53b). HC-1 must be able to emit well-formed and
+`schema_bundle.hash` (`sha256:<hex>`) before use. Entries that are not root-level
+`<id>.yaml` are ignored. It is fetched *before* the assignment it accompanies and is a
+hard prerequisite for it (FM-53b, ADR-21). HC-1 must be able to emit well-formed and
 deliberately malformed bundles.
+
+A bundle is **merged** into `<data-dir>/schemas/<id>.yaml`, not installed as a unit: ids
+accumulate across bundles and nothing is removed by a merge. Only the current bundle is
+published, and no schema is addressable by id or hash, so a dropped schema is
+unrecoverable and every chunk on disk written with it becomes unreadable. A republished id
+overwrites — the sanctioned way to correct a schema in place, and one that changes the
+bundle hash, so it is not deduplicated away. Merging per file makes an interrupted merge a
+smaller store rather than a false one, and the store is adopted at startup, so schemas
+already held answer queries before any download.
+
+Coverage is judged against the ids of the bundle in force, never against the accumulated
+store (ADR-21): what the worker can *serve* and what may *admit an assignment* are
+deliberately different sets. Reclaiming accumulated schemas must therefore key on the
+write schemas of chunks actually on disk — after an assignment fully applies, its
+reconciliation has removed everything else, so ids it does not reference are then unused.
