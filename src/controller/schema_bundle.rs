@@ -48,8 +48,7 @@ impl TryFrom<sqd_assignments::SchemaBundle> for SchemaBundle {
 /// The sha256 of a schema bundle, parsed once where it enters from the network so that every
 /// comparison downstream is 32 bytes rather than a string that may or may not be well-formed.
 ///
-/// `Display` renders the wire form `sha256:<hex>`; `LowerHex` renders the bare hex the unpacked
-/// directory is named after.
+/// `Display` renders the wire form `sha256:<hex>`; `LowerHex` the bare hex it is built from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BundleHash([u8; 32]);
 
@@ -116,21 +115,11 @@ pub struct SchemaBundleStore {
     /// Guards the merge: writing the files and publishing them to the registry are one step.
     /// Nothing under it awaits.
     merge_lock: parking_lot::Mutex<()>,
-    /// Ids that were loaded when an assignment settled but that the assignment does not
-    /// reference. Safe to reclaim: a settled assignment has completed its removals, so no chunk
-    /// on disk was written with them.
-    ///
-    /// FIXME: nothing acts on this yet — the store only grows. Reclaiming must key on this set
-    /// and never on the current assignment alone, since anything deleted cannot be re-fetched.
-    unused: parking_lot::Mutex<HashSet<SchemaId>>,
 }
 
 impl SchemaBundleStore {
-    /// Adopts whatever an earlier run left in `dir` and sweeps anything half-written.
-    ///
-    /// Adopted schemas can answer queries immediately, which matters for the chunks already on
-    /// disk, but they belong to no bundle this process has merged — so they cannot admit an
-    /// assignment until a bundle arrives (ADR-21).
+    /// Adopts whatever an earlier run left in `dir` and sweeps anything half-written. Adopted
+    /// schemas answer queries immediately; admitting an assignment still waits for a bundle.
     pub fn new(dir: impl Into<Utf8PathBuf>, registry: Arc<QuerySchemaRegistry>) -> Self {
         let dir = dir.into();
         // Blocking, but it's startup and the files are few and small (as in `StateManager::new`).
@@ -150,7 +139,6 @@ impl SchemaBundleStore {
             dir,
             registry,
             merge_lock: parking_lot::Mutex::new(()),
-            unused: parking_lot::Mutex::new(HashSet::new()),
         }
     }
 
@@ -163,20 +151,6 @@ impl SchemaBundleStore {
     /// Ids the bundle in force carried — what an assignment's coverage is judged against.
     pub fn bundle_ids(&self) -> HashSet<SchemaId> {
         self.registry.bundle_ids()
-    }
-
-    /// Schemas recorded as reclaimable. Nothing deletes them yet — see [`Self::unused`].
-    pub fn unused(&self) -> HashSet<SchemaId> {
-        self.unused.lock().clone()
-    }
-
-    /// Records schemas the settled assignment doesn't reference as reclaimable, and un-records
-    /// any that it does — an id can come back into use when a later assignment references it.
-    pub fn mark_unused_after_settle(&self, in_use: &HashSet<SchemaId>) {
-        let loaded = self.registry.loaded_ids();
-        let mut unused = self.unused.lock();
-        unused.extend(loaded.difference(in_use).copied());
-        unused.retain(|id| !in_use.contains(id));
     }
 
     /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
@@ -752,41 +726,6 @@ tables:
         let mut left = stored_all(&dir);
         left.sort();
         assert_eq!(left, vec!["7.yaml", "unrelated"]);
-    }
-
-    /// The recording half of reclamation. Deleting is not implemented, but what may be deleted
-    /// has to be right first — and an id can come back into use, so the set is not append-only.
-    #[tokio::test]
-    async fn a_settled_assignment_records_the_ids_it_no_longer_references() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = store(&dir);
-        let archive = targz(&[
-            ("7.yaml", SCHEMA.as_bytes()),
-            (
-                "12.yaml",
-                SCHEMA.replace("name: evm", "name: solana").as_bytes(),
-            ),
-        ]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
-        };
-        store
-            .ensure(&bundle, &reqwest::Client::new())
-            .await
-            .unwrap();
-
-        store.mark_unused_after_settle(&HashSet::from([SchemaId::new(7)]));
-        assert_eq!(store.unused(), HashSet::from([SchemaId::new(12)]));
-
-        // Nothing is deleted: 12 still answers for any chunk written with it.
-        assert_eq!(stored(&dir).len(), 2);
-
-        store.mark_unused_after_settle(&HashSet::from([SchemaId::new(7), SchemaId::new(12)]));
-        assert!(
-            store.unused().is_empty(),
-            "an id a later assignment uses stops being reclaimable"
-        );
     }
 
     /// Names in the store directory, `<id>.yaml` only.

@@ -374,7 +374,6 @@ impl Harness {
                 }
             }
         };
-        // ADR-21: coverage comes from the bundle that accompanied this assignment.
         let covered = self.schema_bundles.bundle_ids();
         self.worker
             .register_assignment(blob, update.id, &self.keypair, |id| covered.contains(&id))

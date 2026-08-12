@@ -10,11 +10,6 @@ impl SchemaId {
     pub const fn new(id: u32) -> Self {
         Self(id)
     }
-
-    /// The wire value, for the flatbuffer and bundle-filename boundaries that speak `u32`.
-    pub const fn get(self) -> u32 {
-        self.0
-    }
 }
 
 impl From<u32> for SchemaId {

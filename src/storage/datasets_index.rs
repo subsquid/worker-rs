@@ -26,9 +26,6 @@ pub struct DatasetsIndex {
     http_headers: reqwest::header::HeaderMap,
     // chunks assigned to this worker
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
-    /// Write schemas used by this worker's chunks (empty under legacy assignments), so a new
-    /// schema bundle can be checked against them before replacing the one in force.
-    schema_ids: HashSet<SchemaId>,
 }
 
 /// Which schema a chunk's data should be read with, as far as the applied assignment knows.
@@ -113,7 +110,8 @@ impl DatasetsIndex {
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
         let mut pool = StringPool::default();
-        let mut schema_ids = HashSet::new();
+        // Scratch: each id is checked once however many chunks reference it.
+        let mut checked = HashSet::new();
 
         let (status, headers, chunks) = match &assignment {
             AssignmentBlob::Legacy(assignment) => {
@@ -144,7 +142,7 @@ impl DatasetsIndex {
                         );
                     }
                     let schema_id = SchemaId::from(chunk.write_schema_id());
-                    if schema_ids.insert(schema_id) && !schema_available(schema_id) {
+                    if checked.insert(schema_id) && !schema_available(schema_id) {
                         // The scheduler publishes the pair; this is its invariant, not ours.
                         crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
                         anyhow::bail!(
@@ -177,7 +175,6 @@ impl DatasetsIndex {
             assignment_id: id.into(),
             http_headers,
             chunks,
-            schema_ids,
         })
     }
 
@@ -198,10 +195,6 @@ impl DatasetsIndex {
                 .map(|c| ChunkSchema::Pinned(SchemaId::from(c.write_schema_id())))
                 .unwrap_or(ChunkSchema::Unassigned),
         }
-    }
-
-    pub fn schema_ids(&self) -> &HashSet<SchemaId> {
-        &self.schema_ids
     }
 
     pub fn status(&self) -> sqd_assignments::WorkerStatus {

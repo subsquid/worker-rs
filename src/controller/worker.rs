@@ -90,11 +90,6 @@ impl Worker {
         self.state_manager.registered_assignment_id()
     }
 
-    /// Write schemas the chunks this worker holds were produced with.
-    pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
-        self.state_manager.active_schema_ids()
-    }
-
     /// Waits until the given assignment settles — fully applied or stalled.
     /// Returns `None` when cancelled.
     pub async fn wait_until_assignment_settled(

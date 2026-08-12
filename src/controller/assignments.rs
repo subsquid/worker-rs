@@ -10,15 +10,11 @@ use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
 
-/// What the worker has in force, and what the published state is reconciled against.
+/// What the worker has in force: the pair, since an assignment and its bundle are one state
+/// (ADR-21).
 ///
-/// The pair, not the assignment id alone: an assignment and its bundle are one state (ADR-21),
-/// so a bundle that moves under an unchanged assignment id is still a state to reach.
-///
-/// Both halves are read from what the worker *did*, never from what it saw — the id of the
-/// assignment that registered and the hash of the bundle that merged. A "last seen" marker
-/// cannot tell an assignment that applied from one that was refused, so it consumes the
-/// refused one and never offers it again.
+/// Both halves are what the worker *did*, never what it saw. A "last seen" marker cannot tell an
+/// assignment that applied from one that was refused, so it consumes the refused one for good.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AppliedPair {
     /// Registered, which is earlier than fully applied: chunks may still be downloading. That

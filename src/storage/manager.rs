@@ -400,14 +400,6 @@ impl StateManager {
             .map(|index| index.assignment_id().to_owned())
     }
 
-    pub fn active_schema_ids(&self) -> std::collections::HashSet<SchemaId> {
-        self.datasets_index
-            .lock()
-            .as_ref()
-            .map(|index| index.schema_ids().clone())
-            .unwrap_or_default()
-    }
-
     #[instrument(err, skip(self))]
     async fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
         let path = self.chunk_path(chunk);

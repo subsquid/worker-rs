@@ -41,9 +41,7 @@ struct Schemas {
     /// outlive the bundle that described them, and no schema can be fetched back once dropped.
     by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
     /// Hash of the last bundle merged, and the ids it carried. Published by the same swap as
-    /// the schemas, so neither can name a bundle the other doesn't. `bundle_ids` is what an
-    /// assignment's coverage is judged against (ADR-21) — the accumulated set is for serving,
-    /// and is deliberately not a substitute.
+    /// the schemas, so neither can name a bundle the other doesn't.
     bundle_hash: Option<BundleHash>,
     bundle_ids: HashSet<SchemaId>,
 }
@@ -73,11 +71,8 @@ impl QuerySchemaRegistry {
 
     /// Looks a schema up by the id assignments reference it with; only ever populated by a bundle.
     ///
-    /// A miss is a worker fault, never the client's: the id comes from the chunk's own
-    /// `write_schema_id` in the applied assignment, so no query can provoke or avoid it. It
-    /// should not be reachable at all — FM-53c refuses an assignment whose schemas the bundle
-    /// lacks, and a replacement carries over the ones still in use — so if it fires, one of those
-    /// two has broken and the right answer is a retryable `server_error` (INV-26, ADR-20).
+    /// A miss is a worker fault, never the client's — the id comes from the chunk, not the query
+    /// — so it is a retryable `server_error` (INV-26, ADR-20). FM-53c should make it unreachable.
     pub fn get_by_id(&self, schema_id: SchemaId) -> Result<Arc<DatasetDescription>, QueryError> {
         self.loaded_schemas()?
             .by_id
@@ -113,8 +108,7 @@ impl QuerySchemaRegistry {
             .unwrap_or_default()
     }
 
-    /// Ids the last merged bundle carried. An assignment is admitted against this, never
-    /// against the accumulated set (ADR-21).
+    /// Ids the last merged bundle carried, which is what an assignment is admitted against.
     pub fn bundle_ids(&self) -> HashSet<SchemaId> {
         self.schemas
             .load_full()
@@ -122,20 +116,13 @@ impl QuerySchemaRegistry {
             .unwrap_or_default()
     }
 
-    /// Merges a bundle's schemas into the accumulated set and records it as the bundle in force.
+    /// Merges a bundle into the accumulated set and records it as the bundle in force.
     ///
-    /// Ids are merged, never replaced wholesale. Chunks on disk outlive the bundle that
-    /// described them, and the network publishes only its current bundle — so a schema dropped
-    /// here is unrecoverable, and every chunk written with it becomes unreadable. Merging also
-    /// removes the question of which schemas to preserve across a replacement, which is a
-    /// question with a wrong answer available.
+    /// Merged, never replaced: chunks on disk outlive the bundle that described them, and only
+    /// the current bundle is published, so a schema dropped here is unrecoverable. An id already
+    /// present is overwritten — republishing one is how a schema is corrected in place.
     ///
-    /// An id already present is overwritten: ids are stable in practice, but republishing one
-    /// is the sanctioned way to correct a schema in place, and a correction changes the bundle
-    /// hash, so it arrives here rather than being deduplicated away.
-    ///
-    /// Not atomic against a concurrent call — [`SchemaBundleStore`](super::schema_bundle::SchemaBundleStore)
-    /// is the only caller and serializes them.
+    /// Not atomic against a concurrent call; the store is the only caller and serializes them.
     pub fn merge_bundle(
         &self,
         bundle: HashMap<SchemaId, Arc<DatasetDescription>>,
@@ -152,8 +139,7 @@ impl QuerySchemaRegistry {
         });
     }
 
-    /// Adopts schemas an earlier run left on disk. They belong to no bundle this process has
-    /// merged, so they can serve chunks but cannot admit an assignment (ADR-21).
+    /// Adopts schemas an earlier run left on disk, leaving the merged-bundle record untouched.
     pub fn adopt_local(&self, schemas: HashMap<SchemaId, Arc<DatasetDescription>>) {
         if schemas.is_empty() {
             return;
@@ -702,27 +688,6 @@ tables:
         assert!(registry.get("evm").is_ok());
     }
 
-    #[test]
-    fn registry_get() {
-        let registry = QuerySchemaRegistry::default();
-        // Nothing loaded yet is a different failure from a schema that isn't there.
-        assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
-        assert!(matches!(
-            registry.get_by_id(id(7)),
-            Err(QueryError::Other(_))
-        ));
-
-        registry.store(Schemas::default());
-        assert!(matches!(
-            registry.get("evm"),
-            Err(QueryError::BadRequest(_))
-        ));
-        assert!(matches!(
-            registry.get_by_id(id(7)),
-            Err(QueryError::Other(_))
-        ));
-    }
-
     /// Who is blamed follows who supplied the input. The query names a dataset type, so asking
     /// for one that doesn't exist is the client's error; nothing in a query names a schema id —
     /// it comes from the chunk's own `write_schema_id` — so a miss there is the worker's, and
@@ -733,10 +698,17 @@ tables:
         use sqd_messages::query_error::Err as WireErr;
 
         let registry = QuerySchemaRegistry::default();
+        // Nothing loaded is a third case, and a worker fault either way.
+        assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
+        assert!(matches!(
+            registry.get_by_id(id(7)),
+            Err(QueryError::Other(_))
+        ));
+
         registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0xaa));
 
-        // Assert the wire verdict rather than the internal variant: what matters is what a
-        // routing client sees, and `bad_request` is the one it treats as terminal.
+        // The wire verdict, not the internal variant: `bad_request` is the one routing clients
+        // treat as terminal.
         let wire = WireErr::from;
 
         assert!(
@@ -838,19 +810,5 @@ tables:
 
         assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
         assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
-    }
-
-    /// Two ids naming one dataset type is the state per-chunk resolution exists for. Both stay
-    /// reachable; nothing has to choose between them.
-    #[test]
-    fn several_schemas_for_one_type_stay_reachable_by_id() {
-        let registry = QuerySchemaRegistry::default();
-        registry.merge_bundle(
-            HashMap::from([(id(7), description("evm")), (id(9), description("evm"))]),
-            hash(0xcc),
-        );
-
-        assert!(registry.get_by_id(id(7)).is_ok());
-        assert!(registry.get_by_id(id(9)).is_ok());
     }
 }

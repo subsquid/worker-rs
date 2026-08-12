@@ -280,11 +280,6 @@ mod worker_assignment {
             index.chunk_schema(&chunk),
             ChunkSchema::Pinned(SchemaId::new(7))
         );
-        assert_eq!(
-            index.schema_ids(),
-            &std::collections::HashSet::from([SchemaId::new(7)])
-        );
-
         let absent = ChunkRef {
             dataset: std::sync::Arc::new(DATASET.to_owned()),
             chunk: std::sync::Arc::from("nope"),
@@ -347,7 +342,6 @@ mod worker_assignment {
 
         let chunk = index.chunks().keys().next().unwrap().clone();
         assert_eq!(index.chunk_schema(&chunk), ChunkSchema::Unpinned);
-        assert!(index.schema_ids().is_empty());
     }
 
     /// Keying is unchanged from the legacy path, so the manager's chunk bookkeeping survives.

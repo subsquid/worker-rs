@@ -409,9 +409,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let worker = &self.worker;
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
-                    // ADR-21: the bundle that came with this assignment, not everything the
-                    // worker has accumulated. A schema it can serve but the bundle omits means
-                    // the published pair diverges, which is the scheduler's invariant to keep.
                     let covered = self.schema_bundles.bundle_ids();
                     let registered = tokio::task::spawn_blocking(move || {
                         worker.register_assignment(assignment, update.id, &keypair, |id| {
@@ -473,12 +470,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             match settled {
                                 None => break,
                                 Some(AssignmentOutcome::Applied) => {
-                                    // Settled means reconciliation has finished its removals, so
-                                    // no chunk on disk was written with a schema this assignment
-                                    // doesn't reference — the one moment those ids are known to
-                                    // be reclaimable.
-                                    self.schema_bundles
-                                        .mark_unused_after_settle(&self.worker.active_schema_ids());
                                     processing_id = None;
                                 }
                                 Some(AssignmentOutcome::Stalled) => {
