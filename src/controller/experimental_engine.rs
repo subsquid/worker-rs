@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use rand::Rng;
 use reqwest::Url;
 use sqd_network_transport::PeerId;
@@ -43,8 +43,9 @@ struct Schemas {
 
 #[derive(Default)]
 pub struct QuerySchemaRegistry {
-    schemas: ArcSwap<Schemas>,
-    loaded: std::sync::atomic::AtomicBool,
+    /// `None` until the first source loads. Not-loaded is a state of the cell rather than a flag
+    /// beside it, so no reader can pair one with the other's value.
+    schemas: ArcSwapOption<Schemas>,
 }
 
 impl QuerySchemaRegistry {
@@ -76,20 +77,19 @@ impl QuerySchemaRegistry {
             })
     }
 
-    fn loaded_schemas(&self) -> Result<arc_swap::Guard<Arc<Schemas>>, QueryError> {
-        if !self.loaded.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(QueryError::Other(
+    fn loaded_schemas(&self) -> Result<Arc<Schemas>, QueryError> {
+        self.schemas.load_full().ok_or_else(|| {
+            QueryError::Other(
                 "query schemas for the experimental engine have not been loaded yet".to_owned(),
-            ));
-        }
-        Ok(self.schemas.load())
+            )
+        })
     }
 
     /// Hash of the bundle whose schemas are loaded, or `None` when they came from the CDN
     /// manifest or nothing is loaded yet. Read out of the same cell as the schemas, so it
     /// cannot name a bundle other than the one a query would resolve against.
     pub fn bundle_hash(&self) -> Option<String> {
-        self.schemas.load().bundle_hash.clone()
+        self.schemas.load_full()?.bundle_hash.clone()
     }
 
     /// Installs schemas from the network's schema bundle, indexed by id and by type, and
@@ -111,7 +111,7 @@ impl QuerySchemaRegistry {
         still_in_use: &HashSet<u32>,
         hash: &str,
     ) {
-        let loaded = self.schemas.load();
+        let loaded = self.schemas.load_full().unwrap_or_default();
         for &id in still_in_use {
             if by_id.contains_key(&id) {
                 continue;
@@ -158,9 +158,7 @@ impl QuerySchemaRegistry {
     }
 
     fn store(&self, schemas: Schemas) {
-        self.schemas.store(Arc::new(schemas));
-        self.loaded
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.schemas.store(Some(Arc::new(schemas)));
     }
 }
 

@@ -279,14 +279,16 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if !at_root || !entry.header().entry_type().is_file() || schema_id(name).is_none() {
+        let Some(id) = schema_id(name).filter(|_| at_root && entry.header().entry_type().is_file())
+        else {
             tracing::debug!(entry = %path.display(), "Ignoring unrecognized schema bundle entry");
             continue;
-        }
-        // `name` is known to be `<digits>.yaml`, so it can't escape `dest`.
-        let name = name.to_owned();
+        };
+        // Rebuilt from the parsed id: no archive-supplied path reaches the filesystem.
+        let name = format!("{id}.yaml");
 
-        total = total.saturating_add(entry.header().size()? as usize);
+        let size = usize::try_from(entry.header().size()?).unwrap_or(usize::MAX);
+        total = total.saturating_add(size);
         if total > MAX_BUNDLE_SIZE {
             bail!("unpacked schema bundle exceeds {MAX_BUNDLE_SIZE} bytes");
         }
