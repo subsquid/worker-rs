@@ -6,7 +6,7 @@ use rand::Rng;
 use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
 
-use super::schema_bundle::{Bundle, BundleHash};
+use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::metrics;
 
 /// The assignment and the schema bundle are versioned independently, and reported separately.
@@ -14,7 +14,7 @@ pub enum NetworkUpdate {
     /// A new assignment, carrying whatever bundle was published alongside it.
     Assignment(AssignmentUpdate),
     /// The assignment is unchanged; only the schema bundle moved.
-    SchemaBundle(Bundle),
+    SchemaBundle(SchemaBundle),
 }
 
 pub struct AssignmentUpdate {
@@ -22,7 +22,7 @@ pub struct AssignmentUpdate {
     pub fb_url_v1: String,
     pub _effective_from: u64,
     /// `None` outside worker-assignment mode.
-    pub schema_bundle: Option<Bundle>,
+    pub schema_bundle: Option<SchemaBundle>,
 }
 
 pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client {
@@ -91,7 +91,7 @@ async fn poll_network_state(
     let published_bundle = use_worker_assignments
         .then(|| network_state.schema_bundle.take())
         .flatten()
-        .map(Bundle::try_from)
+        .map(SchemaBundle::try_from)
         .transpose()
         .inspect_err(|_| {
             metrics::SCHEMA_BUNDLE_FAILURES.inc();

@@ -26,12 +26,12 @@ const TEMP_PREFIX: &str = "temp-";
 
 /// A schema bundle the network published: hash parsed, address left to the fetch to judge.
 #[derive(Clone, Debug)]
-pub struct Bundle {
+pub struct SchemaBundle {
     pub hash: BundleHash,
     pub url: String,
 }
 
-impl TryFrom<sqd_assignments::SchemaBundle> for Bundle {
+impl TryFrom<sqd_assignments::SchemaBundle> for SchemaBundle {
     type Error = anyhow::Error;
 
     fn try_from(bundle: sqd_assignments::SchemaBundle) -> anyhow::Result<Self> {
@@ -143,7 +143,7 @@ impl SchemaBundleStore {
     /// [`QuerySchemaRegistry::store_bundle`].
     pub async fn ensure(
         &self,
-        bundle: &Bundle,
+        bundle: &SchemaBundle,
         client: &reqwest::Client,
         still_in_use: &HashSet<SchemaId>,
     ) -> anyhow::Result<()> {
@@ -158,7 +158,7 @@ impl SchemaBundleStore {
 
     async fn install(
         &self,
-        bundle: &Bundle,
+        bundle: &SchemaBundle,
         client: &reqwest::Client,
         still_in_use: &HashSet<SchemaId>,
     ) -> anyhow::Result<()> {
@@ -497,7 +497,7 @@ tables:
         let dir = tempfile::tempdir().unwrap();
         let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = Bundle {
+        let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
             url: serve_once(archive).await,
         };
@@ -518,7 +518,7 @@ tables:
         let dir = tempfile::tempdir().unwrap();
         let (store, registry) = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = Bundle {
+        let bundle = SchemaBundle {
             hash: BundleHash::of(b"something else"),
             url: serve_once(archive).await,
         };
@@ -545,7 +545,7 @@ tables:
             ("nested/9.yaml", SCHEMA.as_bytes()),
             ("../escape.yaml", b"nope"),
         ]);
-        let bundle = Bundle {
+        let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
             url: serve_once(archive).await,
         };
@@ -579,7 +579,7 @@ tables:
         store(&dir)
             .0
             .ensure(
-                &Bundle {
+                &SchemaBundle {
                     hash: hash.clone(),
                     url: url.clone(),
                 },
@@ -593,7 +593,7 @@ tables:
         let (restarted, registry) = store(&dir);
         restarted
             .ensure(
-                &Bundle { hash, url },
+                &SchemaBundle { hash, url },
                 &reqwest::Client::new(),
                 &HashSet::new(),
             )
@@ -615,7 +615,7 @@ tables:
         let damaged = dir.path().join(format!("{UNPACKED_PREFIX}{hash:x}"));
         std::fs::create_dir_all(&damaged).unwrap();
 
-        let bundle = Bundle {
+        let bundle = SchemaBundle {
             hash,
             url: serve_once(archive).await,
         };
@@ -657,7 +657,7 @@ tables:
 
         for body in [SCHEMA, &SCHEMA.replace("name: evm", "name: solana")] {
             let archive = targz(&[("7.yaml", body.as_bytes())]);
-            let bundle = Bundle {
+            let bundle = SchemaBundle {
                 hash: BundleHash::of(&archive),
                 url: serve_once(archive).await,
             };

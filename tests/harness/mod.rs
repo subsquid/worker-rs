@@ -27,7 +27,7 @@ use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLim
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, QuerySchemaRegistry};
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::{Bundle, SchemaBundleStore};
+use sqd_worker::controller::schema_bundle::{SchemaBundle, SchemaBundleStore};
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::datasets_index::AssignmentBlob;
@@ -319,7 +319,7 @@ impl Harness {
                 .expect("assignment stream is still open");
             match update {
                 assignments::NetworkUpdate::Assignment(update) => break update,
-                // Bundle moved without the assignment: install and keep waiting, like production.
+                // SchemaBundle moved without the assignment: install and keep waiting, like production.
                 assignments::NetworkUpdate::SchemaBundle(bundle) => {
                     self.install_schema_bundle(&bundle)
                         .await
@@ -367,7 +367,7 @@ impl Harness {
             .register_assignment(blob, update.id, &self.keypair)
     }
 
-    async fn install_schema_bundle(&self, bundle: &Bundle) -> anyhow::Result<()> {
+    async fn install_schema_bundle(&self, bundle: &SchemaBundle) -> anyhow::Result<()> {
         self.schema_bundles
             .ensure(
                 bundle,
