@@ -341,7 +341,7 @@ impl Harness {
                     assert!(self
                         .worker
                         .assignment_schemas_covered_by(|id| prepared.contains(id)));
-                    self.query_schemas.activate_bundle(prepared);
+                    self.query_schemas.activate_bundle(prepared).unwrap();
                 }
             }
         };
@@ -389,7 +389,7 @@ impl Harness {
             });
         if registered {
             if let Some(bundle) = prepared_bundle {
-                self.query_schemas.activate_bundle(bundle);
+                self.query_schemas.activate_bundle(bundle).unwrap();
             }
         }
         registered

@@ -333,7 +333,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             .worker
                             .assignment_schemas_covered_by(|id| prepared.contains(id)) =>
                     {
-                        self.query_schemas.activate_bundle(prepared);
+                        if let Err(e) = self.query_schemas.activate_bundle(prepared) {
+                            metrics::SCHEMA_BUNDLE_FAILURES.inc();
+                            warn!(hash = %bundle.hash, error = ?e, "Failed to activate schema bundle");
+                        }
                     }
                     Ok(_) => {
                         metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
@@ -424,12 +427,10 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let worker = &self.worker;
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
-                    let prepared_for_validation = prepared_bundle.clone();
+                    let prepared_ids = prepared_bundle.as_ref().map(|bundle| bundle.ids());
                     let registered = tokio::task::spawn_blocking(move || {
                         worker.register_assignment(assignment, update.id, &keypair, |id| {
-                            prepared_for_validation
-                                .as_ref()
-                                .is_none_or(|bundle| bundle.contains(id))
+                            prepared_ids.as_ref().is_none_or(|ids| ids.contains(&id))
                         })
                     })
                     .instrument(tracing::info_span!("set_assignment", id))
@@ -438,7 +439,11 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
                     if registered {
                         if let Some(bundle) = prepared_bundle {
-                            self.query_schemas.activate_bundle(bundle);
+                            if let Err(e) = self.query_schemas.activate_bundle(bundle) {
+                                metrics::SCHEMA_BUNDLE_FAILURES.inc();
+                                warn!(assignment_id = %id, error = ?e, "Failed to activate schema bundle");
+                                continue;
+                            }
                         }
                     }
 

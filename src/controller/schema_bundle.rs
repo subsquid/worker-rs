@@ -36,11 +36,12 @@ pub struct SchemaBundle {
     pub url: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct PreparedBundle {
     hash: BundleHash,
     ids: HashSet<SchemaId>,
     schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
+    staged: Option<TempDir>,
 }
 
 impl PreparedBundle {
@@ -50,6 +51,10 @@ impl PreparedBundle {
 
     pub fn contains(&self, id: SchemaId) -> bool {
         self.ids.contains(&id)
+    }
+
+    pub fn ids(&self) -> HashSet<SchemaId> {
+        self.ids.clone()
     }
 }
 
@@ -251,7 +256,13 @@ impl SchemaRegistry {
         hash: BundleHash,
     ) {
         let ids = schemas.keys().copied().collect();
-        self.activate_bundle(PreparedBundle { hash, ids, schemas });
+        self.activate_bundle(PreparedBundle {
+            hash,
+            ids,
+            schemas,
+            staged: None,
+        })
+        .unwrap();
     }
 
     /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
@@ -272,8 +283,7 @@ impl SchemaRegistry {
     #[cfg(test)]
     async fn ensure(&self, bundle: &SchemaBundle, client: &reqwest::Client) -> anyhow::Result<()> {
         let prepared = self.prepare_bundle(bundle, client).await?;
-        self.activate_bundle(prepared);
-        Ok(())
+        self.activate_bundle(prepared)
     }
 
     async fn merge(
@@ -287,6 +297,7 @@ impl SchemaRegistry {
                 hash: bundle.hash,
                 ids: self.bundle_ids(),
                 schemas: HashMap::new(),
+                staged: None,
             });
         }
 
@@ -313,33 +324,27 @@ impl SchemaRegistry {
             .context("couldn't load the staged schema bundle")?;
 
         tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Merging schema bundle");
-        self.install(&staged_path, schemas, bundle.hash)
-    }
-
-    /// Moves each staged schema into the store and publishes the bundle to the registry.
-    ///
-    /// Per file rather than per bundle, because the store is a union: a crash partway leaves a
-    /// smaller union, which the next merge completes. There is no state in which the store
-    /// claims to hold something it doesn't.
-    fn install(
-        &self,
-        staged: &Utf8Path,
-        schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
-        hash: BundleHash,
-    ) -> anyhow::Result<PreparedBundle> {
-        let _merging = self.merge_lock.lock();
-        std::fs::create_dir_all(&self.dir)?;
-        for id in schemas.keys() {
-            let name = format!("{id}{SCHEMA_SUFFIX}");
-            std::fs::rename(staged.join(&name), self.dir.join(&name))
-                .with_context(|| format!("couldn't move schema {id} into the store"))?;
-        }
         let ids = schemas.keys().copied().collect();
-        Ok(PreparedBundle { hash, ids, schemas })
+        Ok(PreparedBundle {
+            hash: bundle.hash,
+            ids,
+            schemas,
+            staged: Some(staged),
+        })
     }
 
-    pub fn activate_bundle(&self, bundle: PreparedBundle) {
+    pub fn activate_bundle(&self, mut bundle: PreparedBundle) -> anyhow::Result<()> {
         let _updating = self.merge_lock.lock();
+        if let Some(staged) = bundle.staged.take() {
+            std::fs::create_dir_all(&self.dir)?;
+            let staged = Utf8Path::from_path(staged.path())
+                .context("staging directory path is not UTF-8")?;
+            for id in bundle.schemas.keys() {
+                let name = format!("{id}{SCHEMA_SUFFIX}");
+                std::fs::rename(staged.join(&name), self.dir.join(&name))
+                    .with_context(|| format!("couldn't move schema {id} into the store"))?;
+            }
+        }
         let current = self.snapshot.load_full();
         let mut by_id = current.by_id.clone();
         for (id, description) in bundle.schemas {
@@ -362,6 +367,7 @@ impl SchemaRegistry {
             bundle_hash: Some(bundle.hash),
             bundle_ids: bundle.ids,
         }));
+        Ok(())
     }
 }
 
@@ -682,10 +688,45 @@ tables:
         assert!(registry.get_by_id(SchemaId::new(7)).is_err());
         assert_eq!(registry.installed_hash(), None);
         assert!(registry.bundle_ids().is_empty());
+        assert!(stored(&dir).is_empty());
 
-        registry.activate_bundle(prepared);
+        registry.activate_bundle(prepared).unwrap();
         assert_eq!(registry.installed_hash(), Some(bundle.hash));
         assert_eq!(registry.bundle_ids(), HashSet::from([SchemaId::new(7)]));
+        assert_eq!(stored(&dir), vec!["7.yaml"]);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_prepared_republication_preserves_the_live_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = store(&dir);
+        let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        let original_bundle = SchemaBundle {
+            hash: BundleHash::of(&original),
+            url: serve_once(original).await,
+        };
+        registry
+            .ensure(&original_bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        let replacement_schema = SCHEMA.replace("name: evm", "name: evm2");
+        let replacement = targz(&[("7.yaml", replacement_schema.as_bytes())]);
+        let replacement_bundle = SchemaBundle {
+            hash: BundleHash::of(&replacement),
+            url: serve_once(replacement).await,
+        };
+        let prepared = registry
+            .prepare_bundle(&replacement_bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+        drop(prepared);
+        drop(registry);
+
+        let restarted = store(&dir);
+        assert_eq!(restarted.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
     }
 
     /// Bundles accumulate. The network publishes only its current bundle and offers no way back
