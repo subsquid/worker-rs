@@ -74,9 +74,9 @@ no fallback if `worker_assignment` is absent. This changes four things:
   bundle that described them, only the current bundle is published, and no schema can be fetched
   by id, so a schema dropped locally would strand data permanently. The store is read back at
   startup, so a restart answers for the chunks it already holds without waiting for a download.
-- **An assignment and its bundle apply together.** The assignment is applied only if its
+- **An assignment is validated against its bundle.** The assignment is applied only if its
   accompanying bundle was fetched *and* carries every schema the assignment references; failing
-  either, neither half applies and the previous assignment stays in force. Schemas accumulated
+  either, the previous assignment stays in force and no schemas from an invalid pair are installed. Schemas accumulated
   from earlier bundles keep answering queries, but do not stand in for the bundle a new
   assignment came with — applying half a pair would report an assignment as held that the worker
   only half-holds. A bundle that does not cover its assignment is a scheduler fault and raises

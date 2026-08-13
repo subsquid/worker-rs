@@ -2,9 +2,9 @@
 //! published alongside the assignments that reference those ids, and the store they are merged
 //! into. In worker-assignment mode it replaces the CDN manifest as the source of query schemas.
 //!
-//! Two sets come out of it, and they are deliberately different: everything merged, which
-//! answers queries, and the ids of the bundle in force, which is what may admit an assignment
-//! (ADR-21).
+//! A worker assignment and bundle are validated together: the bundle must name every schema the
+//! assignment uses. Schema ids are immutable, and installing a bundle only adds ids that are not
+//! already stored.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -40,7 +40,10 @@ pub struct SchemaBundle {
 pub struct PreparedBundle {
     hash: BundleHash,
     ids: HashSet<SchemaId>,
+    /// Every validated schema in the bundle, including ones already cached on disk.
     schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
+    /// Schemas whose files are not cached yet and must move out of `staged`.
+    schemas_to_install: HashSet<SchemaId>,
     staged: Option<TempDir>,
 }
 
@@ -259,6 +262,7 @@ impl SchemaRegistry {
         self.activate_bundle(PreparedBundle {
             hash,
             ids,
+            schemas_to_install: schemas.keys().copied().collect(),
             schemas,
             staged: None,
         })
@@ -300,6 +304,7 @@ impl SchemaRegistry {
                 hash: bundle.hash,
                 ids: self.bundle_ids(),
                 schemas: HashMap::new(),
+                schemas_to_install: HashSet::new(),
                 staged: None,
             });
         }
@@ -326,12 +331,29 @@ impl SchemaRegistry {
             .await
             .context("couldn't load the staged schema bundle")?;
 
-        tracing::info!(hash = %bundle.hash, schemas = schemas.len(), "Merging schema bundle");
         let ids = schemas.keys().copied().collect();
+        let mut schemas_to_install = HashSet::new();
+        // Schema ids are immutable. Exact files are already cached and need no write; a different
+        // file under an existing id would change the meaning of chunks already on disk.
+        for id in schemas.keys().copied().collect::<Vec<_>>() {
+            let name = format!("{id}{SCHEMA_SUFFIX}");
+            let stored = self.dir.join(&name);
+            if !stored.exists() {
+                schemas_to_install.insert(id);
+                continue;
+            }
+            let staged_file = staged_path.join(&name);
+            if std::fs::read(&stored)? != std::fs::read(&staged_file)? {
+                bail!("schema {id} was republished with different contents");
+            }
+        }
+
+        tracing::info!(hash = %bundle.hash, new_schemas = schemas_to_install.len(), "Merging schema bundle");
         Ok(PreparedBundle {
             hash: bundle.hash,
             ids,
             schemas,
+            schemas_to_install,
             staged: Some(staged),
         })
     }
@@ -351,7 +373,7 @@ impl SchemaRegistry {
             std::fs::create_dir_all(&self.dir)?;
             let staged = Utf8Path::from_path(staged.path())
                 .context("staging directory path is not UTF-8")?;
-            for id in bundle.schemas.keys() {
+            for id in &bundle.schemas_to_install {
                 let name = format!("{id}{SCHEMA_SUFFIX}");
                 std::fs::rename(staged.join(&name), self.dir.join(&name))
                     .with_context(|| format!("couldn't move schema {id} into the store"))?;
@@ -360,16 +382,6 @@ impl SchemaRegistry {
         let current = self.snapshot.load_full();
         let mut by_id = current.by_id.clone();
         for (id, description) in bundle.schemas {
-            if let Some(previous) = by_id.get(&id) {
-                if previous.name != description.name {
-                    tracing::warn!(
-                        schema_id = %id,
-                        was = %previous.name,
-                        now = %description.name,
-                        "A schema id was republished for a different dataset type"
-                    );
-                }
-            }
             by_id.insert(id, description);
         }
         self.snapshot.store(Arc::new(SchemaSnapshot {
@@ -414,8 +426,8 @@ fn sweep_staging(dir: &Utf8Path) -> usize {
     removed
 }
 
-/// Reads the store as it stands. A schema that won't parse is skipped rather than fatal: the
-/// rest still answer, and a bundle carrying that id will overwrite it.
+/// Reads the store as it stands. A schema that won't parse is skipped rather than fatal, so the
+/// rest can still answer queries.
 fn read_store(dir: &Utf8Path) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDescription>>> {
     if !dir.exists() {
         return Ok(HashMap::new());
@@ -713,7 +725,7 @@ tables:
     }
 
     #[tokio::test]
-    async fn dropping_a_prepared_republication_preserves_the_live_store() {
+    async fn dropping_a_prepared_bundle_does_not_publish_new_schemas() {
         let dir = tempfile::tempdir().unwrap();
         let registry = store(&dir);
         let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
@@ -726,8 +738,7 @@ tables:
             .await
             .unwrap();
 
-        let replacement_schema = SCHEMA.replace("name: evm", "name: evm2");
-        let replacement = targz(&[("7.yaml", replacement_schema.as_bytes())]);
+        let replacement = targz(&[("9.yaml", SCHEMA.as_bytes())]);
         let replacement_bundle = SchemaBundle {
             hash: BundleHash::of(&replacement),
             url: serve_once(replacement).await,
@@ -738,11 +749,13 @@ tables:
             .unwrap();
 
         assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+        assert!(registry.get_by_id(SchemaId::new(9)).is_err());
         drop(prepared);
         drop(registry);
 
         let restarted = store(&dir);
         assert_eq!(restarted.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+        assert!(restarted.get_by_id(SchemaId::new(9)).is_err());
     }
 
     /// Bundles accumulate. The network publishes only its current bundle and offers no way back
@@ -783,28 +796,106 @@ tables:
         assert_eq!(store.bundle_ids(), HashSet::from([SchemaId::new(12)]));
     }
 
-    /// Republishing an id is the sanctioned way to correct a schema in place. It changes the
-    /// bundle hash, so it is not deduplicated away.
+    /// Schema ids are immutable because stored chunks retain only the id that describes them.
     #[tokio::test]
-    async fn a_republished_id_overwrites_the_stored_copy() {
+    async fn a_republished_id_with_different_contents_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let registry = Arc::clone(&store);
 
-        for body in [SCHEMA.to_owned(), SCHEMA.replace("name: evm", "name: evm2")] {
-            let archive = targz(&[("7.yaml", body.as_bytes())]);
-            let bundle = SchemaBundle {
-                hash: BundleHash::of(&archive),
-                url: serve_once(archive).await,
-            };
-            store
-                .ensure(&bundle, &reqwest::Client::new())
-                .await
-                .unwrap();
-        }
+        let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        store
+            .ensure(
+                &SchemaBundle {
+                    hash: BundleHash::of(&original),
+                    url: serve_once(original).await,
+                },
+                &reqwest::Client::new(),
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm2");
+        let changed = targz(&[(
+            "7.yaml",
+            SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
+        )]);
+        let err = store
+            .ensure(
+                &SchemaBundle {
+                    hash: BundleHash::of(&changed),
+                    url: serve_once(changed).await,
+                },
+                &reqwest::Client::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("republished with different contents"));
+        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
         assert_eq!(stored(&dir), vec!["7.yaml"]);
+    }
+
+    #[tokio::test]
+    async fn an_identical_cached_schema_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let first = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        store
+            .ensure(
+                &SchemaBundle {
+                    hash: BundleHash::of(&first),
+                    url: serve_once(first).await,
+                },
+                &reqwest::Client::new(),
+            )
+            .await
+            .unwrap();
+        let path = dir.path().join("7.yaml");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let second = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
+        store
+            .ensure(
+                &SchemaBundle {
+                    hash: BundleHash::of(&second),
+                    url: serve_once(second).await,
+                },
+                &reqwest::Client::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(path).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
+    }
+
+    /// Models a retry after activation copied one file and failed before publishing the registry.
+    /// The cached file needs no second write, but must still enter the in-memory snapshot.
+    #[tokio::test]
+    async fn retry_publishes_an_identical_schema_cached_by_a_partial_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
+        assert!(store.get_by_id(SchemaId::new(7)).is_err());
+
+        let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(&archive),
+            url: serve_once(archive).await,
+        };
+        store
+            .ensure(&bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert!(store.get_by_id(SchemaId::new(7)).is_ok());
+        assert!(store.get_by_id(SchemaId::new(9)).is_ok());
+        assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
     }
 
     #[tokio::test]
@@ -922,7 +1013,7 @@ tables:
     }
 
     /// A stored schema that won't parse is skipped rather than fatal — the rest still answer,
-    /// and a bundle carrying that id overwrites it.
+    /// and an operator can remove it before a valid bundle restores it.
     #[test]
     fn an_unreadable_stored_schema_is_skipped_at_startup() {
         let dir = tempfile::tempdir().unwrap();

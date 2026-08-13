@@ -88,7 +88,7 @@ retention/space lifecycle (10).
 | [ADR-18](decisions/ADR-18-bounded-validated-assignment-intake.md) | Bounded, validated assignment intake | Proposed |
 | [ADR-19](decisions/ADR-19-ratify-provisional-targets.md) | Ratify provisional SLO targets and gate thresholds | Proposed |
 | [ADR-20](decisions/ADR-20-freshness-rejection-attribution.md) | Freshness rejections are worker-fault outcomes | Proposed |
-| [ADR-21](decisions/ADR-21-assignment-and-bundle-apply-as-one-snapshot.md) | An assignment and its schema bundle apply as one snapshot | Accepted |
+| [ADR-21](decisions/ADR-21-assignment-and-bundle-apply-as-one-snapshot.md) | Validate a worker assignment against its schema bundle | Accepted |
 
 ## How to use this suite
 

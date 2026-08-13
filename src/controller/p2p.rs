@@ -281,8 +281,8 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
 
     /// Downloads the blob in whichever assignment format this worker reads.
     ///
-    /// The schema bundle is a hard prerequisite in worker-assignment mode: nothing reads it yet,
-    /// but coupling it in now surfaces a broken bundle during rollout.
+    /// Worker assignments and bundles are fetched together so coverage can be checked before
+    /// either the assignment or newly introduced schemas are applied.
     async fn download_assignment(
         &self,
         update: &super::assignments::AssignmentUpdate,
@@ -428,24 +428,37 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
                     let prepared_ids = prepared_bundle.as_ref().map(|bundle| bundle.ids());
-                    let registered = tokio::task::spawn_blocking(move || {
-                        worker.register_assignment(assignment, update.id, &keypair, |id| {
+                    let prepared_assignment = tokio::task::spawn_blocking(move || {
+                        worker.prepare_assignment(assignment, update.id, &keypair, |id| {
                             prepared_ids.as_ref().is_none_or(|ids| ids.contains(&id))
                         })
+                    })
+                    .instrument(tracing::info_span!("validate_assignment", id))
+                    .await
+                    .expect("prepare_assignment shouldn't panic");
+                    let prepared_assignment = match prepared_assignment {
+                        Ok(assignment) => assignment,
+                        Err(e) => {
+                            metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                            warn!(assignment_id = %id, error = %e, "Refused assignment");
+                            continue;
+                        }
+                    };
+
+                    if let Some(bundle) = prepared_bundle {
+                        if let Err(e) = self.query_schemas.activate_bundle(bundle) {
+                            metrics::SCHEMA_BUNDLE_FAILURES.inc();
+                            warn!(assignment_id = %id, error = ?e, "Failed to activate schema bundle");
+                            continue;
+                        }
+                    }
+
+                    let registered = tokio::task::spawn_blocking(move || {
+                        worker.register_prepared_assignment(prepared_assignment)
                     })
                     .instrument(tracing::info_span!("set_assignment", id))
                     .await
                     .expect("register_assignment shouldn't panic");
-
-                    if registered {
-                        if let Some(bundle) = prepared_bundle {
-                            if let Err(e) = self.query_schemas.activate_bundle(bundle) {
-                                metrics::SCHEMA_BUNDLE_FAILURES.inc();
-                                warn!(assignment_id = %id, error = ?e, "Failed to activate schema bundle");
-                                continue;
-                            }
-                        }
-                    }
 
                     if self.assignment_source == AssignmentSource::Worker && registered {
                         processing_id = Some(id);

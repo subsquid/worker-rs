@@ -195,9 +195,10 @@ These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are uncha
 
 **IB-40b — Network-state document.** Same address as IB-40, but the worker reads
 `worker_assignment: {id, fb_url_v1, effective_from}` and `schema_bundle: {hash, url}`;
-the legacy `assignment` key is ignored and never falls back to. Every key is optional —
-a network mid-migration may publish either, both, or neither — and a state without
-`worker_assignment` yields no update. The two are versioned independently: either can
+both fields are mandatory when the worker consumes `worker_assignment`; a state missing either
+is not applicable. The legacy `assignment` key is ignored and never falls back to. A network
+mid-migration may publish either pointer for workers in the corresponding mode. The two worker
+references are versioned independently: either can
 change without the other, and the bundle is deduplicated against what the worker has
 installed, not against what it last saw.
 
@@ -236,9 +237,9 @@ deliberately malformed bundles.
 A bundle is **merged** into `<data-dir>/schemas/<id>.yaml`, not installed as a unit: ids
 accumulate across bundles and nothing is removed by a merge. Only the current bundle is
 published, and no schema is addressable by id or hash, so a dropped schema is
-unrecoverable and every chunk on disk written with it becomes unreadable. A republished id
-overwrites — the sanctioned way to correct a schema in place, and one that changes the
-bundle hash, so it is not deduplicated away. Merging per file makes an interrupted merge a
+unrecoverable and every chunk on disk written with it becomes unreadable. Schema ids are
+immutable; republishing an id with different contents rejects the update rather than changing the
+meaning of existing chunks. Merging per file makes an interrupted merge a
 smaller store rather than a false one, and the store is adopted at startup, so schemas
 already held answer queries before any download.
 

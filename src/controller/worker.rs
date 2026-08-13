@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use crate::storage::datasets_index::{AssignmentBlob, ChunkSchema};
+use crate::storage::datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use polars::{
     io::SerWriter,
@@ -83,6 +83,21 @@ impl Worker {
     ) -> bool {
         self.state_manager
             .set_assignment(assignment, id, key, covered_by_bundle)
+    }
+
+    pub fn prepare_assignment(
+        &self,
+        assignment: AssignmentBlob,
+        id: impl Into<String>,
+        key: &Keypair,
+        covered_by_bundle: impl Fn(SchemaId) -> bool,
+    ) -> anyhow::Result<DatasetsIndex> {
+        self.state_manager
+            .prepare_assignment(assignment, id, key, covered_by_bundle)
+    }
+
+    pub fn register_prepared_assignment(&self, assignment: DatasetsIndex) -> bool {
+        self.state_manager.set_prepared_assignment(assignment)
     }
 
     pub fn registered_assignment_id(&self) -> Option<String> {

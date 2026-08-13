@@ -254,9 +254,7 @@ impl StateManager {
         key: &Keypair,
         schema_available: impl Fn(SchemaId) -> bool,
     ) -> bool {
-        let id = id.into();
-        let current_assignment_id = id.clone();
-        let datasets_index = match DatasetsIndex::new(assignment, id, key, schema_available) {
+        let datasets_index = match self.prepare_assignment(assignment, id, key, schema_available) {
             Ok(result) => result,
             Err(e) => {
                 metrics::set_status(metrics::WorkerStatus::NotRegistered);
@@ -264,6 +262,21 @@ impl StateManager {
                 return false;
             }
         };
+        self.set_prepared_assignment(datasets_index)
+    }
+
+    pub fn prepare_assignment(
+        &self,
+        assignment: AssignmentBlob,
+        id: impl Into<String>,
+        key: &Keypair,
+        schema_available: impl Fn(SchemaId) -> bool,
+    ) -> anyhow::Result<DatasetsIndex> {
+        DatasetsIndex::new(assignment, id, key, schema_available)
+    }
+
+    pub fn set_prepared_assignment(&self, datasets_index: DatasetsIndex) -> bool {
+        let current_assignment_id = datasets_index.assignment_id().to_owned();
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
