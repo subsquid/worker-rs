@@ -466,8 +466,15 @@ fn read_store(dir: &Utf8Path) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDes
             Ok(description) => {
                 schemas.insert(id, Arc::new(description));
             }
+            // Leaving it in place would wedge the store: the worker can't answer a query with a
+            // schema it can't read, and every later bundle carrying the id would compare against
+            // these bytes and refuse the whole merge as a republished id (ADR-21). Removing it
+            // leaves the store smaller rather than false (IB-44b), so a bundle reinstalls the id.
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = ?e, "Skipping an unreadable stored schema")
+                tracing::warn!(path = %path.display(), error = ?e, "Removing an unreadable stored schema");
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(path = %path.display(), error = %e, "Couldn't remove the unreadable stored schema");
+                }
             }
         }
     }
@@ -1031,7 +1038,7 @@ tables:
     }
 
     #[test]
-    fn an_unreadable_stored_schema_is_skipped_at_startup() {
+    fn an_unreadable_stored_schema_is_removed_at_startup() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(dir.path()).unwrap();
         std::fs::write(root.join("7.yaml"), SCHEMA).unwrap();
@@ -1041,6 +1048,71 @@ tables:
 
         assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
         assert!(registry.get_by_id(SchemaId::new(9)).is_err());
+        assert_eq!(stored(&dir), vec!["7.yaml"], "the unreadable one is gone");
+    }
+
+    /// An unclean shutdown can leave a zero-length file behind: schemas are written into
+    /// staging and renamed into the store with no fsync. Adopting nothing from it is not
+    /// enough — while it sits there it is neither absent nor equal, so it reads as a
+    /// republished id and refuses every bundle that carries it, for good.
+    #[tokio::test]
+    async fn a_bundle_reinstalls_a_schema_the_store_could_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("7.yaml"), b"").unwrap();
+        let store = store(&dir);
+
+        let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(&archive),
+            url: serve_once(archive).await,
+        };
+        store
+            .ensure(&bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert_eq!(store.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+        assert_eq!(
+            store.get_by_id(SchemaId::new(9)).unwrap().name,
+            "evm",
+            "and the rest of the bundle no longer goes down with it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
+            SCHEMA
+        );
+    }
+
+    /// The repair is only for what the worker couldn't read: a schema it did adopt still
+    /// holds the id against a bundle that changes its meaning (ADR-21).
+    #[tokio::test]
+    async fn an_adopted_schema_still_refuses_a_republished_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
+        let store = store(&dir);
+
+        let changed = targz(&[(
+            "7.yaml",
+            SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
+        )]);
+        let err = store
+            .ensure(
+                &SchemaBundle {
+                    hash: BundleHash::of(&changed),
+                    url: serve_once(changed).await,
+                },
+                &reqwest::Client::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("republished with different contents"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
+            SCHEMA
+        );
     }
 
     #[test]

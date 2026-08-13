@@ -241,7 +241,10 @@ unrecoverable and every chunk on disk written with it becomes unreadable. Schema
 immutable; republishing an id with different contents rejects the update rather than changing the
 meaning of existing chunks. Merging per file makes an interrupted merge a
 smaller store rather than a false one, and the store is adopted at startup, so schemas
-already held answer queries before any download.
+already held answer queries before any download. A stored file that won't read is
+*removed* at startup rather than skipped: it names no meaning any chunk can be served
+with, and while it sits there it is neither absent nor equal, so it reads as a
+republished id and refuses every bundle carrying it.
 
 Coverage is judged against the ids of the bundle in force, never against the accumulated
 store (ADR-21): what the worker can *serve* and what may *admit an assignment* are
