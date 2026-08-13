@@ -1,10 +1,4 @@
-//! The network's schema bundle: a gzipped tar of `<schema_id>.yaml` query-engine schemas,
-//! published alongside the assignments that reference those ids, and the store they are merged
-//! into. In worker-assignment mode it replaces the CDN manifest as the source of query schemas.
-//!
-//! A worker assignment and bundle are validated together: the bundle must name every schema the
-//! assignment uses. Schema ids are immutable, and installing a bundle only adds ids that are not
-//! already stored.
+//! Persistent query schemas supplied with worker assignments.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,15 +15,12 @@ use crate::metrics;
 use crate::query::result::QueryError;
 use crate::types::schema::SchemaId;
 
-/// Caps both the download and the unpacked total: the only bound on a corrupt or hostile archive
-/// before the hash is verified. Published bundles are tens of kilobytes.
+/// Caps both compressed and unpacked input before verification.
 const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Staging entries are never read back and are swept at startup.
 const TEMP_PREFIX: &str = "temp-";
 const SCHEMA_SUFFIX: &str = ".yaml";
 
-/// A schema bundle published by the network.
 #[derive(Clone, Debug)]
 pub struct SchemaBundle {
     pub hash: BundleHash,
@@ -40,9 +31,7 @@ pub struct SchemaBundle {
 pub struct PreparedBundle {
     hash: BundleHash,
     ids: HashSet<SchemaId>,
-    /// Every validated schema in the bundle, including ones already cached on disk.
     schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
-    /// Schemas whose files are not cached yet and must move out of `staged`.
     schemas_to_install: HashSet<SchemaId>,
     staged: Option<TempDir>,
 }
@@ -72,9 +61,7 @@ impl TryFrom<sqd_assignments::SchemaBundle> for SchemaBundle {
     }
 }
 
-/// A validated SHA-256 schema bundle hash.
-///
-/// `Display` renders the wire form `sha256:<hex>`; `LowerHex` the bare hex it is built from.
+/// A validated SHA-256 hash. `Display` includes the `sha256:` prefix.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BundleHash([u8; 32]);
 
@@ -87,7 +74,6 @@ impl BundleHash {
 impl std::str::FromStr for BundleHash {
     type Err = anyhow::Error;
 
-    /// Only sha256. An unknown algorithm fails rather than skipping verification.
     fn from_str(hash: &str) -> anyhow::Result<Self> {
         let (algorithm, hex) = hash.split_once(':').with_context(|| {
             format!("schema bundle hash '{hash}' is not in 'algorithm:hex' form")
@@ -127,12 +113,7 @@ impl std::fmt::LowerHex for BundleHash {
     }
 }
 
-/// The worker's schema store: every `<id>.yaml` it has ever merged, under `dir`, and the same
-/// set loaded into `registry`.
-///
-/// A bundle is merged into the store rather than replacing it. The network publishes only its
-/// current bundle and offers no way to fetch an older one, so a schema dropped here is gone —
-/// and any chunk still on disk that was written with it becomes unreadable.
+/// Additive persistent schema store.
 #[derive(Default)]
 pub(crate) struct SchemaSnapshot {
     pub(crate) legacy_loaded: bool,
@@ -145,8 +126,6 @@ pub(crate) struct SchemaSnapshot {
 pub struct SchemaRegistry {
     dir: Utf8PathBuf,
     snapshot: ArcSwap<SchemaSnapshot>,
-    /// Guards the merge: writing the files and publishing them to the registry are one step.
-    /// Nothing under it awaits.
     merge_lock: parking_lot::Mutex<()>,
 }
 
@@ -160,11 +139,8 @@ impl SchemaRegistry {
         }
     }
 
-    /// Adopts whatever an earlier run left in `dir` and sweeps anything half-written. Adopted
-    /// schemas answer queries immediately; admitting an assignment still waits for a bundle.
     pub fn open(dir: impl Into<Utf8PathBuf>) -> Self {
         let dir = dir.into();
-        // Blocking, but it's startup and the files are few and small (as in `StateManager::new`).
         let swept = sweep_staging(&dir);
         if swept > 0 {
             tracing::debug!(swept, "Removed staging files left by an earlier run");
@@ -232,8 +208,6 @@ impl SchemaRegistry {
         }));
     }
 
-    /// Hash of the last bundle merged. Set only on success, so a failure leaves the previous
-    /// value and the next poll re-offers the bundle rather than deduplicating it away.
     pub fn installed_hash(&self) -> Option<BundleHash> {
         self.snapshot.load().bundle_hash
     }
@@ -243,7 +217,6 @@ impl SchemaRegistry {
         self.installed_hash()
     }
 
-    /// Schema ids carried by the bundle in force.
     pub fn bundle_ids(&self) -> HashSet<SchemaId> {
         self.snapshot.load().bundle_ids.clone()
     }
@@ -269,9 +242,7 @@ impl SchemaRegistry {
         .unwrap();
     }
 
-    /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
-    /// The caller must serialize preparation and activation. Production does this in the
-    /// assignment loop; this is public only for the integration harness.
+    /// The caller must serialize preparation and activation.
     #[doc(hidden)]
     pub async fn prepare_bundle(
         &self,
@@ -309,8 +280,6 @@ impl SchemaRegistry {
             });
         }
 
-        // Fetch, unpack and parse hold no lock: they write only into a directory of this
-        // attempt's own, which nothing else can name.
         let bytes = download(&bundle.url, client)
             .await
             .with_context(|| format!("couldn't download schema bundle from {}", bundle.url))?;
@@ -333,8 +302,7 @@ impl SchemaRegistry {
 
         let ids = schemas.keys().copied().collect();
         let mut schemas_to_install = HashSet::new();
-        // Schema ids are immutable. Exact files are already cached and need no write; a different
-        // file under an existing id would change the meaning of chunks already on disk.
+        // An id permanently defines stored chunks, so its bytes cannot change.
         for id in schemas.keys().copied().collect::<Vec<_>>() {
             let name = format!("{id}{SCHEMA_SUFFIX}");
             let stored = self.dir.join(&name);
@@ -396,8 +364,6 @@ impl SchemaRegistry {
     }
 }
 
-/// Removes anything left in the staging namespace. Best-effort: a leftover is inert, since
-/// nothing reads a `temp-` name back.
 fn sweep_staging(dir: &Utf8Path) -> usize {
     let mut removed = 0usize;
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -426,8 +392,6 @@ fn sweep_staging(dir: &Utf8Path) -> usize {
     removed
 }
 
-/// Reads the store as it stands. A schema that won't parse is skipped rather than fatal, so the
-/// rest can still answer queries.
 fn read_store(dir: &Utf8Path) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDescription>>> {
     if !dir.exists() {
         return Ok(HashMap::new());
@@ -477,14 +441,9 @@ async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>
     Ok(buf)
 }
 
-/// Extracts into a staging directory, then renames it onto `dest`, so a crash mid-unpack can't
-/// leave a partial bundle under a hash that claims to be complete.
 async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> anyhow::Result<TempDir> {
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&parent)?;
-        // Named, not adopted, so the directory is exclusively this attempt's, and dropped on
-        // every failure path, so only a success or a crash leaves one behind. The prefix is what
-        // the startup sweep looks for, since a crash skips the drop.
         let temp = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
             .tempdir_in(&parent)?;
@@ -498,9 +457,7 @@ async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> anyhow::Result<TempDir> 
     .context("unpack task panicked")?
 }
 
-/// Writes out every `<id>.yaml` at the archive root. Anything else — nested paths, a later
-/// manifest, and by construction any `..` or absolute path — is skipped rather than rejected, so
-/// a bundle that grows new entries still loads on an older worker.
+/// Extracts root-level `<id>.yaml` files and ignores unknown entries.
 fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut total = 0usize;
@@ -521,7 +478,6 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
             tracing::debug!(entry = %path.display(), "Ignoring unrecognized schema bundle entry");
             continue;
         };
-        // Rebuilt from the parsed id: no archive-supplied path reaches the filesystem.
         let name = format!("{id}.yaml");
 
         let size = usize::try_from(entry.header().size()?).unwrap_or(usize::MAX);
@@ -542,8 +498,7 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parses `<id>.yaml` into its id. Digits only, no leading zeros — `+7.yaml` (which `str::parse`
-/// accepts) and `007.yaml` would let one bundle define id 7 twice, resolved by directory order.
+/// Rejects alternate spellings that could define one id twice.
 fn schema_id(file_name: &str) -> Option<SchemaId> {
     let stem = file_name.strip_suffix(".yaml")?;
     if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
@@ -597,7 +552,6 @@ tables:
         type: uint64
 "#;
 
-    /// Writes names straight into the header: `Builder::append_data` refuses to produce a `..`.
     fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
             Vec::new(),
@@ -758,8 +712,6 @@ tables:
         assert!(restarted.get_by_id(SchemaId::new(9)).is_err());
     }
 
-    /// Bundles accumulate. The network publishes only its current bundle and offers no way back
-    /// to an older one, so a schema dropped here would strand every chunk written with it.
     #[tokio::test]
     async fn a_later_bundle_adds_to_the_store_rather_than_replacing_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -792,11 +744,9 @@ tables:
         );
         assert_eq!(stored(&dir), vec!["12.yaml", "7.yaml"]);
 
-        // Coverage is judged against the bundle in force, never the accumulated set (ADR-21).
         assert_eq!(store.bundle_ids(), HashSet::from([SchemaId::new(12)]));
     }
 
-    /// Schema ids are immutable because stored chunks retain only the id that describes them.
     #[tokio::test]
     async fn a_republished_id_with_different_contents_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
@@ -874,8 +824,6 @@ tables:
         assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
     }
 
-    /// Models a retry after activation copied one file and failed before publishing the registry.
-    /// The cached file needs no second write, but must still enter the in-memory snapshot.
     #[tokio::test]
     async fn retry_publishes_an_identical_schema_cached_by_a_partial_install() {
         let dir = tempfile::tempdir().unwrap();
@@ -914,7 +862,6 @@ tables:
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
-        // Nothing merged, so the next poll offers the same bundle again.
         assert!(store.installed_hash().is_none());
         assert!(registry.get_by_id(SchemaId::new(7)).is_err());
         assert!(stored(&dir).is_empty());
@@ -978,8 +925,6 @@ tables:
         assert_eq!(stored(&dir), vec!["7.yaml"]);
     }
 
-    /// The store outlives the process, so a restart answers queries for chunks already on disk
-    /// without waiting for a download.
     #[tokio::test]
     async fn a_restart_adopts_the_stored_schemas() {
         let dir = tempfile::tempdir().unwrap();
@@ -997,7 +942,6 @@ tables:
                 .unwrap();
         }
 
-        // The one-shot server is spent, so nothing below can have come over the network.
         let store = store(&dir);
         let registry = Arc::clone(&store);
         assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
@@ -1012,8 +956,6 @@ tables:
         );
     }
 
-    /// A stored schema that won't parse is skipped rather than fatal — the rest still answer,
-    /// and an operator can remove it before a valid bundle restores it.
     #[test]
     fn an_unreadable_stored_schema_is_skipped_at_startup() {
         let dir = tempfile::tempdir().unwrap();
@@ -1049,7 +991,6 @@ tables:
         std::fs::create_dir_all(root.join(format!("{TEMP_PREFIX}abcd"))).unwrap();
         std::fs::write(root.join(format!("{TEMP_PREFIX}stray")), b"x").unwrap();
         std::fs::write(root.join("7.yaml"), SCHEMA).unwrap();
-        // Anything the store didn't write is left alone.
         std::fs::write(root.join("unrelated"), b"keep me").unwrap();
 
         let _store = store(&dir);
@@ -1059,7 +1000,6 @@ tables:
         assert_eq!(left, vec!["7.yaml", "unrelated"]);
     }
 
-    /// Names in the store directory, `<id>.yaml` only.
     fn stored(dir: &tempfile::TempDir) -> Vec<String> {
         let mut names: Vec<String> = stored_all(dir)
             .into_iter()

@@ -12,8 +12,6 @@ use crate::types::schema::SchemaId;
 use crate::types::state::ChunkRef;
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
-/// A downloaded assignment in either published format: `Legacy` lists a chunk's files
-/// explicitly, `Worker` derives them from the write schema's inline table roster.
 pub enum AssignmentBlob {
     Legacy(sqd_assignments::Assignment),
     Worker(sqd_assignments::WorkerAssignment),
@@ -28,19 +26,11 @@ pub struct DatasetsIndex {
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
 }
 
-/// Which schema the applied assignment says a chunk uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSchema {
-    /// A worker assignment pins the write schema the chunk's files were produced with.
     Pinned(SchemaId),
-    /// A legacy assignment covers the chunk but pins nothing; the query's dataset type selects
-    /// the schema, which is sound only while one schema exists per type.
     Unpinned,
-    /// The assignment in force does not cover this chunk. It is on disk because it is waiting
-    /// to be removed, so the honest answer is that the worker does not serve it.
     Unassigned,
-    /// No assignment is installed yet. The chunks on disk are whatever the previous run left;
-    /// nothing says what they mean until the first assignment applies.
     NoAssignment,
 }
 
@@ -76,9 +66,7 @@ impl DatasetsIndex {
             }
             AssignmentBlob::Worker(assignment) => {
                 let chunk = assignment.get_chunk(*chunk_ref)?;
-                // No per-chunk base_url in this format: the legacy field only ever restated `id`.
                 let base_url = chunk_base_url(chunk.dataset_base_url(), chunk.id())?;
-                // `new` rejects an assignment with an unresolvable chunk, so a roster is present.
                 let tables = assignment.chunk_tables(chunk)?;
                 let mut result = Vec::new();
                 for table in tables {
@@ -96,8 +84,6 @@ impl DatasetsIndex {
         }
     }
 
-    /// Refuses an assignment whose schema `schema_available` reports missing: those chunks would
-    /// download fine, then fail — or silently resolve to the wrong schema — at query time.
     pub fn new(
         assignment: AssignmentBlob,
         id: impl Into<String>,
@@ -106,7 +92,6 @@ impl DatasetsIndex {
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
         let mut pool = StringPool::default();
-        // Scratch: each id is checked once however many chunks reference it.
         let mut checked = HashSet::new();
 
         let (status, headers, chunks) = match &assignment {
@@ -128,8 +113,6 @@ impl DatasetsIndex {
                 };
                 let mut chunks = HashMap::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-                    // No roster means no derivable file list. Reject the whole assignment rather
-                    // than apply it partially, leaving the worker silently short of data.
                     if assignment.chunk_tables(chunk).is_none() {
                         anyhow::bail!(
                             "chunk '{}' references write schema {} which has no roster in the assignment",
@@ -139,7 +122,6 @@ impl DatasetsIndex {
                     }
                     let schema_id = SchemaId::from(chunk.write_schema_id());
                     if checked.insert(schema_id) && !schema_available(schema_id) {
-                        // The scheduler publishes the pair; this is its invariant, not ours.
                         crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
                         anyhow::bail!(
                             "chunk '{}' references write schema {schema_id}, which its schema bundle doesn't carry",
@@ -174,10 +156,6 @@ impl DatasetsIndex {
         })
     }
 
-    /// What this assignment says a chunk's data was written with.
-    ///
-    /// Keep [`ChunkSchema::Unpinned`] distinct from [`ChunkSchema::Unassigned`]: resolving an
-    /// unassigned chunk by dataset type may silently select the wrong schema version.
     pub fn chunk_schema(&self, chunk: &ChunkRef) -> ChunkSchema {
         let Some(chunk_ref) = self.chunks.get(chunk) else {
             return ChunkSchema::Unassigned;

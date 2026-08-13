@@ -55,10 +55,8 @@ lazy_static::lazy_static! {
     pub static ref CHUNKS_REMOVED: Counter = Default::default();
     pub static ref STORED_BYTES: Gauge = Default::default();
 
-    /// 1 once a schema bundle is installed, making a stalled bundle publisher observable.
     pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
     pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
-    /// Counts assignment/bundle coverage mismatches, which indicate a publisher fault (ADR-21).
     pub static ref SCHEMA_BUNDLE_MISMATCHES: Counter = Default::default();
 
     static ref QUERY_EXECUTED: Family<QueryExecutedLabels, Counter> = Default::default();

@@ -10,15 +10,9 @@ use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
 
-/// What the worker has in force: the pair, since an assignment and its bundle are one state
-/// (ADR-21).
-///
-/// Both halves are what the worker *did*, never what it saw. A "last seen" marker cannot tell an
-/// assignment that applied from one that was refused, so it consumes the refused one for good.
+/// What the worker successfully applied.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AppliedPair {
-    /// Registered, which is earlier than fully applied: chunks may still be downloading. That
-    /// is the point — an assignment mid-download must not be offered as though it were new.
     pub assignment_id: Option<String>,
     pub bundle_hash: Option<BundleHash>,
 }
@@ -27,12 +21,10 @@ pub struct AssignmentUpdate {
     pub id: String,
     pub fb_url_v1: String,
     pub _effective_from: u64,
-    /// `None` outside worker-assignment mode.
     pub schema_bundle: Option<SchemaBundle>,
 }
 
 impl AssignmentUpdate {
-    /// The pair this update would put in force, for comparing against what already is.
     pub fn pair(&self) -> AppliedPair {
         AppliedPair {
             assignment_id: Some(self.id.clone()),
@@ -41,17 +33,8 @@ impl AssignmentUpdate {
     }
 }
 
-/// The half of the published state that differs from what the worker holds.
-///
-/// Halves are reported separately because reaching them costs different things: a bundle is
-/// merged where it stands, while an assignment has to be fetched and applied. Re-applying an
-/// assignment that has not changed would be pure work — the index already holds it, and its
-/// admission was decided when it was applied.
 pub enum NetworkUpdate {
-    /// The assignment differs from the one registered. Carries whatever bundle is published
-    /// with it, which is merged first: the pair is admitted together (ADR-21).
     Assignment(AssignmentUpdate),
-    /// Only the bundle differs. Merged where it stands; the assignment in force is untouched.
     SchemaBundle(SchemaBundle),
 }
 
@@ -65,10 +48,7 @@ pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client
         .unwrap()
 }
 
-/// Yields the network state whenever it differs from `applied` — the pair the worker has in
-/// force, read from what actually applied. A "last seen" marker would consume an assignment on
-/// sighting, leaving a refused one unretryable, and would miss a bundle that moves under an
-/// unchanged assignment id.
+/// Yields state that differs from what the worker applied.
 pub fn new_assignments_stream(
     url: String,
     frequency: Duration,
@@ -115,8 +95,6 @@ async fn poll_network_state(
 ) -> anyhow::Result<Option<NetworkUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
-    // Parsed here, at the edge: a hash that isn't `sha256:<hex>` is a malformed network state,
-    // and every comparison downstream is then between two verified hashes.
     let published_bundle = (assignment_source == AssignmentSource::Worker)
         .then(|| network_state.schema_bundle.take())
         .flatten()
@@ -127,7 +105,6 @@ async fn poll_network_state(
         })?;
 
     let Some(assignment) = visible_assignment(&network_state, assignment_source) else {
-        // Warn, not debug: a worker whose mode the publisher doesn't serve stands still.
         tracing::warn!(
             expected = match assignment_source {
                 AssignmentSource::Worker => "worker_assignment",
@@ -158,9 +135,6 @@ async fn poll_network_state(
     Ok(Some(NetworkUpdate::Assignment(update)))
 }
 
-/// Selects the assignment pointer to discover updates from.
-///
-/// Never falls back to the other mode's pointer: its bytes are a different format.
 fn visible_assignment(
     network_state: &sqd_assignments::NetworkState,
     assignment_source: AssignmentSource,
@@ -188,9 +162,6 @@ pub async fn fetch_assignment(
     Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
 }
 
-/// Decodes the dedicated worker-oriented assignment (NET-1186). Validated unlike
-/// [`fetch_assignment`], so a malformed blob fails here instead of panicking much later, while
-/// resolving a chunk's tables.
 pub async fn fetch_worker_assignment(
     url: &str,
     reqwest_client: &reqwest::Client,
@@ -316,7 +287,6 @@ mod tests {
         .into_bytes()
     }
 
-    /// A distinct well-formed hash per byte value; the bundles are never fetched here.
     fn hash(tag: u8) -> BundleHash {
         format!("sha256:{}", format!("{tag:02x}").repeat(32))
             .parse()
@@ -349,8 +319,6 @@ mod tests {
         new_reqwest_client(Duration::from_secs(5), PeerId::random())
     }
 
-    /// The worker reconciles against the pair it has in force, so any half moving is a state to
-    /// reach — and a pair it already holds is not re-offered.
     #[tokio::test]
     async fn either_half_moving_yields_an_update() {
         let a1b1 = worker_state_json("assignment-1", hash(0xaa));
@@ -364,8 +332,6 @@ mod tests {
         ])
         .await;
         let in_force = std::sync::Mutex::new(AppliedPair::default());
-        // One guard: a second `lock()` in the same expression would still hold the first, and
-        // the mutex is not reentrant.
         let applied = || {
             let in_force = in_force.lock().unwrap();
             AppliedPair {
@@ -376,7 +342,6 @@ mod tests {
         let client = test_client();
         let poll = || poll_network_state(&url, &client, AssignmentSource::Worker, &applied);
 
-        // Nothing in force yet: the assignment, carrying the bundle it must be admitted with.
         let update = assignment_of(poll().await.unwrap());
         assert_eq!(update.id, "assignment-1");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
@@ -385,28 +350,20 @@ mod tests {
             bundle_hash: Some(hash(0xaa)),
         };
 
-        // The assignment moved; the bundle rides along and turns out to be already installed.
         let update = assignment_of(poll().await.unwrap());
         assert_eq!(update.id, "assignment-2");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
         in_force.lock().unwrap().assignment_id = Some("assignment-2".to_owned());
 
-        // Neither moved.
         assert!(poll().await.unwrap().is_none());
 
-        // Only the bundle moved: merged on its own. Re-applying the assignment would be work for
-        // nothing — the index already holds it, and it was admitted when it applied.
         assert_eq!(bundle_of(poll().await.unwrap()).hash, hash(0xbb));
     }
 
-    /// The reason to reconcile against what applied rather than what was seen: a pair that fails
-    /// anywhere — a bundle that won't install, an assignment that won't register — leaves what is
-    /// in force unchanged, so the next poll offers it again instead of it being consumed.
     #[tokio::test]
     async fn a_pair_that_did_not_apply_is_offered_again() {
         let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
-        // Nothing ever applies.
         let applied = AppliedPair::default;
 
         for attempt in 1..=2 {
@@ -422,8 +379,6 @@ mod tests {
         }
     }
 
-    /// A bundle installed under an assignment that then failed to register is not enough: the
-    /// pair is the unit, so the assignment comes round again on its own.
     #[tokio::test]
     async fn installing_the_bundle_alone_does_not_settle_the_pair() {
         let state = worker_state_json("assignment-1", hash(0xaa));

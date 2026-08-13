@@ -11,21 +11,13 @@ use sqd_network_transport::TransportArgs;
 /// in a tight loop.
 pub const DEFAULT_MAX_DOWNLOAD_ATTEMPTS: u8 = 5;
 
-/// Which assignment the worker reads, and with it which input bindings apply (spec/14).
-/// Exactly one pointer is read; neither mode falls back to the other, because the documents
-/// behind them are different formats.
 #[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AssignmentSource {
-    /// The shared `assignment` pointer, with query schemas from the CDN manifest
-    /// (IB-40/41/44).
     #[default]
     Legacy,
-    /// The dedicated `worker_assignment` pointer, with query schemas from the network state's
-    /// schema bundle (IB-40b/41b/44b).
     Worker,
 }
 
-/// Uses the `ValueEnum` spelling accepted by the CLI.
 impl std::fmt::Display for AssignmentSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         clap::ValueEnum::to_possible_value(self)
@@ -80,7 +72,6 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub assignment_url: String,
 
-    /// Which pointer in the network state the worker reads its assignment from.
     #[clap(long, env, hide(true), default_value_t = AssignmentSource::Legacy, value_enum)]
     pub assignment_source: AssignmentSource,
 

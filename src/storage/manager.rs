@@ -46,7 +46,6 @@ pub struct StateManager {
     download_config: DownloadConfig,
 }
 
-/// A locked chunk and the schema its data was written with — see [`StateManager::get_query_chunk`].
 pub struct QueryChunk<F: FnOnce(PathBuf)> {
     pub path: scopeguard::ScopeGuard<PathBuf, F>,
     pub schema: ChunkSchema,
@@ -369,9 +368,7 @@ impl StateManager {
         Some(self.get_query_chunk(dataset, chunk_id)?.path)
     }
 
-    /// Index and chunk state are read in one critical section: read separately, they could
-    /// straddle `set_assignment` and pair a schema id with chunk state from another assignment.
-    /// Lock order is index → state, as in `set_assignment`.
+    /// Lock order: index, then state.
     pub fn get_query_chunk(
         self: Arc<Self>,
         dataset: Dataset,
@@ -401,11 +398,6 @@ impl StateManager {
         })
     }
 
-    /// Empty when no assignment is installed, or under a legacy one.
-    /// Id of the assignment currently registered, or `None` before the first one.
-    ///
-    /// This is what the network state is reconciled against — not the last id *seen*, which
-    /// cannot tell an assignment that applied from one that was refused.
     pub fn registered_assignment_id(&self) -> Option<String> {
         self.datasets_index
             .lock()
@@ -624,8 +616,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Unassigned and pre-assignment chunks must stay distinct from legacy chunks; resolving
-    /// either by dataset type may silently select the wrong schema version.
     #[tokio::test]
     async fn a_chunk_the_assignment_does_not_cover_is_not_reported_as_legacy() {
         use std::sync::Arc;

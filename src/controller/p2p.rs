@@ -95,8 +95,6 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    /// Read the `worker_assignment` pointer instead of the legacy one, require the schema
-    /// bundle, and apply assignments strictly in order instead of as they arrive.
     assignment_source: AssignmentSource,
     query_schemas: Arc<schema_bundle::SchemaRegistry>,
     query_schemas_url: String,
@@ -193,7 +191,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         start_loop(s, "assignments", |t| {
             self.run_assignments_loop(t, self.assignment_check_interval)
         });
-        // Both loops write the same schema registry; the bundle supersedes the CDN manifest.
         if self.assignment_source == AssignmentSource::Legacy {
             start_loop(s, "query_schemas", |t| {
                 experimental_engine::run_schemas_refresh_loop(
@@ -279,10 +276,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("SQL Query processing task finished");
     }
 
-    /// Downloads the blob in whichever assignment format this worker reads.
-    ///
-    /// Worker assignments and bundles are fetched together so coverage can be checked before
-    /// either the assignment or newly introduced schemas are applied.
     async fn download_assignment(
         &self,
         update: &super::assignments::AssignmentUpdate,
@@ -310,12 +303,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         ))
     }
 
-    /// Takes one update: an assignment joins the queue, a bundle is merged where it stands.
-    /// Returns whether the queue overflowed, which tells the caller to abandon what it holds.
-    ///
-    /// Merged here rather than inside the update stream. A future parked in the stream resumes
-    /// only when the stream is next polled — after the loop may have applied a different
-    /// assignment — so work started there acts on state that has since moved.
     async fn absorb_update(
         &self,
         update: super::assignments::NetworkUpdate,
@@ -359,9 +346,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let assignment_client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
         let bundle_client = assignment_client.clone();
-        // A merge failure leaves the store's hash unchanged, and a refused assignment leaves the
-        // registered id unchanged, so either sends the same half round again on the next poll
-        // instead of it being consumed by having been seen.
         let mut assignments = Box::pin(
             super::assignments::new_assignments_stream(
                 self.assignment_url.clone(),
@@ -379,7 +363,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             .fuse(),
         );
         let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
-        // The assignment currently being applied; stays `None` unless applied strictly in order.
         let mut processing_id: Option<String> = None;
         // The assignment in `processing_id` stalled: some of its chunks exhausted
         // their download attempts, so it will never become fully applied.
@@ -1171,9 +1154,6 @@ fn push_pending_assignment(
     pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
     update: super::assignments::AssignmentUpdate,
 ) -> bool {
-    // The poll reconciles against what applied, so an assignment still being fetched is offered
-    // again every interval until it registers. Queueing those copies would re-apply it once per
-    // poll; the offers are the same state, and one of them is enough.
     if pending
         .back()
         .is_some_and(|queued| queued.pair() == update.pair())

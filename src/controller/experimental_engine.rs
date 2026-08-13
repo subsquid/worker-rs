@@ -1,8 +1,4 @@
-//! Support for the experimental query engine (`sqd-query-engine`), which executes queries
-//! against dataset schemas held in [`SchemaRegistry`].
-//!
-//! Schemas come from exactly one source, never both: the CDN manifest (legacy assignments)
-//! or `super::schema_bundle` (worker assignments).
+//! Experimental query engine and schema loading.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -535,17 +531,11 @@ tables:
         assert!(registry.get_by_type("evm").is_ok());
     }
 
-    /// Who is blamed follows who supplied the input. The query names a dataset type, so asking
-    /// for one that doesn't exist is the client's error; nothing in a query names a schema id —
-    /// it comes from the chunk's own `write_schema_id` — so a miss there is the worker's, and
-    /// must stay retryable rather than terminal (INV-26). Both are unreachable by design;
-    /// the point is which way they fail when a bookkeeping invariant slips.
     #[test]
     fn a_missing_schema_id_is_a_worker_fault_and_a_missing_type_is_the_client_s() {
         use sqd_messages::query_error::Err as WireErr;
 
         let registry = SchemaRegistry::memory();
-        // Nothing loaded is a third case, and a worker fault either way.
         assert!(matches!(
             registry.get_by_type("evm"),
             Err(QueryError::Other(_))
@@ -557,8 +547,6 @@ tables:
 
         registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0xaa));
 
-        // The wire verdict, not the internal variant: `bad_request` is the one routing clients
-        // treat as terminal.
         let wire = WireErr::from;
 
         assert!(
@@ -578,7 +566,6 @@ tables:
         );
     }
 
-    /// A distinct well-formed hash per byte value; these tests never fetch a bundle.
     fn hash(tag: u8) -> BundleHash {
         format!("sha256:{}", format!("{tag:02x}").repeat(32))
             .parse()
@@ -598,8 +585,6 @@ tables:
         )
     }
 
-    /// Bundle schemas are reachable by id only. Type-keyed lookup is the legacy path (IB-41b):
-    /// with versions of a type accumulated, choosing by type would answer from the wrong one.
     #[test]
     fn bundle_schemas_are_reachable_by_id_and_not_by_type() {
         let registry = SchemaRegistry::memory();
@@ -617,8 +602,6 @@ tables:
         );
     }
 
-    /// The hash and the schemas it named are published together, so no reader can pair a hash
-    /// with a bundle other than the one it describes.
     #[test]
     fn the_bundle_hash_and_its_ids_travel_together() {
         let registry = SchemaRegistry::memory();
@@ -650,8 +633,6 @@ tables:
         );
     }
 
-    /// A schema outlives the bundle that introduced it. Chunks on disk were written with it and
-    /// no older bundle can be fetched back, so dropping one strands data permanently.
     #[test]
     fn a_schema_survives_a_later_bundle_that_omits_it() {
         let registry = SchemaRegistry::memory();
