@@ -25,8 +25,7 @@ pub enum AssignmentSource {
     Worker,
 }
 
-/// Needed by `default_value_t`. Delegated to the `ValueEnum` metadata rather than spelled out
-/// again, so what is printed is by construction what the flag accepts.
+/// Uses the `ValueEnum` spelling accepted by the CLI.
 impl std::fmt::Display for AssignmentSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         clap::ValueEnum::to_possible_value(self)

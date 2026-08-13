@@ -1,8 +1,4 @@
-/// Identifies a write schema: the layout version a chunk's parquet files were written with.
-///
-/// Assignments reference schemas by this id, bundles are keyed on it, and query execution
-/// resolves it — three paths where a bare `u32` sits next to block numbers, chunk indexes and
-/// table counts.
+/// Identifies the layout version used to write a chunk's Parquet files.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SchemaId(u32);
 

@@ -140,7 +140,6 @@ async fn poll_network_state(
 
     let in_force = applied();
     if in_force.assignment_id.as_deref() == Some(assignment.id.as_str()) {
-        // The assignment is the one in force, so only a bundle can still differ.
         return Ok(published_bundle
             .filter(|bundle| in_force.bundle_hash != Some(bundle.hash))
             .map(NetworkUpdate::SchemaBundle));

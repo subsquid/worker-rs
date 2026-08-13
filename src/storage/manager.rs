@@ -604,10 +604,8 @@ mod tests {
             .unwrap()
     }
 
-    /// The two states that used to share one `None`. A chunk on disk that the applied assignment
-    /// does not cover, and one held before any assignment applies, must both stay distinct from
-    /// a legacy chunk — resolving either by dataset type answers from whichever version of that
-    /// type happens to be loaded, instead of refusing.
+    /// Unassigned and pre-assignment chunks must stay distinct from legacy chunks; resolving
+    /// either by dataset type may silently select the wrong schema version.
     #[tokio::test]
     async fn a_chunk_the_assignment_does_not_cover_is_not_reported_as_legacy() {
         use std::sync::Arc;

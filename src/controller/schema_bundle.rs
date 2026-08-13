@@ -24,14 +24,11 @@ use crate::types::schema::SchemaId;
 /// before the hash is verified. Published bundles are tens of kilobytes.
 const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Staging prefix for a file or directory in flight. Nothing under it is ever read back, so a
-/// crash leaves only garbage the next startup sweeps.
+/// Staging entries are never read back and are swept at startup.
 const TEMP_PREFIX: &str = "temp-";
-/// What a stored schema is called. The store is keyed by schema id, not by bundle: bundles are
-/// merged into it and the ids accumulate.
 const SCHEMA_SUFFIX: &str = ".yaml";
 
-/// A schema bundle the network published: hash parsed, address left to the fetch to judge.
+/// A schema bundle published by the network.
 #[derive(Clone, Debug)]
 pub struct SchemaBundle {
     pub hash: BundleHash,
@@ -49,15 +46,13 @@ impl TryFrom<sqd_assignments::SchemaBundle> for SchemaBundle {
     }
 }
 
-/// The sha256 of a schema bundle, parsed once where it enters from the network so that every
-/// comparison downstream is 32 bytes rather than a string that may or may not be well-formed.
+/// A validated SHA-256 schema bundle hash.
 ///
 /// `Display` renders the wire form `sha256:<hex>`; `LowerHex` the bare hex it is built from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BundleHash([u8; 32]);
 
 impl BundleHash {
-    /// The hash of `bytes`, for checking a download against what the network advertised.
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
     }
@@ -91,7 +86,6 @@ impl std::fmt::Display for BundleHash {
     }
 }
 
-/// Same as `Display`: a hash has one readable form, and logs carry it either way.
 impl std::fmt::Debug for BundleHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self}")
@@ -152,7 +146,7 @@ impl SchemaBundleStore {
         self.registry.bundle_hash()
     }
 
-    /// Ids the bundle in force carried — what an assignment's coverage is judged against.
+    /// Schema ids carried by the bundle in force.
     pub fn bundle_ids(&self) -> HashSet<SchemaId> {
         self.registry.bundle_ids()
     }
@@ -291,7 +285,6 @@ fn read_store(dir: &Utf8Path) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDes
     Ok(schemas)
 }
 
-/// Buffers in memory: nothing can be trusted until the whole thing is hashed.
 async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
     let response = client.get(url).send().await?.error_for_status()?;
     let mut buf = Vec::with_capacity(

@@ -48,15 +48,13 @@ struct Schemas {
 
 #[derive(Default)]
 pub struct QuerySchemaRegistry {
-    /// `None` until the first source loads. Not-loaded is a state of the cell rather than a flag
-    /// beside it, so no reader can pair one with the other's value.
+    /// `None` until the first source loads. Keeping this state in the cell makes each snapshot
+    /// internally consistent.
     schemas: ArcSwapOption<Schemas>,
 }
 
 impl QuerySchemaRegistry {
-    /// Looks a schema up by the dataset type named in the query. Only valid while a bundle
-    /// carries at most one schema per type — once schemas are versioned per chunk, callers must
-    /// resolve the chunk's `write_schema_id` via [`Self::get_by_id`].
+    /// Looks up a legacy schema by the dataset type named in the query.
     pub fn get(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
         self.loaded_schemas()?
             .by_type
@@ -93,14 +91,12 @@ impl QuerySchemaRegistry {
         })
     }
 
-    /// Hash of the bundle whose schemas are loaded, or `None` when they came from the CDN
-    /// manifest or nothing is loaded yet. Read out of the same cell as the schemas, so it
-    /// cannot name a bundle other than the one a query would resolve against.
+    /// Hash of the bundle in force, or `None` before a bundle is merged.
     pub fn bundle_hash(&self) -> Option<BundleHash> {
         self.schemas.load_full()?.bundle_hash
     }
 
-    /// Every id currently resolvable, across all merged bundles and adopted files.
+    /// Every schema id currently resolvable.
     pub fn loaded_ids(&self) -> HashSet<SchemaId> {
         self.schemas
             .load_full()

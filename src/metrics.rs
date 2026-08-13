@@ -55,15 +55,10 @@ lazy_static::lazy_static! {
     pub static ref CHUNKS_REMOVED: Counter = Default::default();
     pub static ref STORED_BYTES: Gauge = Default::default();
 
-    /// 1 once a schema bundle is installed. In worker-assignment mode a bundle that never
-    /// installs blocks every assignment, and no other metric moves when that happens — the chunk
-    /// gauges simply freeze, which is indistinguishable from a quiet network.
+    /// 1 once a schema bundle is installed, making a stalled bundle publisher observable.
     pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
     pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
-    /// A published assignment and its bundle disagreed. The scheduler is supposed to keep them
-    /// consistent, so this is its invariant breaking, not the worker's — and the worker refuses
-    /// the assignment rather than covering for it (ADR-21), which is otherwise indistinguishable
-    /// from an ordinary intake failure.
+    /// Counts assignment/bundle coverage mismatches, which indicate a publisher fault (ADR-21).
     pub static ref SCHEMA_BUNDLE_MISMATCHES: Counter = Default::default();
 
     static ref QUERY_EXECUTED: Family<QueryExecutedLabels, Counter> = Default::default();

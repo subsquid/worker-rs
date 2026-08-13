@@ -28,11 +28,7 @@ pub struct DatasetsIndex {
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
 }
 
-/// Which schema a chunk's data should be read with, as far as the applied assignment knows.
-///
-/// Every variant but [`Self::Pinned`] used to be `None`, which is how an on-disk chunk that no
-/// assignment covers ended up resolving by dataset type — silently answering from a different
-/// version of the same type instead of refusing.
+/// Which schema the applied assignment says a chunk uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSchema {
     /// A worker assignment pins the write schema the chunk's files were produced with.
@@ -180,10 +176,8 @@ impl DatasetsIndex {
 
     /// What this assignment says a chunk's data was written with.
     ///
-    /// The distinction between [`ChunkSchema::Unpinned`] and [`ChunkSchema::Unassigned`] is
-    /// load-bearing: both used to be `None`, and resolving an unassigned chunk the way a legacy
-    /// one is resolved picks a schema by dataset type, which is a different *version* of the
-    /// same type rather than an error.
+    /// Keep [`ChunkSchema::Unpinned`] distinct from [`ChunkSchema::Unassigned`]: resolving an
+    /// unassigned chunk by dataset type may silently select the wrong schema version.
     pub fn chunk_schema(&self, chunk: &ChunkRef) -> ChunkSchema {
         let Some(chunk_ref) = self.chunks.get(chunk) else {
             return ChunkSchema::Unassigned;
