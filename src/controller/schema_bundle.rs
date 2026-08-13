@@ -333,7 +333,15 @@ impl SchemaRegistry {
         })
     }
 
-    pub fn activate_bundle(&self, mut bundle: PreparedBundle) -> anyhow::Result<()> {
+    pub fn activate_bundle(&self, bundle: PreparedBundle) -> anyhow::Result<()> {
+        self.activate_bundle_with(bundle, &metrics::SCHEMA_BUNDLE_LOADED)
+    }
+
+    fn activate_bundle_with(
+        &self,
+        mut bundle: PreparedBundle,
+        loaded: &prometheus_client::metrics::gauge::Gauge,
+    ) -> anyhow::Result<()> {
         let _updating = self.merge_lock.lock();
         if let Some(staged) = bundle.staged.take() {
             std::fs::create_dir_all(&self.dir)?;
@@ -367,6 +375,7 @@ impl SchemaRegistry {
             bundle_hash: Some(bundle.hash),
             bundle_ids: bundle.ids,
         }));
+        loaded.set(1);
         Ok(())
     }
 }
@@ -690,7 +699,10 @@ tables:
         assert!(registry.bundle_ids().is_empty());
         assert!(stored(&dir).is_empty());
 
-        registry.activate_bundle(prepared).unwrap();
+        let loaded = prometheus_client::metrics::gauge::Gauge::default();
+        assert_eq!(loaded.get(), 0);
+        registry.activate_bundle_with(prepared, &loaded).unwrap();
+        assert_eq!(loaded.get(), 1);
         assert_eq!(registry.installed_hash(), Some(bundle.hash));
         assert_eq!(registry.bundle_ids(), HashSet::from([SchemaId::new(7)]));
         assert_eq!(stored(&dir), vec!["7.yaml"]);
