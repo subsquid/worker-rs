@@ -1,16 +1,15 @@
 //! Support for the experimental query engine (`sqd-query-engine`), which executes queries
-//! against dataset schemas held in [`QuerySchemaRegistry`].
+//! against dataset schemas held in [`SchemaRegistry`].
 //!
 //! Schemas come from exactly one source, never both: the CDN manifest (legacy assignments)
 //! or `super::schema_bundle` (worker assignments).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use arc_swap::ArcSwapOption;
 use rand::Rng;
 use reqwest::Url;
 use sqd_network_transport::PeerId;
@@ -19,7 +18,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::controller::assignments::new_reqwest_client;
-use crate::controller::schema_bundle::BundleHash;
+use crate::controller::schema_bundle::SchemaRegistry;
 use crate::controller::worker::OutputFormat;
 use crate::query::result::{QueryError, QueryOk, QueryResult};
 use crate::types::schema::SchemaId;
@@ -32,31 +31,10 @@ struct Manifest {
     schemas: HashMap<String, String>,
 }
 
-#[derive(Default)]
-struct Schemas {
-    /// Populated only by the CDN manifest. Type-keyed lookup is legacy-only (IB-41b): with
-    /// several versions of a type accumulated, choosing by type would answer from the wrong one.
-    by_type: HashMap<String, Arc<DatasetDescription>>,
-    /// Every schema this worker has ever merged, not just the current bundle's. Chunks on disk
-    /// outlive the bundle that described them, and no schema can be fetched back once dropped.
-    by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
-    /// Hash of the last bundle merged, and the ids it carried. Published by the same swap as
-    /// the schemas, so neither can name a bundle the other doesn't.
-    bundle_hash: Option<BundleHash>,
-    bundle_ids: HashSet<SchemaId>,
-}
-
-#[derive(Default)]
-pub struct QuerySchemaRegistry {
-    /// `None` until the first source loads. Keeping this state in the cell makes each snapshot
-    /// internally consistent.
-    schemas: ArcSwapOption<Schemas>,
-}
-
-impl QuerySchemaRegistry {
+impl SchemaRegistry {
     /// Looks up a legacy schema by the dataset type named in the query.
     pub fn get(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
-        self.loaded_schemas()?
+        self.snapshot()?
             .by_type
             .get(dataset_type)
             .cloned()
@@ -72,7 +50,7 @@ impl QuerySchemaRegistry {
     /// A miss is a worker fault, never the client's — the id comes from the chunk, not the query
     /// — so it is a retryable `server_error` (INV-26, ADR-20). FM-53c should make it unreachable.
     pub fn get_by_id(&self, schema_id: SchemaId) -> Result<Arc<DatasetDescription>, QueryError> {
-        self.loaded_schemas()?
+        self.snapshot()?
             .by_id
             .get(&schema_id)
             .cloned()
@@ -82,103 +60,10 @@ impl QuerySchemaRegistry {
                 ))
             })
     }
-
-    fn loaded_schemas(&self) -> Result<Arc<Schemas>, QueryError> {
-        self.schemas.load_full().ok_or_else(|| {
-            QueryError::Other(
-                "query schemas for the experimental engine have not been loaded yet".to_owned(),
-            )
-        })
-    }
-
-    /// Hash of the bundle in force, or `None` before a bundle is merged.
-    pub fn bundle_hash(&self) -> Option<BundleHash> {
-        self.schemas.load_full()?.bundle_hash
-    }
-
-    /// Every schema id currently resolvable.
-    pub fn loaded_ids(&self) -> HashSet<SchemaId> {
-        self.schemas
-            .load_full()
-            .map(|s| s.by_id.keys().copied().collect())
-            .unwrap_or_default()
-    }
-
-    /// Ids the last merged bundle carried, which is what an assignment is admitted against.
-    pub fn bundle_ids(&self) -> HashSet<SchemaId> {
-        self.schemas
-            .load_full()
-            .map(|s| s.bundle_ids.clone())
-            .unwrap_or_default()
-    }
-
-    /// Merges a bundle into the accumulated set and records it as the bundle in force.
-    ///
-    /// Merged, never replaced: chunks on disk outlive the bundle that described them, and only
-    /// the current bundle is published, so a schema dropped here is unrecoverable. An id already
-    /// present is overwritten — republishing one is how a schema is corrected in place.
-    ///
-    /// Not atomic against a concurrent call; the store is the only caller and serializes them.
-    pub fn merge_bundle(
-        &self,
-        bundle: HashMap<SchemaId, Arc<DatasetDescription>>,
-        hash: BundleHash,
-    ) {
-        let bundle_ids: HashSet<SchemaId> = bundle.keys().copied().collect();
-        let by_id = self.merged(bundle);
-        let loaded = self.schemas.load_full().unwrap_or_default();
-        self.store(Schemas {
-            by_type: loaded.by_type.clone(),
-            by_id,
-            bundle_hash: Some(hash),
-            bundle_ids,
-        });
-    }
-
-    /// Adopts schemas an earlier run left on disk, leaving the merged-bundle record untouched.
-    pub fn adopt_local(&self, schemas: HashMap<SchemaId, Arc<DatasetDescription>>) {
-        if schemas.is_empty() {
-            return;
-        }
-        let by_id = self.merged(schemas);
-        let loaded = self.schemas.load_full().unwrap_or_default();
-        self.store(Schemas {
-            by_type: loaded.by_type.clone(),
-            by_id,
-            bundle_hash: loaded.bundle_hash,
-            bundle_ids: loaded.bundle_ids.clone(),
-        });
-    }
-
-    fn merged(
-        &self,
-        incoming: HashMap<SchemaId, Arc<DatasetDescription>>,
-    ) -> HashMap<SchemaId, Arc<DatasetDescription>> {
-        let loaded = self.schemas.load_full().unwrap_or_default();
-        let mut by_id = loaded.by_id.clone();
-        for (id, description) in incoming {
-            if let Some(previous) = by_id.get(&id) {
-                if previous.name != description.name {
-                    tracing::warn!(
-                        schema_id = %id,
-                        was = %previous.name,
-                        now = %description.name,
-                        "A schema id was republished for a different dataset type"
-                    );
-                }
-            }
-            by_id.insert(id, description);
-        }
-        by_id
-    }
-
-    fn store(&self, schemas: Schemas) {
-        self.schemas.store(Some(Arc::new(schemas)));
-    }
 }
 
 pub async fn run_schemas_refresh_loop(
-    registry: Arc<QuerySchemaRegistry>,
+    registry: Arc<SchemaRegistry>,
     manifest_url: String,
     refresh_interval: Duration,
     peer_id: PeerId,
@@ -226,7 +111,7 @@ pub async fn run_schemas_refresh_loop(
 /// Returns `Ok(false)` if the manifest hasn't changed. On error the previously
 /// loaded schemas are kept.
 async fn refresh_schemas(
-    registry: &QuerySchemaRegistry,
+    registry: &SchemaRegistry,
     manifest_url: &str,
     client: &reqwest::Client,
     last_manifest: &mut Option<String>,
@@ -272,12 +157,7 @@ async fn refresh_schemas(
         schemas.insert(dataset_type, Arc::new(desc));
     }
 
-    registry.store(Schemas {
-        by_type: schemas,
-        by_id: HashMap::new(),
-        bundle_hash: None,
-        bundle_ids: HashSet::new(),
-    });
+    registry.replace_legacy(schemas);
     *last_manifest = Some(manifest_body);
     Ok(true)
 }
@@ -368,11 +248,13 @@ pub fn execute_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::schema_bundle::BundleHash;
     use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::fs::File;
     use std::future::IntoFuture;
     use tempfile::TempDir;
@@ -654,7 +536,7 @@ tables:
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
 
-        let registry = QuerySchemaRegistry::default();
+        let registry = SchemaRegistry::memory();
         let client = reqwest::Client::new();
         let manifest_url = format!("http://{addr}/sqd-network/mainnet/query-schemas.yml");
         let mut last_manifest = None;
@@ -693,7 +575,7 @@ tables:
     fn a_missing_schema_id_is_a_worker_fault_and_a_missing_type_is_the_client_s() {
         use sqd_messages::query_error::Err as WireErr;
 
-        let registry = QuerySchemaRegistry::default();
+        let registry = SchemaRegistry::memory();
         // Nothing loaded is a third case, and a worker fault either way.
         assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
         assert!(matches!(
@@ -748,7 +630,7 @@ tables:
     /// with versions of a type accumulated, choosing by type would answer from the wrong one.
     #[test]
     fn bundle_schemas_are_reachable_by_id_and_not_by_type() {
-        let registry = QuerySchemaRegistry::default();
+        let registry = SchemaRegistry::memory();
         registry.merge_bundle(
             HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
             hash(0xaa),
@@ -764,7 +646,7 @@ tables:
     /// with a bundle other than the one it describes.
     #[test]
     fn the_bundle_hash_and_its_ids_travel_together() {
-        let registry = QuerySchemaRegistry::default();
+        let registry = SchemaRegistry::memory();
         assert_eq!(registry.bundle_hash(), None, "nothing loaded yet");
         assert!(registry.bundle_ids().is_empty());
 
@@ -785,7 +667,7 @@ tables:
             "which is a different set from what can be served"
         );
 
-        registry.store(Schemas::default());
+        registry.replace_legacy(HashMap::new());
         assert_eq!(
             registry.bundle_hash(),
             None,
@@ -797,7 +679,7 @@ tables:
     /// no older bundle can be fetched back, so dropping one strands data permanently.
     #[test]
     fn a_schema_survives_a_later_bundle_that_omits_it() {
-        let registry = QuerySchemaRegistry::default();
+        let registry = SchemaRegistry::memory();
         registry.merge_bundle(
             HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
             hash(0xaa),

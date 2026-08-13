@@ -20,8 +20,7 @@ use tracing::instrument;
 
 use crate::{
     controller::{
-        experimental_engine::{self, QuerySchemaRegistry},
-        polars_target,
+        experimental_engine, polars_target, schema_bundle::SchemaRegistry,
         sql_request::WorkerChunkStore,
     },
     metrics,
@@ -48,7 +47,7 @@ pub enum OutputFormat {
 
 pub struct Worker {
     state_manager: Arc<StateManager>,
-    query_schemas: Arc<QuerySchemaRegistry>,
+    query_schemas: Arc<SchemaRegistry>,
     queries_running: AtomicUsize,
     max_parallel_queries: usize,
 }
@@ -56,7 +55,7 @@ pub struct Worker {
 impl Worker {
     pub fn new(
         state_manager: StateManager,
-        query_schemas: Arc<QuerySchemaRegistry>,
+        query_schemas: Arc<SchemaRegistry>,
         parallel_queries: usize,
     ) -> Self {
         Self {
@@ -67,7 +66,7 @@ impl Worker {
         }
     }
 
-    pub fn query_schemas(&self) -> Arc<QuerySchemaRegistry> {
+    pub fn query_schemas(&self) -> Arc<SchemaRegistry> {
         self.query_schemas.clone()
     }
 

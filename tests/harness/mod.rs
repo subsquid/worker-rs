@@ -25,9 +25,9 @@ use tokio_util::sync::CancellationToken;
 use sqd_worker::cli::{Args, AssignmentSource};
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
 use sqd_worker::controller::assignments;
-use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, QuerySchemaRegistry};
+use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::{SchemaBundle, SchemaBundleStore};
+use sqd_worker::controller::schema_bundle::{SchemaBundle, SchemaRegistry};
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::datasets_index::AssignmentBlob;
@@ -113,8 +113,8 @@ pub struct Harness {
 
     keypair: Keypair,
     format: Format,
-    schemas: Arc<QuerySchemaRegistry>,
-    schema_bundles: Arc<SchemaBundleStore>,
+    schemas: Arc<SchemaRegistry>,
+    query_schemas: Arc<SchemaRegistry>,
     schema_stub: HttpStub,
     assignment_stream: std::pin::Pin<Box<dyn futures::Stream<Item = assignments::NetworkUpdate>>>,
     assignment_client: reqwest::Client,
@@ -201,7 +201,7 @@ impl Harness {
         .await
         .expect("state manager initialises");
 
-        let schemas = Arc::new(QuerySchemaRegistry::default());
+        let schemas = Arc::new(SchemaRegistry::open(data_path.join("schemas")));
         let worker = Arc::new(Worker::new(
             state_manager,
             schemas.clone(),
@@ -223,10 +223,7 @@ impl Harness {
             .await
             .expect("log store opens");
 
-        let schema_bundles = Arc::new(SchemaBundleStore::new(
-            data_path.join("schemas"),
-            schemas.clone(),
-        ));
+        let query_schemas = Arc::clone(&schemas);
 
         let shutdown = CancellationToken::new();
         spawn_subsystems(
@@ -239,7 +236,7 @@ impl Harness {
             shutdown.clone(),
         );
 
-        let in_force = (schema_bundles.clone(), worker.clone());
+        let in_force = (query_schemas.clone(), worker.clone());
         let assignment_stream = Box::pin(assignments::new_assignments_stream(
             scheduler.network_state_url(),
             // The production 60 s poll would dominate every test's wall clock.
@@ -269,7 +266,7 @@ impl Harness {
             keypair,
             format: config.format,
             schemas,
-            schema_bundles,
+            query_schemas,
             schema_stub,
             assignment_stream,
             assignment_client,
@@ -374,13 +371,13 @@ impl Harness {
                 }
             }
         };
-        let covered = self.schema_bundles.bundle_ids();
+        let covered = self.query_schemas.bundle_ids();
         self.worker
             .register_assignment(blob, update.id, &self.keypair, |id| covered.contains(&id))
     }
 
     async fn install_schema_bundle(&self, bundle: &SchemaBundle) -> anyhow::Result<()> {
-        self.schema_bundles
+        self.query_schemas
             .ensure(bundle, &self.assignment_client)
             .await
     }
@@ -591,7 +588,7 @@ impl Drop for Harness {
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    cdn_schemas: Option<(Arc<QuerySchemaRegistry>, String)>,
+    cdn_schemas: Option<(Arc<SchemaRegistry>, String)>,
     worker_id: PeerId,
     shutdown: CancellationToken,
 ) {

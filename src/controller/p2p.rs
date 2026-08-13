@@ -98,7 +98,7 @@ pub struct P2PController<EventStream> {
     /// Read the `worker_assignment` pointer instead of the legacy one, require the schema
     /// bundle, and apply assignments strictly in order instead of as they arrive.
     assignment_source: AssignmentSource,
-    schema_bundles: schema_bundle::SchemaBundleStore,
+    query_schemas: Arc<schema_bundle::SchemaRegistry>,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
     queries_tx: mpsc::Sender<AdmittedQuery>,
@@ -113,7 +113,7 @@ pub struct P2PController<EventStream> {
 
 pub async fn create_p2p_controller(
     worker: Worker,
-    schema_bundles: schema_bundle::SchemaBundleStore,
+    query_schemas: Arc<schema_bundle::SchemaRegistry>,
     transport_builder: P2PTransportBuilder,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
@@ -152,7 +152,7 @@ pub async fn create_p2p_controller(
         keypair,
         assignment_url: args.assignment_url,
         assignment_source: args.assignment_source,
-        schema_bundles,
+        query_schemas,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
@@ -297,7 +297,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
             anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
         })?;
-        self.schema_bundles.ensure(bundle, client).await?;
+        self.query_schemas.ensure(bundle, client).await?;
 
         Ok(AssignmentBlob::Worker(
             super::assignments::fetch_worker_assignment(&update.fb_url_v1, client).await?,
@@ -321,7 +321,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 push_pending_assignment(pending, update)
             }
             super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                if let Err(e) = self.schema_bundles.ensure(&bundle, client).await {
+                if let Err(e) = self.query_schemas.ensure(&bundle, client).await {
                     warn!(hash = %bundle.hash, error = ?e, "Failed to merge schema bundle");
                 }
                 false
@@ -350,7 +350,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_source,
                 || super::assignments::AppliedPair {
                     assignment_id: self.worker.registered_assignment_id(),
-                    bundle_hash: self.schema_bundles.installed_hash(),
+                    bundle_hash: self.query_schemas.installed_hash(),
                 },
             )
             .take_until(cancellation_token.clone().cancelled_owned())
@@ -405,7 +405,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let worker = &self.worker;
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
-                    let covered = self.schema_bundles.bundle_ids();
+                    let covered = self.query_schemas.bundle_ids();
                     let registered = tokio::task::spawn_blocking(move || {
                         worker.register_assignment(assignment, update.id, &keypair, |id| {
                             covered.contains(&id)

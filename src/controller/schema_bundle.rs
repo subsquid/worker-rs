@@ -10,14 +10,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
+use arc_swap::ArcSwap;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::TryStreamExt;
 use sha2::{Digest, Sha256};
 use sqd_query_engine::metadata::DatasetDescription;
 use tempfile::TempDir;
 
-use super::experimental_engine::QuerySchemaRegistry;
 use crate::metrics;
+use crate::query::result::QueryError;
 use crate::types::schema::SchemaId;
 
 /// Caps both the download and the unpacked total: the only bound on a corrupt or hostile archive
@@ -107,48 +108,108 @@ impl std::fmt::LowerHex for BundleHash {
 /// A bundle is merged into the store rather than replacing it. The network publishes only its
 /// current bundle and offers no way to fetch an older one, so a schema dropped here is gone —
 /// and any chunk still on disk that was written with it becomes unreadable.
-pub struct SchemaBundleStore {
+#[derive(Default)]
+pub(crate) struct SchemaSnapshot {
+    pub(crate) loaded: bool,
+    pub(crate) by_type: HashMap<String, Arc<DatasetDescription>>,
+    pub(crate) by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
+    pub(crate) bundle_hash: Option<BundleHash>,
+    pub(crate) bundle_ids: HashSet<SchemaId>,
+}
+
+pub struct SchemaRegistry {
     dir: Utf8PathBuf,
-    registry: Arc<QuerySchemaRegistry>,
+    snapshot: ArcSwap<SchemaSnapshot>,
     /// Guards the merge: writing the files and publishing them to the registry are one step.
     /// Nothing under it awaits.
     merge_lock: parking_lot::Mutex<()>,
 }
 
-impl SchemaBundleStore {
+impl SchemaRegistry {
+    #[cfg(test)]
+    pub fn memory() -> Self {
+        Self {
+            dir: Utf8PathBuf::new(),
+            snapshot: ArcSwap::from_pointee(SchemaSnapshot::default()),
+            merge_lock: parking_lot::Mutex::new(()),
+        }
+    }
+
     /// Adopts whatever an earlier run left in `dir` and sweeps anything half-written. Adopted
     /// schemas answer queries immediately; admitting an assignment still waits for a bundle.
-    pub fn new(dir: impl Into<Utf8PathBuf>, registry: Arc<QuerySchemaRegistry>) -> Self {
+    pub fn open(dir: impl Into<Utf8PathBuf>) -> Self {
         let dir = dir.into();
         // Blocking, but it's startup and the files are few and small (as in `StateManager::new`).
         let swept = sweep_staging(&dir);
         if swept > 0 {
             tracing::debug!(swept, "Removed staging files left by an earlier run");
         }
-        match read_store(&dir) {
-            Ok(schemas) if !schemas.is_empty() => {
-                tracing::info!(schemas = schemas.len(), "Adopted stored query schemas");
-                registry.adopt_local(schemas);
+        let snapshot = match read_store(&dir) {
+            Ok(by_id) if !by_id.is_empty() => {
+                tracing::info!(schemas = by_id.len(), "Adopted stored query schemas");
+                SchemaSnapshot {
+                    loaded: true,
+                    by_id,
+                    ..Default::default()
+                }
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(%dir, error = ?e, "Couldn't read the schema store"),
-        }
+            Ok(_) => SchemaSnapshot::default(),
+            Err(e) => {
+                tracing::warn!(%dir, error = ?e, "Couldn't read the schema store");
+                SchemaSnapshot::default()
+            }
+        };
         Self {
             dir,
-            registry,
+            snapshot: ArcSwap::from_pointee(snapshot),
             merge_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Arc<SchemaSnapshot>, QueryError> {
+        let snapshot = self.snapshot.load_full();
+        snapshot.loaded.then_some(snapshot).ok_or_else(|| {
+            QueryError::Other(
+                "query schemas for the experimental engine have not been loaded yet".to_owned(),
+            )
+        })
+    }
+
+    pub(crate) fn replace_legacy(&self, by_type: HashMap<String, Arc<DatasetDescription>>) {
+        self.snapshot.store(Arc::new(SchemaSnapshot {
+            loaded: true,
+            by_type,
+            ..Default::default()
+        }));
     }
 
     /// Hash of the last bundle merged. Set only on success, so a failure leaves the previous
     /// value and the next poll re-offers the bundle rather than deduplicating it away.
     pub fn installed_hash(&self) -> Option<BundleHash> {
-        self.registry.bundle_hash()
+        self.snapshot.load().bundle_hash
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bundle_hash(&self) -> Option<BundleHash> {
+        self.installed_hash()
     }
 
     /// Schema ids carried by the bundle in force.
     pub fn bundle_ids(&self) -> HashSet<SchemaId> {
-        self.registry.bundle_ids()
+        self.snapshot.load().bundle_ids.clone()
+    }
+
+    pub fn loaded_ids(&self) -> HashSet<SchemaId> {
+        self.snapshot.load().by_id.keys().copied().collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn merge_bundle(
+        &self,
+        schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
+        hash: BundleHash,
+    ) {
+        self.publish_bundle(schemas, hash);
     }
 
     /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
@@ -216,9 +277,39 @@ impl SchemaBundleStore {
             std::fs::rename(staged.join(&name), self.dir.join(&name))
                 .with_context(|| format!("couldn't move schema {id} into the store"))?;
         }
-        self.registry.merge_bundle(schemas, hash);
+        self.publish_bundle(schemas, hash);
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
         Ok(())
+    }
+
+    fn publish_bundle(
+        &self,
+        schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
+        hash: BundleHash,
+    ) {
+        let bundle_ids = schemas.keys().copied().collect();
+        let current = self.snapshot.load_full();
+        let mut by_id = current.by_id.clone();
+        for (id, description) in schemas {
+            if let Some(previous) = by_id.get(&id) {
+                if previous.name != description.name {
+                    tracing::warn!(
+                        schema_id = %id,
+                        was = %previous.name,
+                        now = %description.name,
+                        "A schema id was republished for a different dataset type"
+                    );
+                }
+            }
+            by_id.insert(id, description);
+        }
+        self.snapshot.store(Arc::new(SchemaSnapshot {
+            loaded: true,
+            by_type: current.by_type.clone(),
+            by_id,
+            bundle_hash: Some(hash),
+            bundle_ids,
+        }));
     }
 }
 
@@ -463,13 +554,10 @@ tables:
         url
     }
 
-    fn store(dir: &tempfile::TempDir) -> (SchemaBundleStore, Arc<QuerySchemaRegistry>) {
-        let registry = Arc::new(QuerySchemaRegistry::default());
-        let store = SchemaBundleStore::new(
+    fn store(dir: &tempfile::TempDir) -> Arc<SchemaRegistry> {
+        Arc::new(SchemaRegistry::open(
             Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap(),
-            registry.clone(),
-        );
-        (store, registry)
+        ))
     }
 
     #[test]
@@ -505,7 +593,8 @@ tables:
     #[tokio::test]
     async fn merges_a_verified_bundle_into_the_store() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
@@ -528,7 +617,8 @@ tables:
     #[tokio::test]
     async fn a_later_bundle_adds_to_the_store_rather_than_replacing_it() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
 
         for (name, body) in [
             ("7.yaml", SCHEMA.to_owned()),
@@ -565,7 +655,8 @@ tables:
     #[tokio::test]
     async fn a_republished_id_overwrites_the_stored_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
 
         for body in [SCHEMA.to_owned(), SCHEMA.replace("name: evm", "name: evm2")] {
             let archive = targz(&[("7.yaml", body.as_bytes())]);
@@ -586,7 +677,8 @@ tables:
     #[tokio::test]
     async fn rejects_a_bundle_whose_hash_does_not_match() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(b"something else"),
@@ -607,7 +699,8 @@ tables:
     #[tokio::test]
     async fn a_bundle_that_will_not_parse_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
         let archive = targz(&[("7.yaml", b"this is not a dataset description")]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
@@ -631,7 +724,8 @@ tables:
     #[tokio::test]
     async fn ignores_entries_that_are_not_root_level_id_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
         let archive = targz(&[
             ("7.yaml", SCHEMA.as_bytes()),
             ("nested/9.yaml", SCHEMA.as_bytes()),
@@ -668,7 +762,7 @@ tables:
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let hash = BundleHash::of(&archive);
         {
-            let (store, _) = store(&dir);
+            let store = store(&dir);
             let bundle = SchemaBundle {
                 hash,
                 url: serve_once(archive).await,
@@ -680,7 +774,8 @@ tables:
         }
 
         // The one-shot server is spent, so nothing below can have come over the network.
-        let (store, registry) = store(&dir);
+        let store = store(&dir);
+        let registry = Arc::clone(&store);
         assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
         assert_eq!(
             store.installed_hash(),
@@ -702,7 +797,7 @@ tables:
         std::fs::write(root.join("7.yaml"), SCHEMA).unwrap();
         std::fs::write(root.join("9.yaml"), b"not a schema").unwrap();
 
-        let (_store, registry) = store(&dir);
+        let registry = store(&dir);
 
         assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
         assert!(registry.get_by_id(SchemaId::new(9)).is_err());
@@ -718,7 +813,7 @@ tables:
         // Anything the store didn't write is left alone.
         std::fs::write(root.join("unrelated"), b"keep me").unwrap();
 
-        let _ = store(&dir);
+        let _store = store(&dir);
 
         let mut left = stored_all(&dir);
         left.sort();
