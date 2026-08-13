@@ -320,7 +320,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                             .worker
                             .assignment_schemas_covered_by(|id| prepared.contains(id)) =>
                     {
-                        if let Err(e) = self.schema_manager.install(prepared) {
+                        if let Err(e) = prepared.install() {
                             metrics::SCHEMA_BUNDLE_FAILURES.inc();
                             warn!(hash = %bundle.hash, error = ?e, "Failed to activate schema bundle");
                         }
@@ -422,14 +422,16 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let prepared_assignment = match prepared_assignment {
                         Ok(assignment) => assignment,
                         Err(e) => {
-                            metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                            if self.worker.registered_assignment_id().is_none() {
+                                metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                            }
                             warn!(assignment_id = %id, error = %e, "Refused assignment");
                             continue;
                         }
                     };
 
                     if let Some(bundle) = prepared_bundle {
-                        if let Err(e) = self.schema_manager.install(bundle) {
+                        if let Err(e) = bundle.install() {
                             metrics::SCHEMA_BUNDLE_FAILURES.inc();
                             warn!(assignment_id = %id, error = ?e, "Failed to activate schema bundle");
                             continue;

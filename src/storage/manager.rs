@@ -256,7 +256,9 @@ impl StateManager {
         let datasets_index = match self.prepare_assignment(assignment, id, key, schema_available) {
             Ok(result) => result,
             Err(e) => {
-                metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                if self.datasets_index.lock().is_none() {
+                    metrics::set_status(metrics::WorkerStatus::NotRegistered);
+                }
                 error!("Can not get assigned chunks: {e}");
                 return false;
             }

@@ -36,6 +36,7 @@ pub struct PreparedBundle {
 }
 
 pub struct PreparedSchemaUpdate {
+    registry: Arc<SchemaRegistry>,
     bundle: PreparedBundle,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
@@ -47,6 +48,10 @@ impl PreparedSchemaUpdate {
 
     pub fn ids(&self) -> Arc<HashSet<SchemaId>> {
         self.bundle.ids()
+    }
+
+    pub fn install(self) -> anyhow::Result<()> {
+        self.registry.activate_bundle(self.bundle)
     }
 }
 
@@ -177,13 +182,10 @@ impl SchemaManager {
         let guard = Arc::clone(&self.mutation_lock).lock_owned().await;
         let bundle = self.registry.prepare_bundle(bundle, client).await?;
         Ok(PreparedSchemaUpdate {
+            registry: Arc::clone(&self.registry),
             bundle,
             _guard: guard,
         })
-    }
-
-    pub fn install(&self, update: PreparedSchemaUpdate) -> anyhow::Result<()> {
-        self.registry.activate_bundle(update.bundle)
     }
 
     pub fn installed_hash(&self) -> Option<BundleHash> {
