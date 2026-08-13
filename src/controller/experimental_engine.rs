@@ -546,6 +546,7 @@ tables:
         ));
 
         registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0xaa));
+        registry.replace_legacy(HashMap::new());
 
         let wire = WireErr::from;
 
@@ -628,8 +629,8 @@ tables:
         registry.replace_legacy(HashMap::new());
         assert_eq!(
             registry.bundle_hash(),
-            None,
-            "the CDN manifest merges no bundle"
+            Some(hash(0x0b)),
+            "legacy schemas do not alter bundle state"
         );
     }
 
