@@ -10,9 +10,10 @@ use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
 
-/// What the worker successfully applied.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct AppliedPair {
+/// Identifies an (assignment, bundle) pair — ADR-21's unit of intake. The stream remembers
+/// the last pair it announced, and the pending queue dedups on the same identity.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NetworkPair {
     pub assignment_id: Option<String>,
     pub bundle_hash: Option<BundleHash>,
 }
@@ -25,8 +26,8 @@ pub struct AssignmentUpdate {
 }
 
 impl AssignmentUpdate {
-    pub fn pair(&self) -> AppliedPair {
-        AppliedPair {
+    pub fn pair(&self) -> NetworkPair {
+        NetworkPair {
             assignment_id: Some(self.id.clone()),
             bundle_hash: self.schema_bundle.as_ref().map(|b| b.hash),
         }
@@ -48,7 +49,10 @@ pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client
         .unwrap()
 }
 
-/// Yields state that differs from what the worker applied.
+/// Yields published state that differs from what this stream last announced (WP-1: an
+/// unchanged pair is a no-op). What became of an announced pair — applied, refused, or
+/// still being fetched — is the consumer's business: only it knows whether another attempt
+/// could end differently, so only it may ask for one.
 pub fn new_assignments_stream(
     url: String,
     frequency: Duration,
@@ -56,12 +60,12 @@ pub fn new_assignments_stream(
     max_delay: Duration,
     peer_id: PeerId,
     assignment_source: AssignmentSource,
-    applied: impl Fn() -> AppliedPair,
 ) -> impl Stream<Item = NetworkUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let reqwest_client = new_reqwest_client(timeout, peer_id);
+    let mut announced = NetworkPair::default();
 
     stream! {
         loop {
@@ -69,7 +73,7 @@ pub fn new_assignments_stream(
 
             let mut current_delay = Duration::from_secs(1);
             loop {
-                match poll_network_state(&url, &reqwest_client, assignment_source, &applied).await {
+                match poll_network_state(&url, &reqwest_client, assignment_source, &mut announced).await {
                     Ok(Some(data)) => {
                         yield data;
                         break;
@@ -91,7 +95,7 @@ async fn poll_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
     assignment_source: AssignmentSource,
-    applied: &impl Fn() -> AppliedPair,
+    announced: &mut NetworkPair,
 ) -> anyhow::Result<Option<NetworkUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
@@ -119,11 +123,14 @@ async fn poll_network_state(
         anyhow::bail!("network state publishes a worker assignment but no schema bundle");
     }
 
-    let in_force = applied();
-    if in_force.assignment_id.as_deref() == Some(assignment.id.as_str()) {
-        return Ok(published_bundle
-            .filter(|bundle| in_force.bundle_hash != Some(bundle.hash))
-            .map(NetworkUpdate::SchemaBundle));
+    if announced.assignment_id.as_deref() == Some(assignment.id.as_str()) {
+        // The halves are versioned independently (IB-40b), so a bundle can move on its own.
+        let Some(bundle) = published_bundle.filter(|b| announced.bundle_hash != Some(b.hash))
+        else {
+            return Ok(None);
+        };
+        announced.bundle_hash = Some(bundle.hash);
+        return Ok(Some(NetworkUpdate::SchemaBundle(bundle)));
     }
 
     let update = AssignmentUpdate {
@@ -136,6 +143,7 @@ async fn poll_network_state(
         schema_bundle: published_bundle,
     };
     tracing::debug!("Discovered assignment \"{}\"", update.id);
+    *announced = update.pair();
     Ok(Some(NetworkUpdate::Assignment(update)))
 }
 
@@ -335,66 +343,85 @@ mod tests {
             http_ok(&a2b2),
         ])
         .await;
-        let in_force = std::sync::Mutex::new(AppliedPair::default());
-        let applied = || {
-            let in_force = in_force.lock().unwrap();
-            AppliedPair {
-                assignment_id: in_force.assignment_id.clone(),
-                bundle_hash: in_force.bundle_hash,
-            }
-        };
         let client = test_client();
-        let poll = || poll_network_state(&url, &client, AssignmentSource::Worker, &applied);
+        let source = AssignmentSource::Worker;
+        let mut announced = NetworkPair::default();
 
-        let update = assignment_of(poll().await.unwrap());
+        let update = assignment_of(
+            poll_network_state(&url, &client, source, &mut announced)
+                .await
+                .unwrap(),
+        );
         assert_eq!(update.id, "assignment-1");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
-        *in_force.lock().unwrap() = AppliedPair {
-            assignment_id: Some("assignment-1".to_owned()),
-            bundle_hash: Some(hash(0xaa)),
-        };
 
-        let update = assignment_of(poll().await.unwrap());
+        let update = assignment_of(
+            poll_network_state(&url, &client, source, &mut announced)
+                .await
+                .unwrap(),
+        );
         assert_eq!(update.id, "assignment-2");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
-        in_force.lock().unwrap().assignment_id = Some("assignment-2".to_owned());
 
-        assert!(poll().await.unwrap().is_none());
+        assert!(
+            poll_network_state(&url, &client, source, &mut announced)
+                .await
+                .unwrap()
+                .is_none(),
+            "neither half moved"
+        );
 
-        assert_eq!(bundle_of(poll().await.unwrap()).hash, hash(0xbb));
+        assert_eq!(
+            bundle_of(
+                poll_network_state(&url, &client, source, &mut announced)
+                    .await
+                    .unwrap()
+            )
+            .hash,
+            hash(0xbb)
+        );
     }
 
     #[tokio::test]
-    async fn a_pair_that_did_not_apply_is_offered_again() {
+    async fn a_pair_already_announced_is_not_offered_again() {
         let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
-        let applied = AppliedPair::default;
+        let client = test_client();
+        let source = AssignmentSource::Worker;
+        let mut announced = NetworkPair::default();
 
-        for attempt in 1..=2 {
-            let update =
-                poll_network_state(&url, &test_client(), AssignmentSource::Worker, &applied)
-                    .await
-                    .unwrap();
-            assert_eq!(
-                assignment_of(update).id,
-                "assignment-1",
-                "attempt {attempt}"
-            );
-        }
+        let update = poll_network_state(&url, &client, source, &mut announced)
+            .await
+            .unwrap();
+        assert_eq!(assignment_of(update).id, "assignment-1");
+
+        assert!(
+            poll_network_state(&url, &client, source, &mut announced)
+                .await
+                .unwrap()
+                .is_none(),
+            "whether the pair applied is the consumer's business, not the stream's: \
+             another attempt is for it to ask for"
+        );
     }
 
     #[tokio::test]
-    async fn installing_the_bundle_alone_does_not_settle_the_pair() {
+    async fn a_bundle_announced_alone_leaves_its_assignment_still_to_come() {
         let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state)]).await;
-        let applied = || AppliedPair {
+        let mut announced = NetworkPair {
             assignment_id: None,
             bundle_hash: Some(hash(0xaa)),
         };
 
-        let update = poll_network_state(&url, &test_client(), AssignmentSource::Worker, &applied)
-            .await
-            .unwrap();
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            AssignmentSource::Worker,
+            &mut announced,
+        )
+        .await
+        .unwrap();
         assert_eq!(assignment_of(update).id, "assignment-1");
     }
 
@@ -402,7 +429,7 @@ mod tests {
     async fn worker_mode_requires_a_bundle_when_the_assignment_is_unchanged() {
         let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#;
         let url = serve_responses(vec![http_ok(state)]).await;
-        let applied = || AppliedPair {
+        let mut announced = NetworkPair {
             assignment_id: Some("assignment-1".to_owned()),
             bundle_hash: Some(hash(0xaa)),
         };
@@ -411,7 +438,7 @@ mod tests {
             &url,
             &test_client(),
             AssignmentSource::Worker,
-            &applied,
+            &mut announced,
         )
         .await
         {
@@ -429,13 +456,11 @@ mod tests {
         )
         .into_bytes();
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
-        let in_force = std::sync::Mutex::new(AppliedPair::default());
-        let applied = || AppliedPair {
-            assignment_id: in_force.lock().unwrap().assignment_id.clone(),
-            bundle_hash: None,
-        };
+        let client = test_client();
+        let source = AssignmentSource::Legacy;
+        let mut announced = NetworkPair::default();
 
-        let update = poll_network_state(&url, &test_client(), AssignmentSource::Legacy, &applied)
+        let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap();
         let update = assignment_of(update);
@@ -444,9 +469,8 @@ mod tests {
             update.schema_bundle.is_none(),
             "legacy mode drops the bundle, malformed hash and all"
         );
-        in_force.lock().unwrap().assignment_id = Some("a1".to_owned());
 
-        let update = poll_network_state(&url, &test_client(), AssignmentSource::Legacy, &applied)
+        let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap();
         assert!(update.is_none(), "the assignment alone is the whole pair");

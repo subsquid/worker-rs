@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::{env, sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -20,7 +19,7 @@ use tokio::{
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn, Instrument};
+use tracing::{info, instrument, warn};
 
 use crate::{
     cli::Args,
@@ -36,13 +35,12 @@ use crate::{
     util::{timestamp_now_ms, UseOnce},
 };
 
+use super::assignment_loop::AssignmentApplier;
 use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::schema_bundle;
 use super::worker::Worker;
 use crate::cli::AssignmentSource;
-use crate::storage::datasets_index::AssignmentBlob;
-use crate::storage::manager::AssignmentOutcome;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
@@ -55,7 +53,6 @@ const MAX_CONCURRENT_REJECTS: usize = 64;
 const LOGS_KEEP_DURATION: Duration = Duration::from_secs(3600 * 2);
 const LOGS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_PENDING_ASSIGNMENTS: usize = 5;
 // TODO: find out why the margin is required
 pub const MAX_LOGS_SIZE: usize =
     sqd_network_transport::protocol::MAX_LOGS_RESPONSE_SIZE as usize - 100 * 1024;
@@ -81,7 +78,7 @@ pub enum Logged {
 }
 
 pub struct P2PController<EventStream> {
-    worker: Worker,
+    worker: Arc<Worker>,
     worker_status: RwLock<WorkerStatus>,
     assignment_check_interval: Duration,
     assignment_fetch_timeout: Duration,
@@ -137,7 +134,7 @@ pub async fn create_p2p_controller(
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
     Ok(P2PController {
-        worker,
+        worker: Arc::new(worker),
         worker_status: RwLock::new(worker_status),
         assignment_check_interval: args.assignment_check_interval,
         assignment_fetch_timeout: args.assignment_fetch_timeout,
@@ -276,250 +273,31 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         info!("SQL Query processing task finished");
     }
 
-    async fn download_assignment(
-        &self,
-        update: &super::assignments::AssignmentUpdate,
-        client: &reqwest::Client,
-    ) -> Result<(AssignmentBlob, Option<schema_bundle::PreparedSchemaUpdate>)> {
-        if self.assignment_source == AssignmentSource::Legacy {
-            return Ok((
-                AssignmentBlob::Legacy(
-                    super::assignments::fetch_assignment(&update.fb_url_v1, client).await?,
-                ),
-                None,
-            ));
-        }
-
-        let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
-        })?;
-        let prepared = self.schema_manager.prepare(bundle, client).await?;
-
-        Ok((
-            AssignmentBlob::Worker(
-                super::assignments::fetch_worker_assignment(&update.fb_url_v1, client).await?,
-            ),
-            Some(prepared),
-        ))
-    }
-
-    async fn absorb_update(
-        &self,
-        update: super::assignments::NetworkUpdate,
-        pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
-        client: &reqwest::Client,
-    ) -> bool {
-        match update {
-            super::assignments::NetworkUpdate::Assignment(update) => {
-                push_pending_assignment(pending, update)
-            }
-            super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                match self.schema_manager.prepare(&bundle, client).await {
-                    Ok(prepared)
-                        if self
-                            .worker
-                            .assignment_schemas_covered_by(|id| prepared.contains(id)) =>
-                    {
-                        if let Err(e) = prepared.install() {
-                            metrics::SCHEMA_BUNDLE_FAILURES.inc();
-                            warn!(hash = %bundle.hash, error = ?e, "Failed to activate schema bundle");
-                        }
-                    }
-                    Ok(_) => {
-                        metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
-                        warn!(hash = %bundle.hash, "Schema bundle does not cover the assignment in force");
-                    }
-                    Err(e) => {
-                        warn!(hash = %bundle.hash, error = ?e, "Failed to merge schema bundle");
-                    }
-                }
-                false
-            }
-        }
-    }
-
     async fn run_assignments_loop(
         &'static self,
         cancellation_token: CancellationToken,
         assignment_check_interval: Duration,
     ) {
-        let assignment_client =
+        let client =
             super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id);
-        let bundle_client = assignment_client.clone();
-        let mut assignments = Box::pin(
-            super::assignments::new_assignments_stream(
-                self.assignment_url.clone(),
-                assignment_check_interval,
-                self.assignment_fetch_timeout,
-                self.assignment_fetch_max_delay,
-                self.worker_id,
-                self.assignment_source,
-                || super::assignments::AppliedPair {
-                    assignment_id: self.worker.registered_assignment_id(),
-                    bundle_hash: self.schema_manager.installed_hash(),
-                },
-            )
-            .take_until(cancellation_token.clone().cancelled_owned())
-            .fuse(),
+        let updates = super::assignments::new_assignments_stream(
+            self.assignment_url.clone(),
+            assignment_check_interval,
+            self.assignment_fetch_timeout,
+            self.assignment_fetch_max_delay,
+            self.worker_id,
+            self.assignment_source,
         );
-        let mut pending: VecDeque<super::assignments::AssignmentUpdate> = VecDeque::new();
-        let mut processing_id: Option<String> = None;
-        // The assignment in `processing_id` stalled: some of its chunks exhausted
-        // their download attempts, so it will never become fully applied.
-        let mut processing_stalled = false;
-
-        'assignments: loop {
-            if processing_id.is_none() {
-                if let Some(update) = pending.pop_front() {
-                    tracing::debug!("Downloading assignment \"{}\"", update.id);
-                    let (assignment, prepared_bundle) = match self
-                        .download_assignment(&update, &assignment_client)
-                        .await
-                    {
-                        Ok(assignment) => assignment,
-                        Err(e) => {
-                            warn!(assignment_id = %update.id, error = %e, "Failed to download assignment");
-                            let retry_delay = tokio::time::sleep(DEFAULT_BACKOFF);
-                            tokio::pin!(retry_delay);
-                            let mut skip_retry = false;
-                            loop {
-                                tokio::select! {
-                                    next_update = assignments.next() => {
-                                        let Some(next_update) = next_update else {
-                                            break 'assignments;
-                                        };
-                                        if self
-                                            .absorb_update(next_update, &mut pending, &bundle_client)
-                                            .await
-                                        {
-                                            skip_retry = true;
-                                        }
-                                    }
-                                    _ = &mut retry_delay => break,
-                                    _ = cancellation_token.cancelled() => break 'assignments,
-                                }
-                            }
-                            if !skip_retry {
-                                requeue_pending_assignment(&mut pending, update);
-                            }
-                            continue;
-                        }
-                    };
-                    tracing::debug!("Downloaded assignment \"{}\"", update.id);
-
-                    let worker = &self.worker;
-                    let keypair = self.keypair.clone();
-                    let id = update.id.clone();
-                    let prepared_ids = prepared_bundle.as_ref().map(|bundle| bundle.ids());
-                    let prepared_assignment = tokio::task::spawn_blocking(move || {
-                        worker.prepare_assignment(assignment, update.id, &keypair, |id| {
-                            prepared_ids.as_ref().is_none_or(|ids| ids.contains(&id))
-                        })
-                    })
-                    .instrument(tracing::info_span!("validate_assignment", id))
-                    .await
-                    .expect("prepare_assignment shouldn't panic");
-                    let prepared_assignment = match prepared_assignment {
-                        Ok(assignment) => assignment,
-                        Err(e) => {
-                            if self.worker.registered_assignment_id().is_none() {
-                                metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                            }
-                            warn!(assignment_id = %id, error = %e, "Refused assignment");
-                            continue;
-                        }
-                    };
-
-                    if let Some(bundle) = prepared_bundle {
-                        if let Err(e) = bundle.install() {
-                            metrics::SCHEMA_BUNDLE_FAILURES.inc();
-                            warn!(assignment_id = %id, error = ?e, "Failed to activate schema bundle");
-                            continue;
-                        }
-                    }
-
-                    tokio::task::spawn_blocking(move || {
-                        worker.register_prepared_assignment(prepared_assignment)
-                    })
-                    .instrument(tracing::info_span!("set_assignment", id))
-                    .await
-                    .expect("register_assignment shouldn't panic");
-
-                    if self.assignment_source == AssignmentSource::Worker {
-                        processing_id = Some(id);
-                        processing_stalled = false;
-                    }
-
-                    continue;
-                }
-            }
-
-            match processing_id.clone() {
-                // The stalled assignment can never be fully applied. Jump to
-                // the most recent pending assignment as soon as one exists;
-                // until then only watch the update stream — the stall is
-                // terminal, so there is nothing to wait for.
-                Some(id) if processing_stalled => {
-                    if !pending.is_empty() {
-                        let skipped = keep_only_latest_pending_assignment(&mut pending);
-                        warn!(
-                            assignment_id = %id,
-                            skipped,
-                            "Skipping stalled assignment in favor of the most recent one"
-                        );
-                        processing_id = None;
-                        processing_stalled = false;
-                        continue;
-                    }
-                    tokio::select! {
-                        update = assignments.next() => {
-                            let Some(update) = update else {
-                                break;
-                            };
-                            self.absorb_update(update, &mut pending, &bundle_client).await;
-                        }
-                        _ = cancellation_token.cancelled() => break,
-                    }
-                }
-                Some(id) => {
-                    tokio::select! {
-                        update = assignments.next() => {
-                            let Some(update) = update else {
-                                break;
-                            };
-                            if self.absorb_update(update, &mut pending, &bundle_client).await {
-                                warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
-                                processing_id = None;
-                            }
-                        }
-                        settled = self.worker.wait_until_assignment_settled(&id, cancellation_token.clone()) => {
-                            match settled {
-                                None => break,
-                                Some(AssignmentOutcome::Applied) => {
-                                    processing_id = None;
-                                }
-                                Some(AssignmentOutcome::Stalled) => {
-                                    warn!(assignment_id = %id, "Assignment stalled: some chunks exhausted their download attempts");
-                                    processing_stalled = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                None => {
-                    tokio::select! {
-                        update = assignments.next() => {
-                            let Some(update) = update else {
-                                break;
-                            };
-                            self.absorb_update(update, &mut pending, &bundle_client).await;
-                        }
-                        _ = cancellation_token.cancelled() => break,
-                    }
-                }
-            }
-        }
-        info!("Assignment processing task finished");
+        AssignmentApplier::new(
+            Arc::clone(&self.worker),
+            Arc::clone(&self.schema_manager),
+            self.keypair.clone(),
+            self.assignment_source,
+            client,
+            assignment_check_interval,
+        )
+        .run(updates, cancellation_token)
+        .await
     }
 
     async fn run_logs_loop(&self, cancellation_token: CancellationToken) {
@@ -792,7 +570,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         query_type: QueryType,
     ) {
         let outcome = execute(
-            &self.worker,
+            self.worker.as_ref(),
             &self.allocations_checker,
             peer_id,
             &query,
@@ -1152,69 +930,6 @@ pub async fn get_worker_status(
     }
 }
 
-fn push_pending_assignment(
-    pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
-    update: super::assignments::AssignmentUpdate,
-) -> bool {
-    if pending
-        .back()
-        .is_some_and(|queued| queued.pair() == update.pair())
-    {
-        tracing::debug!(assignment_id = %update.id, "Already queued");
-        return false;
-    }
-    if let Some(skipped) = push_pending_item(pending, update) {
-        warn!(
-            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
-        );
-        true
-    } else {
-        false
-    }
-}
-
-fn push_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
-    pending.push_back(item);
-    if pending.len() > MAX_PENDING_ASSIGNMENTS {
-        Some(keep_only_latest_pending_assignment(pending))
-    } else {
-        None
-    }
-}
-
-fn requeue_pending_assignment(
-    pending: &mut VecDeque<super::assignments::AssignmentUpdate>,
-    update: super::assignments::AssignmentUpdate,
-) -> bool {
-    if let Some(skipped) = requeue_pending_item(pending, update) {
-        warn!(
-            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
-        );
-        true
-    } else {
-        false
-    }
-}
-
-fn requeue_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
-    pending.push_front(item);
-    if pending.len() > MAX_PENDING_ASSIGNMENTS {
-        Some(keep_only_latest_pending_assignment(pending))
-    } else {
-        None
-    }
-}
-
-fn keep_only_latest_pending_assignment<T>(pending: &mut VecDeque<T>) -> usize {
-    let latest = pending
-        .pop_back()
-        .expect("pending queue was just checked as non-empty");
-    let skipped = pending.len();
-    pending.clear();
-    pending.push_back(latest);
-    skipped
-}
-
 fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
     use std::fs::File;
     use std::io::{Read, Write};
@@ -1235,45 +950,6 @@ fn check_peer_id(peer_id: PeerId, filename: PathBuf) {
         let mut file = File::create(&filename).expect("Couldn't create peer_id file");
         file.write_all(peer_id.to_string().as_bytes())
             .expect("Couldn't write peer_id file");
-    }
-}
-
-#[cfg(test)]
-mod assignment_tests {
-    use super::*;
-
-    #[test]
-    fn keep_only_latest_pending_assignment_drops_intermediate_assignments() {
-        let mut pending = VecDeque::from([1, 2, 3, 4, 5, 6]);
-
-        let skipped = keep_only_latest_pending_assignment(&mut pending);
-
-        assert_eq!(skipped, 5);
-        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![6]);
-    }
-
-    #[test]
-    fn pending_assignments_below_threshold_keep_fifo_order() {
-        let mut pending = VecDeque::new();
-
-        for assignment in 1..=MAX_PENDING_ASSIGNMENTS {
-            assert_eq!(push_pending_item(&mut pending, assignment), None);
-        }
-
-        assert_eq!(
-            pending.into_iter().collect::<Vec<_>>(),
-            (1..=MAX_PENDING_ASSIGNMENTS).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn failed_assignment_requeue_overflow_keeps_latest_pending_assignment() {
-        let mut pending = VecDeque::from([2, 3, 4, 5, 6]);
-
-        let skipped = requeue_pending_item(&mut pending, 1);
-
-        assert_eq!(skipped, Some(5));
-        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![6]);
     }
 }
 

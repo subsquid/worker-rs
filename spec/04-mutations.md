@@ -21,9 +21,12 @@ loop:
 **WP-1 — Assignment intake.** [MUST] The worker polls the network-state document every
 P-ASSIGN-POLL and, on a changed assignment id, fetches the assignment document (DEF-5,
 bounded by P-ASSIGN-FETCH-TIMEOUT) and applies it (WP-10). An unchanged id is a no-op.
-Fetch/poll failures retry with jittered exponential backoff from P-ASSIGN-RETRY-BASE
-capped at P-ASSIGN-RETRY-MAX; retries of one stage MUST NOT starve intake of newer
-assignments indefinitely. [Non-starvation is intent, currently violated: GAP-9.]
+Fetch/poll failures retry with jittered exponential backoff from P-ASSIGN-RETRY-BASE:
+the poll stage caps at P-ASSIGN-RETRY-MAX, the document stage at P-ASSIGN-POLL, since a
+pair is announced once and that backoff is the only thing that returns to it. Retries of
+one stage MUST NOT starve intake of newer assignments: a newer assignment ends the wait at
+once and supersedes the one that failed. A document rejected by WP-2 is not retried at all
+— the verdict is a property of the document, not of the attempt.
 ⚠ Application timing relative to the document's declared effective time is OQ-8
 (applied immediately today).
 

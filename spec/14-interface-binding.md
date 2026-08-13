@@ -199,8 +199,9 @@ both fields are mandatory when the worker consumes `worker_assignment`; a state 
 is not applicable. The legacy `assignment` key is ignored and never falls back to. A network
 mid-migration may publish either pointer for workers in the corresponding mode. The two worker
 references are versioned independently: either can
-change without the other, and the bundle is deduplicated against what the worker has
-installed, not against what it last saw.
+change without the other, and each is deduplicated against what the worker last *read* — not
+against what it applied. Whether an announced pair applied, and whether another attempt could
+end differently, is knowable only where it was attempted (WP-1, FM-12).
 
 **IB-41b — Worker assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
 FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no file

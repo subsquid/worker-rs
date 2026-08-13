@@ -12,8 +12,8 @@ batch unless stated).
 |---|---|---|---|
 | P-ASSIGN-POLL | network-state poll period (WP-1) | 60 s | same |
 | P-ASSIGN-FETCH-TIMEOUT | assignment document fetch timeout (WP-1) | 300 s | same |
-| P-ASSIGN-RETRY-BASE | intake retry backoff base (WP-1) | 1 s (poll stage); document stage retries flat at 1 s — GAP-9 | jittered exponential both stages ⚠ |
-| P-ASSIGN-RETRY-MAX | intake retry backoff cap (WP-1) | 14 400 s | same |
+| P-ASSIGN-RETRY-BASE | intake retry backoff base (WP-1) | 1 s, jittered exponential in both stages | same |
+| P-ASSIGN-RETRY-MAX | intake retry backoff cap (WP-1) | 14 400 s (poll stage; the document stage caps at P-ASSIGN-POLL) | same |
 | P-ASSIGN-SIZE-MAX | decompressed assignment size bound (WP-2, HZ-12) | **unbounded** — GAP-4 | 512 MiB ⚠ (ADR-18) |
 
 ## Downloads

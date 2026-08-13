@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use sqd_worker::cli::{Args, AssignmentSource};
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
+use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
 use sqd_worker::controller::p2p;
@@ -32,7 +33,6 @@ use sqd_worker::controller::schema_bundle::{
 };
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
-use sqd_worker::storage::datasets_index::AssignmentBlob;
 use sqd_worker::storage::manager::StateManager;
 
 pub mod corpus;
@@ -54,8 +54,8 @@ use stub::HttpStub;
 /// What this harness does **not** exercise, so an absent test is never read as a pass.
 pub const UNCOVERED: &[&str] = &[
     "libp2p transport: IB-1/2 message limits, stream timeouts, the P-EVENT-QUEUE drop path",
-    "P2PController intake: P-Q-QUEUE capacity (RP-1 step 4), reject fan-out (ADR-9), \
-     assignment pending-queue and its head-of-line blocking (GAP-9)",
+    "P2PController intake: P-Q-QUEUE capacity (RP-1 step 4), reject fan-out (ADR-9); the \
+     assignment loop's retry and supersede decisions are unit-tested, not driven from here",
     "HC-4 reference model, HC-6 metric scraper, HC-7 kill/restart, HC-9/10 load and benchmarks",
 ];
 
@@ -121,6 +121,7 @@ pub struct Harness {
     schema_stub: HttpStub,
     assignment_stream: std::pin::Pin<Box<dyn futures::Stream<Item = assignments::NetworkUpdate>>>,
     assignment_client: reqwest::Client,
+    applier: AssignmentApplier,
     shutdown: CancellationToken,
     // Dropped last: the data dir must outlive every subsystem that writes into it.
     data_dir: tempfile::TempDir,
@@ -240,7 +241,6 @@ impl Harness {
             shutdown.clone(),
         );
 
-        let in_force = (query_schemas.clone(), worker.clone());
         let assignment_stream = Box::pin(assignments::new_assignments_stream(
             scheduler.network_state_url(),
             // The production 60 s poll would dominate every test's wall clock.
@@ -249,13 +249,19 @@ impl Harness {
             Duration::from_millis(200),
             worker_id,
             assignment_source(config.format),
-            move || assignments::AppliedPair {
-                assignment_id: in_force.1.registered_assignment_id(),
-                bundle_hash: in_force.0.installed_hash(),
-            },
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
+        // The production step, so the harness can't drift from it: bundle first, coverage judged
+        // against that bundle, schemas installed before the assignment registers (ADR-21).
+        let applier = AssignmentApplier::new(
+            worker.clone(),
+            schema_manager.clone(),
+            keypair.clone(),
+            assignment_source(config.format),
+            assignment_client.clone(),
+            Duration::from_millis(200),
+        );
 
         let harness = Self {
             seed,
@@ -275,6 +281,7 @@ impl Harness {
             schema_stub,
             assignment_stream,
             assignment_client,
+            applier,
             shutdown,
             data_dir,
             _reporter: reporter,
@@ -322,8 +329,8 @@ impl Harness {
         self.scheduler.publish(id, worker_id, placements, fault)
     }
 
-    /// Waits for the next network-state change, fetches the document and applies it.
-    /// Returns what `register_assignment` reported (WP-2: a failed application changes nothing).
+    /// Waits for the next network-state change and drives the production apply step over it.
+    /// Returns whether the assignment registered (WP-2: a failed application changes nothing).
     pub async fn poll_and_apply(&mut self) -> bool {
         let update = loop {
             let update = tokio::time::timeout(CONVERGE_TIMEOUT, self.assignment_stream.next())
@@ -351,53 +358,12 @@ impl Harness {
             }
         };
 
-        let mut prepared_bundle = None;
-        let blob = match self.format {
-            Format::Legacy => {
-                match assignments::fetch_assignment(&update.fb_url_v1, &self.assignment_client)
-                    .await
-                {
-                    Ok(document) => AssignmentBlob::Legacy(document),
-                    Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
-                }
-            }
-            Format::Worker => {
-                // IB-44b: bundle first; a failure leaves the assignment unapplied (FM-53b).
-                let bundle = update
-                    .schema_bundle
-                    .as_ref()
-                    .expect("worker format publishes a bundle alongside the assignment");
-                prepared_bundle = match self.install_schema_bundle(bundle).await {
-                    Ok(prepared) => Some(prepared),
-                    Err(e) => {
-                        tracing::warn!("schema bundle could not be installed: {e:?}");
-                        return false;
-                    }
-                };
-                match assignments::fetch_worker_assignment(
-                    &update.fb_url_v1,
-                    &self.assignment_client,
-                )
-                .await
-                {
-                    Ok(document) => AssignmentBlob::Worker(document),
-                    Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
-                }
-            }
-        };
-        let registered = self
-            .worker
-            .register_assignment(blob, update.id, &self.keypair, |id| {
-                prepared_bundle
-                    .as_ref()
-                    .is_none_or(|bundle| bundle.contains(id))
-            });
-        if registered {
-            if let Some(bundle) = prepared_bundle {
-                bundle.install().unwrap();
-            }
+        match self.applier.apply(&update).await {
+            ApplyOutcome::Applied => true,
+            // The corpus serves faults that make a pair unapplicable; both verdicts leave the
+            // previous assignment in force, which is what the tests assert on.
+            ApplyOutcome::Refused | ApplyOutcome::Failed => false,
         }
-        registered
     }
 
     async fn install_schema_bundle(

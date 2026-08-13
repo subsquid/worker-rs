@@ -1,3 +1,4 @@
+pub mod assignment_loop;
 pub mod assignments;
 pub mod experimental_engine;
 pub mod p2p;

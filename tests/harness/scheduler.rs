@@ -188,7 +188,7 @@ impl Scheduler {
         }
     }
 
-    /// Makes the assignment document unfetchable (GAP-9's head-of-line blocking).
+    /// Makes the assignment document unfetchable (FM-10).
     pub fn break_document(&self, assignment: &Assignment, status: u16) {
         self.stub
             .inject(assignment.path.clone(), Fault::Status(status));

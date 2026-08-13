@@ -618,11 +618,11 @@ async fn classify_cached(
     .context("schema cache comparison task panicked")?
 }
 
+/// Shared with the assignment loop's tests, so one definition of "a well-formed bundle" serves
+/// both.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SCHEMA: &str = r#"
+pub(crate) mod test_support {
+    pub(crate) const SCHEMA: &str = r#"
 name: evm
 tables:
   blocks:
@@ -633,7 +633,7 @@ tables:
         type: uint64
 "#;
 
-    fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(crate) fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
             Vec::new(),
             flate2::Compression::default(),
@@ -650,6 +650,12 @@ tables:
         }
         builder.into_inner().unwrap().finish().unwrap()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{targz, SCHEMA};
+    use super::*;
 
     async fn serve_once(body: Vec<u8>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

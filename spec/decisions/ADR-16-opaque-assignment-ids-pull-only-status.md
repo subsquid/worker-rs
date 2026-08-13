@@ -21,6 +21,5 @@ only on request, from a periodically refreshed snapshot.
 ## Consequences
 
 The worker stays simple and the scheduler owns global ordering (NG2). Honest-but-stale
-reporting is legal within P-HB-STALENESS; the reporting-coherence hole (GAP-11) and
-the shipped-build coalescing hole (GAP-9) are deviations from this decision's intent,
-not amendments to it. Shapes WP-4, RP-21, NG2.
+reporting is legal within P-HB-STALENESS; the reporting-coherence hole (GAP-11) is a
+deviation from this decision's intent, not an amendment to it. Shapes WP-4, RP-21, NG2.
