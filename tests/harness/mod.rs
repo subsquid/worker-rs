@@ -27,7 +27,9 @@ use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLim
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::{SchemaBundle, SchemaRegistry};
+use sqd_worker::controller::schema_bundle::{
+    PreparedSchemaUpdate, SchemaBundle, SchemaManager, SchemaRegistry,
+};
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::datasets_index::AssignmentBlob;
@@ -114,6 +116,7 @@ pub struct Harness {
     keypair: Keypair,
     format: Format,
     schemas: Arc<SchemaRegistry>,
+    schema_manager: Arc<SchemaManager>,
     query_schemas: Arc<SchemaRegistry>,
     schema_stub: HttpStub,
     assignment_stream: std::pin::Pin<Box<dyn futures::Stream<Item = assignments::NetworkUpdate>>>,
@@ -201,7 +204,8 @@ impl Harness {
         .await
         .expect("state manager initialises");
 
-        let schemas = Arc::new(SchemaRegistry::open(data_path.join("schemas")));
+        let schema_manager = Arc::new(SchemaManager::open(data_path.join("schemas")));
+        let schemas = schema_manager.registry();
         let worker = Arc::new(Worker::new(
             state_manager,
             schemas.clone(),
@@ -266,6 +270,7 @@ impl Harness {
             keypair,
             format: config.format,
             schemas,
+            schema_manager,
             query_schemas,
             schema_stub,
             assignment_stream,
@@ -341,7 +346,7 @@ impl Harness {
                     assert!(self
                         .worker
                         .assignment_schemas_covered_by(|id| prepared.contains(id)));
-                    self.query_schemas.activate_bundle(prepared).unwrap();
+                    self.schema_manager.install(prepared).unwrap();
                 }
             }
         };
@@ -389,7 +394,7 @@ impl Harness {
             });
         if registered {
             if let Some(bundle) = prepared_bundle {
-                self.query_schemas.activate_bundle(bundle).unwrap();
+                self.schema_manager.install(bundle).unwrap();
             }
         }
         registered
@@ -398,9 +403,9 @@ impl Harness {
     async fn install_schema_bundle(
         &self,
         bundle: &SchemaBundle,
-    ) -> anyhow::Result<sqd_worker::controller::schema_bundle::PreparedBundle> {
-        self.query_schemas
-            .prepare_bundle(bundle, &self.assignment_client)
+    ) -> anyhow::Result<PreparedSchemaUpdate> {
+        self.schema_manager
+            .prepare(bundle, &self.assignment_client)
             .await
     }
 

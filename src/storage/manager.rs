@@ -261,7 +261,8 @@ impl StateManager {
                 return false;
             }
         };
-        self.set_prepared_assignment(datasets_index)
+        self.set_prepared_assignment(datasets_index);
+        true
     }
 
     pub fn prepare_assignment(
@@ -274,7 +275,7 @@ impl StateManager {
         DatasetsIndex::new(assignment, id, key, schema_available)
     }
 
-    pub fn set_prepared_assignment(&self, datasets_index: DatasetsIndex) -> bool {
+    pub fn set_prepared_assignment(&self, datasets_index: DatasetsIndex) {
         let current_assignment_id = datasets_index.assignment_id().to_owned();
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
@@ -323,7 +324,6 @@ impl StateManager {
                 metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
             }
         }
-        true
     }
 
     /// Waits until the given assignment settles — fully applied or stalled.

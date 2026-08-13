@@ -28,7 +28,7 @@ use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
 use sqd_worker::cli::Args;
 use sqd_worker::controller::p2p::create_p2p_controller;
-use sqd_worker::controller::schema_bundle::SchemaRegistry;
+use sqd_worker::controller::schema_bundle::SchemaManager;
 use sqd_worker::controller::worker::Worker;
 use sqd_worker::http_server::Server as HttpServer;
 use sqd_worker::metrics;
@@ -113,7 +113,8 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
-    let query_schemas = Arc::new(SchemaRegistry::open(args.data_dir.join("schemas")));
+    let schema_manager = Arc::new(SchemaManager::open(args.data_dir.join("schemas")));
+    let query_schemas = schema_manager.registry();
 
     let _sentry_guard = if args_clone.sentry_is_enabled {
         setup_sentry(&args_clone, peer_id.to_string())
@@ -128,7 +129,7 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     );
 
     let controller =
-        create_p2p_controller(worker, query_schemas, transport_builder, args_clone).await?;
+        create_p2p_controller(worker, schema_manager, transport_builder, args_clone).await?;
     // Leaked to give the subsystem tasks `&'static` access; lives until process exit anyway
     let controller = &*Box::leak(Box::new(controller));
 

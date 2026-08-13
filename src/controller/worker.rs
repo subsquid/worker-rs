@@ -92,8 +92,8 @@ impl Worker {
             .prepare_assignment(assignment, id, key, covered_by_bundle)
     }
 
-    pub fn register_prepared_assignment(&self, assignment: DatasetsIndex) -> bool {
-        self.state_manager.set_prepared_assignment(assignment)
+    pub fn register_prepared_assignment(&self, assignment: DatasetsIndex) {
+        self.state_manager.set_prepared_assignment(assignment);
     }
 
     pub fn registered_assignment_id(&self) -> Option<String> {

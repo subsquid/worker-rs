@@ -114,6 +114,10 @@ async fn poll_network_state(
         );
         return Ok(None);
     };
+    if assignment_source == AssignmentSource::Worker && published_bundle.is_none() {
+        metrics::SCHEMA_BUNDLE_FAILURES.inc();
+        anyhow::bail!("network state publishes a worker assignment but no schema bundle");
+    }
 
     let in_force = applied();
     if in_force.assignment_id.as_deref() == Some(assignment.id.as_str()) {
@@ -392,6 +396,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(assignment_of(update).id, "assignment-1");
+    }
+
+    #[tokio::test]
+    async fn worker_mode_requires_a_bundle_when_the_assignment_is_unchanged() {
+        let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#;
+        let url = serve_responses(vec![http_ok(state)]).await;
+        let applied = || AppliedPair {
+            assignment_id: Some("assignment-1".to_owned()),
+            bundle_hash: Some(hash(0xaa)),
+        };
+
+        let error = match poll_network_state(
+            &url,
+            &test_client(),
+            AssignmentSource::Worker,
+            &applied,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("missing bundle must be rejected"),
+        };
+
+        assert!(error.to_string().contains("no schema bundle"));
     }
 
     #[tokio::test]

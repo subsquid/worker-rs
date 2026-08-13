@@ -30,10 +30,33 @@ pub struct SchemaBundle {
 #[derive(Debug)]
 pub struct PreparedBundle {
     hash: BundleHash,
-    ids: HashSet<SchemaId>,
+    ids: Arc<HashSet<SchemaId>>,
     schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
-    schemas_to_install: HashSet<SchemaId>,
-    staged: Option<TempDir>,
+    files: PreparedFiles,
+}
+
+pub struct PreparedSchemaUpdate {
+    bundle: PreparedBundle,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl PreparedSchemaUpdate {
+    pub fn contains(&self, id: SchemaId) -> bool {
+        self.bundle.contains(id)
+    }
+
+    pub fn ids(&self) -> Arc<HashSet<SchemaId>> {
+        self.bundle.ids()
+    }
+}
+
+#[derive(Debug)]
+enum PreparedFiles {
+    Cached,
+    Staged {
+        dir: TempDir,
+        missing: HashSet<SchemaId>,
+    },
 }
 
 impl PreparedBundle {
@@ -45,8 +68,8 @@ impl PreparedBundle {
         self.ids.contains(&id)
     }
 
-    pub fn ids(&self) -> HashSet<SchemaId> {
-        self.ids.clone()
+    pub fn ids(&self) -> Arc<HashSet<SchemaId>> {
+        Arc::clone(&self.ids)
     }
 }
 
@@ -127,6 +150,45 @@ pub struct SchemaRegistry {
     dir: Utf8PathBuf,
     snapshot: ArcSwap<SchemaSnapshot>,
     merge_lock: parking_lot::Mutex<()>,
+}
+
+pub struct SchemaManager {
+    registry: Arc<SchemaRegistry>,
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SchemaManager {
+    pub fn open(dir: impl Into<Utf8PathBuf>) -> Self {
+        Self {
+            registry: Arc::new(SchemaRegistry::open(dir)),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub fn registry(&self) -> Arc<SchemaRegistry> {
+        Arc::clone(&self.registry)
+    }
+
+    pub async fn prepare(
+        &self,
+        bundle: &SchemaBundle,
+        client: &reqwest::Client,
+    ) -> anyhow::Result<PreparedSchemaUpdate> {
+        let guard = Arc::clone(&self.mutation_lock).lock_owned().await;
+        let bundle = self.registry.prepare_bundle(bundle, client).await?;
+        Ok(PreparedSchemaUpdate {
+            bundle,
+            _guard: guard,
+        })
+    }
+
+    pub fn install(&self, update: PreparedSchemaUpdate) -> anyhow::Result<()> {
+        self.registry.activate_bundle(update.bundle)
+    }
+
+    pub fn installed_hash(&self) -> Option<BundleHash> {
+        self.registry.installed_hash()
+    }
 }
 
 impl SchemaRegistry {
@@ -231,20 +293,17 @@ impl SchemaRegistry {
         schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
         hash: BundleHash,
     ) {
-        let ids = schemas.keys().copied().collect();
+        let ids = Arc::new(schemas.keys().copied().collect());
         self.activate_bundle(PreparedBundle {
             hash,
             ids,
-            schemas_to_install: schemas.keys().copied().collect(),
             schemas,
-            staged: None,
+            files: PreparedFiles::Cached,
         })
         .unwrap();
     }
 
-    /// The caller must serialize preparation and activation.
-    #[doc(hidden)]
-    pub async fn prepare_bundle(
+    async fn prepare_bundle(
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
@@ -273,10 +332,9 @@ impl SchemaRegistry {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
             return Ok(PreparedBundle {
                 hash: bundle.hash,
-                ids: self.bundle_ids(),
+                ids: Arc::new(self.bundle_ids()),
                 schemas: HashMap::new(),
-                schemas_to_install: HashSet::new(),
-                staged: None,
+                files: PreparedFiles::Cached,
             });
         }
 
@@ -300,51 +358,42 @@ impl SchemaRegistry {
             .await
             .context("couldn't load the staged schema bundle")?;
 
-        let ids = schemas.keys().copied().collect();
-        let mut schemas_to_install = HashSet::new();
-        // An id permanently defines stored chunks, so its bytes cannot change.
-        for id in schemas.keys().copied().collect::<Vec<_>>() {
-            let name = format!("{id}{SCHEMA_SUFFIX}");
-            let stored = self.dir.join(&name);
-            if !stored.exists() {
-                schemas_to_install.insert(id);
-                continue;
-            }
-            let staged_file = staged_path.join(&name);
-            if std::fs::read(&stored)? != std::fs::read(&staged_file)? {
-                bail!("schema {id} was republished with different contents");
-            }
-        }
+        let ids = Arc::new(schemas.keys().copied().collect());
+        let schemas_to_install = classify_cached(self.dir.clone(), staged_path, &ids).await?;
 
         tracing::info!(hash = %bundle.hash, new_schemas = schemas_to_install.len(), "Merging schema bundle");
         Ok(PreparedBundle {
             hash: bundle.hash,
             ids,
             schemas,
-            schemas_to_install,
-            staged: Some(staged),
+            files: PreparedFiles::Staged {
+                dir: staged,
+                missing: schemas_to_install,
+            },
         })
     }
 
-    #[doc(hidden)]
-    pub fn activate_bundle(&self, bundle: PreparedBundle) -> anyhow::Result<()> {
+    fn activate_bundle(&self, bundle: PreparedBundle) -> anyhow::Result<()> {
         self.activate_bundle_with(bundle, &metrics::SCHEMA_BUNDLE_LOADED)
     }
 
     fn activate_bundle_with(
         &self,
-        mut bundle: PreparedBundle,
+        bundle: PreparedBundle,
         loaded: &prometheus_client::metrics::gauge::Gauge,
     ) -> anyhow::Result<()> {
         let _updating = self.merge_lock.lock();
-        if let Some(staged) = bundle.staged.take() {
-            std::fs::create_dir_all(&self.dir)?;
-            let staged = Utf8Path::from_path(staged.path())
-                .context("staging directory path is not UTF-8")?;
-            for id in &bundle.schemas_to_install {
-                let name = format!("{id}{SCHEMA_SUFFIX}");
-                std::fs::rename(staged.join(&name), self.dir.join(&name))
-                    .with_context(|| format!("couldn't move schema {id} into the store"))?;
+        match bundle.files {
+            PreparedFiles::Cached => {}
+            PreparedFiles::Staged { dir, missing } => {
+                std::fs::create_dir_all(&self.dir)?;
+                let staged = Utf8Path::from_path(dir.path())
+                    .context("staging directory path is not UTF-8")?;
+                for id in missing {
+                    let name = format!("{id}{SCHEMA_SUFFIX}");
+                    std::fs::rename(staged.join(&name), self.dir.join(&name))
+                        .with_context(|| format!("couldn't move schema {id} into the store"))?;
+                }
             }
         }
         let current = self.snapshot.load_full();
@@ -357,7 +406,7 @@ impl SchemaRegistry {
             by_type: current.by_type.clone(),
             by_id,
             bundle_hash: Some(bundle.hash),
-            bundle_ids: bundle.ids,
+            bundle_ids: (*bundle.ids).clone(),
         }));
         loaded.set(1);
         Ok(())
@@ -535,6 +584,29 @@ async fn load_dir(dir: Utf8PathBuf) -> anyhow::Result<HashMap<SchemaId, Arc<Data
     })
     .await
     .context("schema load task panicked")?
+}
+
+async fn classify_cached(
+    store: Utf8PathBuf,
+    staged: Utf8PathBuf,
+    ids: &HashSet<SchemaId>,
+) -> anyhow::Result<HashSet<SchemaId>> {
+    let ids = ids.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut missing = HashSet::new();
+        for id in ids {
+            let name = format!("{id}{SCHEMA_SUFFIX}");
+            let stored = store.join(&name);
+            if !stored.exists() {
+                missing.insert(id);
+            } else if std::fs::read(&stored)? != std::fs::read(staged.join(&name))? {
+                bail!("schema {id} was republished with different contents");
+            }
+        }
+        Ok(missing)
+    })
+    .await
+    .context("schema cache comparison task panicked")?
 }
 
 #[cfg(test)]

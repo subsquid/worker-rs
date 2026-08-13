@@ -96,7 +96,7 @@ pub struct P2PController<EventStream> {
     keypair: Keypair,
     assignment_url: String,
     assignment_source: AssignmentSource,
-    query_schemas: Arc<schema_bundle::SchemaRegistry>,
+    schema_manager: Arc<schema_bundle::SchemaManager>,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
     queries_tx: mpsc::Sender<AdmittedQuery>,
@@ -111,7 +111,7 @@ pub struct P2PController<EventStream> {
 
 pub async fn create_p2p_controller(
     worker: Worker,
-    query_schemas: Arc<schema_bundle::SchemaRegistry>,
+    schema_manager: Arc<schema_bundle::SchemaManager>,
     transport_builder: P2PTransportBuilder,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
@@ -150,7 +150,7 @@ pub async fn create_p2p_controller(
         keypair,
         assignment_url: args.assignment_url,
         assignment_source: args.assignment_source,
-        query_schemas,
+        schema_manager,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
@@ -280,7 +280,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         &self,
         update: &super::assignments::AssignmentUpdate,
         client: &reqwest::Client,
-    ) -> Result<(AssignmentBlob, Option<schema_bundle::PreparedBundle>)> {
+    ) -> Result<(AssignmentBlob, Option<schema_bundle::PreparedSchemaUpdate>)> {
         if self.assignment_source == AssignmentSource::Legacy {
             return Ok((
                 AssignmentBlob::Legacy(
@@ -293,7 +293,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
             anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
         })?;
-        let prepared = self.query_schemas.prepare_bundle(bundle, client).await?;
+        let prepared = self.schema_manager.prepare(bundle, client).await?;
 
         Ok((
             AssignmentBlob::Worker(
@@ -314,13 +314,13 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 push_pending_assignment(pending, update)
             }
             super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                match self.query_schemas.prepare_bundle(&bundle, client).await {
+                match self.schema_manager.prepare(&bundle, client).await {
                     Ok(prepared)
                         if self
                             .worker
                             .assignment_schemas_covered_by(|id| prepared.contains(id)) =>
                     {
-                        if let Err(e) = self.query_schemas.activate_bundle(prepared) {
+                        if let Err(e) = self.schema_manager.install(prepared) {
                             metrics::SCHEMA_BUNDLE_FAILURES.inc();
                             warn!(hash = %bundle.hash, error = ?e, "Failed to activate schema bundle");
                         }
@@ -356,7 +356,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 self.assignment_source,
                 || super::assignments::AppliedPair {
                     assignment_id: self.worker.registered_assignment_id(),
-                    bundle_hash: self.query_schemas.installed_hash(),
+                    bundle_hash: self.schema_manager.installed_hash(),
                 },
             )
             .take_until(cancellation_token.clone().cancelled_owned())
@@ -429,21 +429,21 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     };
 
                     if let Some(bundle) = prepared_bundle {
-                        if let Err(e) = self.query_schemas.activate_bundle(bundle) {
+                        if let Err(e) = self.schema_manager.install(bundle) {
                             metrics::SCHEMA_BUNDLE_FAILURES.inc();
                             warn!(assignment_id = %id, error = ?e, "Failed to activate schema bundle");
                             continue;
                         }
                     }
 
-                    let registered = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         worker.register_prepared_assignment(prepared_assignment)
                     })
                     .instrument(tracing::info_span!("set_assignment", id))
                     .await
                     .expect("register_assignment shouldn't panic");
 
-                    if self.assignment_source == AssignmentSource::Worker && registered {
+                    if self.assignment_source == AssignmentSource::Worker {
                         processing_id = Some(id);
                         processing_stalled = false;
                     }
