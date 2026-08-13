@@ -40,6 +40,7 @@ pub struct SchemaBundle {
 pub struct PreparedBundle {
     hash: BundleHash,
     ids: HashSet<SchemaId>,
+    schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
 }
 
 impl PreparedBundle {
@@ -250,8 +251,7 @@ impl SchemaRegistry {
         hash: BundleHash,
     ) {
         let ids = schemas.keys().copied().collect();
-        self.publish_schemas(schemas);
-        self.activate_bundle(PreparedBundle { hash, ids });
+        self.activate_bundle(PreparedBundle { hash, ids, schemas });
     }
 
     /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
@@ -286,6 +286,7 @@ impl SchemaRegistry {
             return Ok(PreparedBundle {
                 hash: bundle.hash,
                 ids: self.bundle_ids(),
+                schemas: HashMap::new(),
             });
         }
 
@@ -334,15 +335,14 @@ impl SchemaRegistry {
                 .with_context(|| format!("couldn't move schema {id} into the store"))?;
         }
         let ids = schemas.keys().copied().collect();
-        self.publish_schemas(schemas);
-        metrics::SCHEMA_BUNDLE_LOADED.set(1);
-        Ok(PreparedBundle { hash, ids })
+        Ok(PreparedBundle { hash, ids, schemas })
     }
 
-    fn publish_schemas(&self, schemas: HashMap<SchemaId, Arc<DatasetDescription>>) {
+    pub fn activate_bundle(&self, bundle: PreparedBundle) {
+        let _updating = self.merge_lock.lock();
         let current = self.snapshot.load_full();
         let mut by_id = current.by_id.clone();
-        for (id, description) in schemas {
+        for (id, description) in bundle.schemas {
             if let Some(previous) = by_id.get(&id) {
                 if previous.name != description.name {
                     tracing::warn!(
@@ -359,18 +359,6 @@ impl SchemaRegistry {
             legacy_loaded: current.legacy_loaded,
             by_type: current.by_type.clone(),
             by_id,
-            bundle_hash: current.bundle_hash,
-            bundle_ids: current.bundle_ids.clone(),
-        }));
-    }
-
-    pub fn activate_bundle(&self, bundle: PreparedBundle) {
-        let _updating = self.merge_lock.lock();
-        let current = self.snapshot.load_full();
-        self.snapshot.store(Arc::new(SchemaSnapshot {
-            legacy_loaded: current.legacy_loaded,
-            by_type: current.by_type.clone(),
-            by_id: current.by_id.clone(),
             bundle_hash: Some(bundle.hash),
             bundle_ids: bundle.ids,
         }));
@@ -691,7 +679,7 @@ tables:
             .await
             .unwrap();
 
-        assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
+        assert!(registry.get_by_id(SchemaId::new(7)).is_err());
         assert_eq!(registry.installed_hash(), None);
         assert!(registry.bundle_ids().is_empty());
 
