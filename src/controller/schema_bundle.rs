@@ -36,6 +36,22 @@ pub struct SchemaBundle {
     pub url: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedBundle {
+    hash: BundleHash,
+    ids: HashSet<SchemaId>,
+}
+
+impl PreparedBundle {
+    pub fn hash(&self) -> BundleHash {
+        self.hash
+    }
+
+    pub fn contains(&self, id: SchemaId) -> bool {
+        self.ids.contains(&id)
+    }
+}
+
 impl TryFrom<sqd_assignments::SchemaBundle> for SchemaBundle {
     type Error = anyhow::Error;
 
@@ -110,7 +126,7 @@ impl std::fmt::LowerHex for BundleHash {
 /// and any chunk still on disk that was written with it becomes unreadable.
 #[derive(Default)]
 pub(crate) struct SchemaSnapshot {
-    pub(crate) loaded: bool,
+    pub(crate) legacy_loaded: bool,
     pub(crate) by_type: HashMap<String, Arc<DatasetDescription>>,
     pub(crate) by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
     pub(crate) bundle_hash: Option<BundleHash>,
@@ -148,7 +164,6 @@ impl SchemaRegistry {
             Ok(by_id) if !by_id.is_empty() => {
                 tracing::info!(schemas = by_id.len(), "Adopted stored query schemas");
                 SchemaSnapshot {
-                    loaded: true,
                     by_id,
                     ..Default::default()
                 }
@@ -166,20 +181,45 @@ impl SchemaRegistry {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Result<Arc<SchemaSnapshot>, QueryError> {
-        let snapshot = self.snapshot.load_full();
-        snapshot.loaded.then_some(snapshot).ok_or_else(|| {
-            QueryError::Other(
+    pub(crate) fn snapshot(&self) -> Arc<SchemaSnapshot> {
+        self.snapshot.load_full()
+    }
+
+    pub fn get_by_type(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
+        let snapshot = self.snapshot();
+        if !snapshot.legacy_loaded {
+            return Err(QueryError::Other(
                 "query schemas for the experimental engine have not been loaded yet".to_owned(),
-            )
+            ));
+        }
+        snapshot.by_type.get(dataset_type).cloned().ok_or_else(|| {
+            QueryError::BadRequest(format!(
+                "dataset type '{dataset_type}' is not supported by the experimental engine"
+            ))
         })
     }
 
+    pub fn get_by_id(&self, schema_id: SchemaId) -> Result<Arc<DatasetDescription>, QueryError> {
+        self.snapshot()
+            .by_id
+            .get(&schema_id)
+            .cloned()
+            .ok_or_else(|| {
+                QueryError::Other(format!(
+                    "schema {schema_id} is not in the loaded schema bundle"
+                ))
+            })
+    }
+
     pub(crate) fn replace_legacy(&self, by_type: HashMap<String, Arc<DatasetDescription>>) {
+        let _updating = self.merge_lock.lock();
+        let current = self.snapshot.load_full();
         self.snapshot.store(Arc::new(SchemaSnapshot {
-            loaded: true,
+            legacy_loaded: true,
             by_type,
-            ..Default::default()
+            by_id: current.by_id.clone(),
+            bundle_hash: current.bundle_hash,
+            bundle_ids: current.bundle_ids.clone(),
         }));
     }
 
@@ -209,17 +249,19 @@ impl SchemaRegistry {
         schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
         hash: BundleHash,
     ) {
-        self.publish_bundle(schemas, hash);
+        let ids = schemas.keys().copied().collect();
+        self.publish_schemas(schemas);
+        self.activate_bundle(PreparedBundle { hash, ids });
     }
 
     /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
-    pub async fn ensure(
+    pub async fn prepare_bundle(
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PreparedBundle> {
         match self.merge(bundle, client).await {
-            Ok(()) => Ok(()),
+            Ok(bundle) => Ok(bundle),
             Err(e) => {
                 metrics::SCHEMA_BUNDLE_FAILURES.inc();
                 Err(e)
@@ -227,10 +269,24 @@ impl SchemaRegistry {
         }
     }
 
-    async fn merge(&self, bundle: &SchemaBundle, client: &reqwest::Client) -> anyhow::Result<()> {
+    #[cfg(test)]
+    async fn ensure(&self, bundle: &SchemaBundle, client: &reqwest::Client) -> anyhow::Result<()> {
+        let prepared = self.prepare_bundle(bundle, client).await?;
+        self.activate_bundle(prepared);
+        Ok(())
+    }
+
+    async fn merge(
+        &self,
+        bundle: &SchemaBundle,
+        client: &reqwest::Client,
+    ) -> anyhow::Result<PreparedBundle> {
         if self.installed_hash() == Some(bundle.hash) {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
-            return Ok(());
+            return Ok(PreparedBundle {
+                hash: bundle.hash,
+                ids: self.bundle_ids(),
+            });
         }
 
         // Fetch, unpack and parse hold no lock: they write only into a directory of this
@@ -269,7 +325,7 @@ impl SchemaRegistry {
         staged: &Utf8Path,
         schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
         hash: BundleHash,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PreparedBundle> {
         let _merging = self.merge_lock.lock();
         std::fs::create_dir_all(&self.dir)?;
         for id in schemas.keys() {
@@ -277,17 +333,13 @@ impl SchemaRegistry {
             std::fs::rename(staged.join(&name), self.dir.join(&name))
                 .with_context(|| format!("couldn't move schema {id} into the store"))?;
         }
-        self.publish_bundle(schemas, hash);
+        let ids = schemas.keys().copied().collect();
+        self.publish_schemas(schemas);
         metrics::SCHEMA_BUNDLE_LOADED.set(1);
-        Ok(())
+        Ok(PreparedBundle { hash, ids })
     }
 
-    fn publish_bundle(
-        &self,
-        schemas: HashMap<SchemaId, Arc<DatasetDescription>>,
-        hash: BundleHash,
-    ) {
-        let bundle_ids = schemas.keys().copied().collect();
+    fn publish_schemas(&self, schemas: HashMap<SchemaId, Arc<DatasetDescription>>) {
         let current = self.snapshot.load_full();
         let mut by_id = current.by_id.clone();
         for (id, description) in schemas {
@@ -304,11 +356,23 @@ impl SchemaRegistry {
             by_id.insert(id, description);
         }
         self.snapshot.store(Arc::new(SchemaSnapshot {
-            loaded: true,
+            legacy_loaded: current.legacy_loaded,
             by_type: current.by_type.clone(),
             by_id,
-            bundle_hash: Some(hash),
-            bundle_ids,
+            bundle_hash: current.bundle_hash,
+            bundle_ids: current.bundle_ids.clone(),
+        }));
+    }
+
+    pub fn activate_bundle(&self, bundle: PreparedBundle) {
+        let _updating = self.merge_lock.lock();
+        let current = self.snapshot.load_full();
+        self.snapshot.store(Arc::new(SchemaSnapshot {
+            legacy_loaded: current.legacy_loaded,
+            by_type: current.by_type.clone(),
+            by_id: current.by_id.clone(),
+            bundle_hash: Some(bundle.hash),
+            bundle_ids: bundle.ids,
         }));
     }
 }
@@ -612,6 +676,30 @@ tables:
         assert_eq!(stored(&dir), vec!["7.yaml"]);
     }
 
+    #[tokio::test]
+    async fn preparing_a_bundle_does_not_make_it_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = store(&dir);
+        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(&archive),
+            url: serve_once(archive).await,
+        };
+
+        let prepared = registry
+            .prepare_bundle(&bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
+        assert_eq!(registry.installed_hash(), None);
+        assert!(registry.bundle_ids().is_empty());
+
+        registry.activate_bundle(prepared);
+        assert_eq!(registry.installed_hash(), Some(bundle.hash));
+        assert_eq!(registry.bundle_ids(), HashSet::from([SchemaId::new(7)]));
+    }
+
     /// Bundles accumulate. The network publishes only its current bundle and offers no way back
     /// to an older one, so a schema dropped here would strand every chunk written with it.
     #[tokio::test]
@@ -801,6 +889,21 @@ tables:
 
         assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
         assert!(registry.get_by_id(SchemaId::new(9)).is_err());
+    }
+
+    #[test]
+    fn restored_bundle_schemas_do_not_mark_legacy_schemas_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        std::fs::write(root.join("7.yaml"), SCHEMA).unwrap();
+
+        let registry = store(&dir);
+
+        assert!(matches!(
+            registry.get_by_type("evm"),
+            Err(QueryError::Other(_))
+        ));
+        assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
     }
 
     #[test]

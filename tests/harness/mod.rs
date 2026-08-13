@@ -329,7 +329,8 @@ impl Harness {
                 assignments::NetworkUpdate::Assignment(update) => break update,
                 // SchemaBundle moved without the assignment: install and keep waiting, like production.
                 assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                    self.install_schema_bundle(&bundle)
+                    let prepared = self
+                        .install_schema_bundle(&bundle)
                         .await
                         .unwrap_or_else(|e| {
                             panic!(
@@ -337,10 +338,15 @@ impl Harness {
                                 bundle.hash
                             )
                         });
+                    assert!(self
+                        .worker
+                        .assignment_schemas_covered_by(|id| prepared.contains(id)));
+                    self.query_schemas.activate_bundle(prepared);
                 }
             }
         };
 
+        let mut prepared_bundle = None;
         let blob = match self.format {
             Format::Legacy => {
                 match assignments::fetch_assignment(&update.fb_url_v1, &self.assignment_client)
@@ -356,10 +362,13 @@ impl Harness {
                     .schema_bundle
                     .as_ref()
                     .expect("worker format publishes a bundle alongside the assignment");
-                if let Err(e) = self.install_schema_bundle(bundle).await {
-                    tracing::warn!("schema bundle could not be installed: {e:?}");
-                    return false;
-                }
+                prepared_bundle = match self.install_schema_bundle(bundle).await {
+                    Ok(prepared) => Some(prepared),
+                    Err(e) => {
+                        tracing::warn!("schema bundle could not be installed: {e:?}");
+                        return false;
+                    }
+                };
                 match assignments::fetch_worker_assignment(
                     &update.fb_url_v1,
                     &self.assignment_client,
@@ -371,14 +380,27 @@ impl Harness {
                 }
             }
         };
-        let covered = self.query_schemas.bundle_ids();
-        self.worker
-            .register_assignment(blob, update.id, &self.keypair, |id| covered.contains(&id))
+        let registered = self
+            .worker
+            .register_assignment(blob, update.id, &self.keypair, |id| {
+                prepared_bundle
+                    .as_ref()
+                    .is_none_or(|bundle| bundle.contains(id))
+            });
+        if registered {
+            if let Some(bundle) = prepared_bundle {
+                self.query_schemas.activate_bundle(bundle);
+            }
+        }
+        registered
     }
 
-    async fn install_schema_bundle(&self, bundle: &SchemaBundle) -> anyhow::Result<()> {
+    async fn install_schema_bundle(
+        &self,
+        bundle: &SchemaBundle,
+    ) -> anyhow::Result<sqd_worker::controller::schema_bundle::PreparedBundle> {
         self.query_schemas
-            .ensure(bundle, &self.assignment_client)
+            .prepare_bundle(bundle, &self.assignment_client)
             .await
     }
 
@@ -541,7 +563,7 @@ impl Harness {
 
     async fn await_schemas_loaded(&self) {
         self.await_condition("query schemas loaded", || async {
-            self.schemas.get("evm").is_ok()
+            self.schemas.get_by_type("evm").is_ok()
         })
         .await;
     }

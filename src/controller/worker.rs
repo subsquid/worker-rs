@@ -89,6 +89,10 @@ impl Worker {
         self.state_manager.registered_assignment_id()
     }
 
+    pub fn assignment_schemas_covered_by(&self, covers: impl Fn(SchemaId) -> bool) -> bool {
+        self.state_manager.assignment_schemas_covered_by(covers)
+    }
+
     /// Waits until the given assignment settles — fully applied or stalled.
     /// Returns `None` when cancelled.
     pub async fn wait_until_assignment_settled(
@@ -287,7 +291,7 @@ impl Worker {
                 }
                 schema
             }
-            ChunkSchema::Unpinned => self.query_schemas.get(&dataset_type)?,
+            ChunkSchema::Unpinned => self.query_schemas.get_by_type(&dataset_type)?,
             // On disk but not ours to serve: it is waiting to be removed, and this is the same
             // answer the worker gives once it is.
             ChunkSchema::Unassigned => return Err(QueryError::NotFound),

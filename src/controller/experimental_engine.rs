@@ -21,7 +21,6 @@ use crate::controller::assignments::new_reqwest_client;
 use crate::controller::schema_bundle::SchemaRegistry;
 use crate::controller::worker::OutputFormat;
 use crate::query::result::{QueryError, QueryOk, QueryResult};
-use crate::types::schema::SchemaId;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -29,37 +28,6 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 struct Manifest {
     /// Query "type" → schema URL (absolute or relative to the manifest URL)
     schemas: HashMap<String, String>,
-}
-
-impl SchemaRegistry {
-    /// Looks up a legacy schema by the dataset type named in the query.
-    pub fn get(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
-        self.snapshot()?
-            .by_type
-            .get(dataset_type)
-            .cloned()
-            .ok_or_else(|| {
-                QueryError::BadRequest(format!(
-                    "dataset type '{dataset_type}' is not supported by the experimental engine"
-                ))
-            })
-    }
-
-    /// Looks a schema up by the id assignments reference it with; only ever populated by a bundle.
-    ///
-    /// A miss is a worker fault, never the client's — the id comes from the chunk, not the query
-    /// — so it is a retryable `server_error` (INV-26, ADR-20). FM-53c should make it unreachable.
-    pub fn get_by_id(&self, schema_id: SchemaId) -> Result<Arc<DatasetDescription>, QueryError> {
-        self.snapshot()?
-            .by_id
-            .get(&schema_id)
-            .cloned()
-            .ok_or_else(|| {
-                QueryError::Other(format!(
-                    "schema {schema_id} is not in the loaded schema bundle"
-                ))
-            })
-    }
 }
 
 pub async fn run_schemas_refresh_loop(
@@ -249,6 +217,7 @@ pub fn execute_query(
 mod tests {
     use super::*;
     use crate::controller::schema_bundle::BundleHash;
+    use crate::types::schema::SchemaId;
     use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -545,7 +514,7 @@ tables:
             .await
             .unwrap();
         assert!(updated);
-        assert_eq!(registry.get("evm").unwrap().name, "evm");
+        assert_eq!(registry.get_by_type("evm").unwrap().name, "evm");
 
         // unchanged manifest
         let updated = refresh_schemas(&registry, &manifest_url, &client, &mut last_manifest)
@@ -563,7 +532,7 @@ tables:
         )
         .await
         .unwrap_err();
-        assert!(registry.get("evm").is_ok());
+        assert!(registry.get_by_type("evm").is_ok());
     }
 
     /// Who is blamed follows who supplied the input. The query names a dataset type, so asking
@@ -577,7 +546,10 @@ tables:
 
         let registry = SchemaRegistry::memory();
         // Nothing loaded is a third case, and a worker fault either way.
-        assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
+        assert!(matches!(
+            registry.get_by_type("evm"),
+            Err(QueryError::Other(_))
+        ));
         assert!(matches!(
             registry.get_by_id(id(7)),
             Err(QueryError::Other(_))
@@ -591,7 +563,7 @@ tables:
 
         assert!(
             matches!(
-                wire(registry.get("solana").unwrap_err()),
+                wire(registry.get_by_type("solana").unwrap_err()),
                 WireErr::BadRequest(_)
             ),
             "the query named the type, so the query is what is wrong"
@@ -639,7 +611,10 @@ tables:
         assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
         assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
         assert!(registry.get_by_id(id(9)).is_err());
-        assert!(registry.get("evm").is_err(), "a bundle fills no type index");
+        assert!(
+            registry.get_by_type("evm").is_err(),
+            "a bundle fills no type index"
+        );
     }
 
     /// The hash and the schemas it named are published together, so no reader can pair a hash

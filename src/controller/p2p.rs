@@ -287,20 +287,26 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         &self,
         update: &super::assignments::AssignmentUpdate,
         client: &reqwest::Client,
-    ) -> Result<AssignmentBlob> {
+    ) -> Result<(AssignmentBlob, Option<schema_bundle::PreparedBundle>)> {
         if self.assignment_source == AssignmentSource::Legacy {
-            return Ok(AssignmentBlob::Legacy(
-                super::assignments::fetch_assignment(&update.fb_url_v1, client).await?,
+            return Ok((
+                AssignmentBlob::Legacy(
+                    super::assignments::fetch_assignment(&update.fb_url_v1, client).await?,
+                ),
+                None,
             ));
         }
 
         let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
             anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
         })?;
-        self.query_schemas.ensure(bundle, client).await?;
+        let prepared = self.query_schemas.prepare_bundle(bundle, client).await?;
 
-        Ok(AssignmentBlob::Worker(
-            super::assignments::fetch_worker_assignment(&update.fb_url_v1, client).await?,
+        Ok((
+            AssignmentBlob::Worker(
+                super::assignments::fetch_worker_assignment(&update.fb_url_v1, client).await?,
+            ),
+            Some(prepared),
         ))
     }
 
@@ -321,8 +327,21 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                 push_pending_assignment(pending, update)
             }
             super::assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                if let Err(e) = self.query_schemas.ensure(&bundle, client).await {
-                    warn!(hash = %bundle.hash, error = ?e, "Failed to merge schema bundle");
+                match self.query_schemas.prepare_bundle(&bundle, client).await {
+                    Ok(prepared)
+                        if self
+                            .worker
+                            .assignment_schemas_covered_by(|id| prepared.contains(id)) =>
+                    {
+                        self.query_schemas.activate_bundle(prepared);
+                    }
+                    Ok(_) => {
+                        metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+                        warn!(hash = %bundle.hash, "Schema bundle does not cover the assignment in force");
+                    }
+                    Err(e) => {
+                        warn!(hash = %bundle.hash, error = ?e, "Failed to merge schema bundle");
+                    }
                 }
                 false
             }
@@ -367,7 +386,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             if processing_id.is_none() {
                 if let Some(update) = pending.pop_front() {
                     tracing::debug!("Downloading assignment \"{}\"", update.id);
-                    let assignment = match self
+                    let (assignment, prepared_bundle) = match self
                         .download_assignment(&update, &assignment_client)
                         .await
                     {
@@ -405,15 +424,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
                     let worker = &self.worker;
                     let keypair = self.keypair.clone();
                     let id = update.id.clone();
-                    let covered = self.query_schemas.bundle_ids();
+                    let prepared_for_validation = prepared_bundle.clone();
                     let registered = tokio::task::spawn_blocking(move || {
                         worker.register_assignment(assignment, update.id, &keypair, |id| {
-                            covered.contains(&id)
+                            prepared_for_validation
+                                .as_ref()
+                                .is_none_or(|bundle| bundle.contains(id))
                         })
                     })
                     .instrument(tracing::info_span!("set_assignment", id))
                     .await
                     .expect("register_assignment shouldn't panic");
+
+                    if registered {
+                        if let Some(bundle) = prepared_bundle {
+                            self.query_schemas.activate_bundle(bundle);
+                        }
+                    }
 
                     if self.assignment_source == AssignmentSource::Worker && registered {
                         processing_id = Some(id);
