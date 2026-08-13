@@ -113,6 +113,7 @@ pub struct P2PController<EventStream> {
 
 pub async fn create_p2p_controller(
     worker: Worker,
+    schema_bundles: schema_bundle::SchemaBundleStore,
     transport_builder: P2PTransportBuilder,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
@@ -137,8 +138,6 @@ pub async fn create_p2p_controller(
     let (sql_queries_tx, sql_queries_rx) = mpsc::channel(QUERIES_POOL_SIZE);
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
-    let query_schemas = worker.query_schemas();
-
     Ok(P2PController {
         worker,
         worker_status: RwLock::new(worker_status),
@@ -153,10 +152,7 @@ pub async fn create_p2p_controller(
         keypair,
         assignment_url: args.assignment_url,
         assignment_source: args.assignment_source,
-        schema_bundles: schema_bundle::SchemaBundleStore::new(
-            args.data_dir.join("schemas"),
-            query_schemas,
-        ),
+        schema_bundles,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
