@@ -266,6 +266,9 @@ impl SchemaRegistry {
     }
 
     /// Downloads `bundle` unless it is already the one in force, and merges it into the store.
+    /// The caller must serialize preparation and activation. Production does this in the
+    /// assignment loop; this is public only for the integration harness.
+    #[doc(hidden)]
     pub async fn prepare_bundle(
         &self,
         bundle: &SchemaBundle,
@@ -333,6 +336,7 @@ impl SchemaRegistry {
         })
     }
 
+    #[doc(hidden)]
     pub fn activate_bundle(&self, bundle: PreparedBundle) -> anyhow::Result<()> {
         self.activate_bundle_with(bundle, &metrics::SCHEMA_BUNDLE_LOADED)
     }
