@@ -306,6 +306,15 @@ impl Harness {
         Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, assigned)
     }
 
+    /// Hosts `chunk` as a batch job's rewrite at `version`: its files live under that
+    /// generation's prefix and nowhere else, so an address built without it 404s.
+    pub fn host_republished_chunk(&self, chunk: &corpus::Chunk, version: u32) -> ChunkPlacement {
+        self.origin
+            .host_generation(&Scheduler::generation_prefix(version), chunk);
+        Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, true)
+            .at_version(version)
+    }
+
     /// Publishes an assignment on HC-1 and drives the worker's real intake path
     /// (IB-40 poll → IB-41 fetch → WP-2 application). Returns what was published.
     pub async fn publish_and_apply(

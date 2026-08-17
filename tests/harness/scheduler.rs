@@ -4,6 +4,7 @@
 //! Built with the real `sqd-assignments` builder, so the worker parses the layout production
 //! emits, encrypted headers included. Fault knobs corrupt *inputs*, never the encoder.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use sha2::{Digest, Sha256};
@@ -64,6 +65,17 @@ pub struct ChunkPlacement {
     pub files: Vec<String>,
     /// Whether this worker is assigned the chunk.
     pub assigned: bool,
+    /// Which copy of the chunk to serve; 0 is the ingested one. Worker format only.
+    pub version: u32,
+}
+
+impl ChunkPlacement {
+    /// The same chunk republished by a batch job: its files move under the generation prefix
+    /// registered for `version` (IB-41b), so an address built without it doesn't resolve.
+    pub fn at_version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
+    }
 }
 
 pub struct Scheduler {
@@ -132,7 +144,14 @@ impl Scheduler {
             size: chunk.size_bytes(),
             files: chunk.files.iter().map(|(n, _)| n.clone()).collect(),
             assigned,
+            version: 0,
         }
+    }
+
+    /// Where a generation's chunks live, relative to the dataset's base url. One prefix per
+    /// version, since a test only needs them to differ.
+    pub fn generation_prefix(version: u32) -> String {
+        format!("_gen/{version}")
     }
 
     /// Builds, gzips and serves an assignment, then points the network-state document at
@@ -215,6 +234,10 @@ impl Scheduler {
             } else {
                 &placement.dataset_base_url
             };
+            assert_eq!(
+                placement.version, 0,
+                "the legacy format has no chunk versions"
+            );
             // `iter_chunks` resolves membership here, not from the worker's chunk list.
             let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
             builder
@@ -258,26 +281,46 @@ impl Scheduler {
             .register_write_schema(WRITE_SCHEMA_ID, &WRITE_SCHEMA_TABLES)
             .expect("roster is sorted");
 
+        // Chunks belong to the dataset they are opened under rather than naming one each, so
+        // placements are grouped by it. BTreeMap: the builder emits datasets in the order they
+        // are opened, and the reader looks them up by key, which assumes id order.
+        let mut by_dataset: BTreeMap<&str, Vec<&ChunkPlacement>> = BTreeMap::new();
         for placement in placements {
+            by_dataset
+                .entry(&placement.dataset_id)
+                .or_default()
+                .push(placement);
+        }
+        for (dataset_id, placements) in by_dataset {
             let base_url = if fault == AssignmentFault::UnparseableFileUrl {
                 "not a url"
             } else {
-                &placement.dataset_base_url
+                &placements[0].dataset_base_url
             };
-            let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
-            builder
-                .new_chunk()
-                .id(&placement.chunk_id)
-                .dataset_id(&placement.dataset_id)
-                .dataset_base_url(base_url)
-                .block_range(placement.first_block..=placement.last_block)
-                .size(placement.size)
-                .write_schema_id(WRITE_SCHEMA_ID)
-                .worker_indexes(if assigned { &[0] } else { &[] })
-                .finish()
-                .expect("chunk is well-formed");
+            let mut dataset = builder.new_dataset(dataset_id, base_url);
+            for placement in placements {
+                if placement.version != 0 {
+                    dataset
+                        .register_generation(
+                            placement.version,
+                            &Self::generation_prefix(placement.version),
+                        )
+                        .expect("generation is well-formed");
+                }
+                let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
+                dataset
+                    .new_chunk()
+                    .id(&placement.chunk_id)
+                    .block_range(placement.first_block..=placement.last_block)
+                    .size(placement.size)
+                    .version(placement.version)
+                    .write_schema_id(WRITE_SCHEMA_ID)
+                    .worker_indexes(if assigned { &[0] } else { &[] })
+                    .finish()
+                    .expect("chunk is well-formed");
+            }
+            dataset.finish().expect("dataset is well-formed");
         }
-        builder.finish_dataset();
         builder.add_worker_with_timestamp(worker, WorkerStatus::Ok, 1_700_000_000);
 
         builder.finish()

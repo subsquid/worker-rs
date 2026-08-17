@@ -804,7 +804,10 @@ pub async fn build_delivery(
     let mut msg = sqd_messages::QueryResult {
         query_id: query_id.to_owned(),
         result: Some(sqd_messages::query_result::Result::Ok(
-            sqd_messages::QueryOk { data, last_block },
+            sqd_messages::QueryOk {
+                data: data.into(),
+                last_block,
+            },
         )),
         retry_after_ms,
         signature: Default::default(),

@@ -147,11 +147,10 @@ mod worker_assignment {
             .register_write_schema(7, &["blocks", "logs", "transactions"])
             .unwrap();
 
-        let mut chunk = builder
+        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
+        let mut chunk = dataset
             .new_chunk()
             .id(CHUNK_ID)
-            .dataset_id(DATASET)
-            .dataset_base_url(BASE_URL)
             .block_range(221000000..=221000649)
             .size(1000000)
             .write_schema_id(schema_id);
@@ -159,7 +158,7 @@ mod worker_assignment {
             chunk = chunk.tables_present(tables)?;
         }
         chunk.worker_indexes(&[0]).finish()?;
-        builder.finish_dataset();
+        dataset.finish()?;
 
         builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
         Ok(WorkerAssignment::from_owned(builder.finish())?)

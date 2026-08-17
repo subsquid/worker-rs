@@ -583,18 +583,17 @@ mod tests {
         let mut builder =
             sqd_assignments::WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
         builder.register_write_schema(7, &["blocks"]).unwrap();
-        builder
+        let mut dataset = builder.new_dataset("s3://test", "https://example.com/");
+        dataset
             .new_chunk()
             .id("0000000000/0000000000-0000000010-aaaaaaaa")
-            .dataset_id("s3://test")
-            .dataset_base_url("https://example.com/")
             .block_range(0..=10)
             .size(1)
             .write_schema_id(7)
             .worker_indexes(&[0])
             .finish()
             .unwrap();
-        builder.finish_dataset();
+        dataset.finish().unwrap();
         builder.add_worker(assigned_to, sqd_assignments::WorkerStatus::Ok);
         builder.finish()
     }

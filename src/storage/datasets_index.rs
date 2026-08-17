@@ -66,7 +66,9 @@ impl DatasetsIndex {
             }
             AssignmentBlob::Worker(assignment) => {
                 let chunk = assignment.get_chunk(*chunk_ref)?;
-                let base_url = chunk_base_url(chunk.dataset_base_url(), chunk.id())?;
+                // The chunk composes its own url: the dataset's base, the prefix of the
+                // generation its `version` names, then the chunk id.
+                let base_url = directory_url(&chunk.url()?)?;
                 let tables = assignment.chunk_tables(chunk)?;
                 let mut result = Vec::new();
                 for table in tables {
@@ -113,10 +115,18 @@ impl DatasetsIndex {
                 };
                 let mut chunks = HashMap::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
+                    // Rebuilt from the chunk's columns, so an id that won't assemble is a
+                    // malformed document rather than a missing field.
+                    let Some(id) = chunk.id() else {
+                        anyhow::bail!(
+                            "chunk {} of dataset '{}' has a hash that isn't UTF-8",
+                            chunk.index(),
+                            chunk.dataset().id()
+                        );
+                    };
                     if assignment.chunk_tables(chunk).is_none() {
                         anyhow::bail!(
-                            "chunk '{}' references write schema {} which has no roster in the assignment",
-                            chunk.id(),
+                            "chunk '{id}' references write schema {} which has no roster in the assignment",
                             chunk.write_schema_id()
                         );
                     }
@@ -124,11 +134,10 @@ impl DatasetsIndex {
                     if checked.insert(schema_id) && !schema_available(schema_id) {
                         crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
                         anyhow::bail!(
-                            "chunk '{}' references write schema {schema_id}, which its schema bundle doesn't carry",
-                            chunk.id(),
+                            "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
                         );
                     }
-                    chunks.insert(pool.chunk_ref(chunk.dataset_id(), chunk.id()), chunk_ref);
+                    chunks.insert(pool.chunk_ref(chunk.dataset().id(), &id), chunk_ref);
                 }
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
             }
@@ -203,6 +212,14 @@ fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Option<Url> {
         .ok()?
         .join(&format!("{chunk_prefix}/"))
         .inspect_err(|e| tracing::warn!("Can't parse chunk base url '{chunk_prefix}': {e}"))
+        .ok()
+}
+
+/// Parses a url naming a directory, so joining a file name onto it extends the path instead of
+/// replacing its last segment.
+fn directory_url(url: &str) -> Option<Url> {
+    Url::from_str(&format!("{url}/"))
+        .inspect_err(|e| tracing::warn!("Can't parse chunk base url '{url}': {e}"))
         .ok()
 }
 

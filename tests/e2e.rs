@@ -231,6 +231,42 @@ async fn worker_format_assign_download_query() {
     assert_eq!(blocks, (2_000..=2_009).collect::<Vec<_>>(), "RP-12");
 }
 
+/// IB-41b: a chunk at a non-zero `version` is a batch job's rewrite, and its files live under the
+/// prefix the dataset registers for that version — not at the dataset root. The chunk is hosted
+/// only there, so a worker that ignored `version` would fetch nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
+    use harness::scheduler::{Format, Scheduler};
+    use harness::Config;
+
+    let mut h = Harness::with_config(Config {
+        format: Format::Worker,
+        ..Config::default()
+    })
+    .await;
+
+    let chunk = corpus::chunk(5_000, 5_009, 1);
+    let placement = h.host_republished_chunk(&chunk, 1);
+    h.publish_and_apply("assignment-1", &[placement]).await;
+    h.await_all_chunks_available().await;
+
+    let generation = Scheduler::generation_prefix(1);
+    for (name, _) in &chunk.files {
+        let served = h
+            .origin
+            .served_bytes_in(&generation, &chunk.id, name)
+            .unwrap_or_else(|| panic!("IB-41b: {name} was not fetched from the generation"));
+        let on_disk = std::fs::read(h.chunk_dir(&chunk.id).join(name))
+            .unwrap_or_else(|e| panic!("committed chunk is missing {name}: {e}"));
+        assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
+    }
+    assert_eq!(
+        h.origin.fetch_count(&chunk.id, "blocks.parquet"),
+        0,
+        "the ingested copy is not where a republished chunk lives"
+    );
+}
+
 /// FM-53b: without the schema bundle the worker would hold chunks it cannot answer queries about.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assignment_waits_for_its_schema_bundle() {
