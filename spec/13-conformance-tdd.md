@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-12**
-(baseline commit `d98b494`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-17**
+(baseline commit `a1ea825`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -121,7 +121,7 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-08-12)
+## Traceability matrix (as of 2026-08-17)
 
 Statuses reflect the actual test inventory: inline unit tests, all built unconditionally;
 `state_pbt` / `state_regression` over the chunk state machine and assignment
@@ -232,7 +232,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-08-12)
+## Gap register (as of 2026-08-17)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.
@@ -270,6 +270,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 | GAP-31 | The two oversize paths emit divergent `server_error` strings (`Response too large` at the engine's uncompressed cap vs `query result too large` at the encoded-message downgrade); portals special-case only the former, so the latter degrades to a terminal generic failure client-side | RP-14, IB-13 | P2 | drive both oversize paths; assert one verdict surface |
 | GAP-32 | Boundary emission (RP-11) is provided by the legacy engine's weight-0 pinning but is unverified for the dynamic engine; if the dynamic engine returns zero records for an evaluated-but-unmatched range, portal-side client resumption breaks the moment portals adopt it | RP-11 (boundary emission) | P1 | both engines: a selective query matching nothing over an evaluated range returns the boundary records, last record = coverage cursor |
 | GAP-33 | Freshness rejections blame the client: a timestamp outside P-TS-WINDOW — a verdict whose reference input is the worker's own clock — is typed `bad_request`, which routing clients treat as terminal, so one skewed worker converts valid queries into client-visible terminal errors with no reroute; no skew signal or alarm exists | INV-26, RP-20 (freshness verdict), FM-55, OB-15 | P1 | CT-4: skew the SUT clock past P-TS-WINDOW; a valid signed query must yield `server_error` (never `bad_request`), OB-15 signals must move, alarm past P-SKEW-ALARM |
+| GAP-34 | A chunk's `version` (IB-41b) is not part of its local identity: chunks are keyed by dataset and id, both of which a rewrite keeps. An assignment that republishes a held chunk at a new version — addressed under a different generation prefix — therefore leaves the old copy in place and keeps serving it. A chunk fetched for the first time resolves its version correctly, so this is a held chunk going stale silently, not a wrong download | IB-41b, INV-13 | P1 | HC-1 republishes a held chunk at version 1 under a generation prefix: the worker must re-fetch it, or refuse the assignment — never keep the version-0 bytes |
 
 ## Build order
 
@@ -308,7 +309,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside and able to republish a chunk at a version whose files live under a generation prefix (IB-41b). Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

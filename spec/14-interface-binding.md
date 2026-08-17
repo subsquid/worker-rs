@@ -207,9 +207,15 @@ end differently, is knowable only where it was attempted (WP-1, FM-12).
 FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no file
 list — each chunk names a `write_schema_id`, and the document's inline `schemas` roster
 maps that id to a sorted table list which the chunk's `tables_present` bitmap narrows.
-Files are then `dataset_base_url + chunk id + <table>.parquet`. A chunk whose
-`write_schema_id` has no roster, or whose schema the bundle published with the document
-doesn't carry,
+Files are then `base_url + generation prefix + chunk id + <table>.parquet`, where
+`base_url` belongs to the chunk's dataset rather than the chunk, and the prefix is empty
+at `version` 0 — the ingested copy — and otherwise comes from the dataset's `generations`
+entry naming that version. `[MUST — intent, currently violated: GAP-34]` a version that
+moves under a chunk already held re-fetches it; today the chunk's id alone identifies it,
+so the old copy stays. A chunk carries neither its id nor its dataset: both are
+rebuilt from the columns holding them, so an id that will not assemble is a malformed
+document. A chunk whose `write_schema_id` has no roster, or whose schema the bundle
+published with the document doesn't carry,
 makes the whole document inapplicable (WP-2) — a partially applied assignment would
 leave the worker silently short of data it is believed to hold.
 
