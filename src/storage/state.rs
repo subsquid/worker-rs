@@ -5,7 +5,7 @@ use tracing::{info, instrument, warn};
 
 use crate::{
     metrics,
-    types::state::{ChunkId, ChunkRef, ChunkSet, DatasetId},
+    types::state::{ChunkRef, ChunkSet},
 };
 
 #[derive(Debug, Default)]
@@ -207,8 +207,8 @@ impl State {
             && self.downloading.iter().all(|c| !self.desired.contains(c))
     }
 
-    pub fn get_and_lock_chunk(&mut self, dataset: DatasetId, chunk: ChunkId) -> Option<ChunkRef> {
-        let chunk_ref = self.available.get(&ChunkRef { dataset, chunk }).cloned();
+    pub fn get_and_lock_chunk(&mut self, chunk: ChunkRef) -> Option<ChunkRef> {
+        let chunk_ref = self.available.get(&chunk).cloned();
 
         if let Some(chunk_ref) = chunk_ref.as_ref() {
             self.lock_chunk(chunk_ref);
@@ -368,13 +368,15 @@ mod tests {
     #[test]
     fn test_state() {
         let ds = Arc::new("ds".to_owned());
-        let chunk_ref = |x| ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from(format!(
-                "0000000000/000000000{}-000000000{}-00000000",
-                x,
-                x + 1
-            )),
+        let chunk_ref = |x| {
+            ChunkRef::new(
+                ds.clone(),
+                Arc::from(format!(
+                    "0000000000/000000000{}-000000000{}-00000000",
+                    x,
+                    x + 1
+                )),
+            )
         };
         let a = chunk_ref(0);
         let b = chunk_ref(1);
@@ -417,13 +419,15 @@ mod tests {
     #[test]
     fn fully_applied_requires_desired_chunks_to_be_available() {
         let ds = Arc::new("ds".to_owned());
-        let chunk_ref = |x| ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from(format!(
-                "0000000000/000000000{}-000000000{}-00000000",
-                x,
-                x + 1
-            )),
+        let chunk_ref = |x| {
+            ChunkRef::new(
+                ds.clone(),
+                Arc::from(format!(
+                    "0000000000/000000000{}-000000000{}-00000000",
+                    x,
+                    x + 1
+                )),
+            )
         };
         let a = chunk_ref(0);
         let b = chunk_ref(1);
@@ -454,13 +458,15 @@ mod tests {
     #[test]
     fn locked_undesired_chunk_is_draining_without_blocking_downloads() {
         let ds = Arc::new("ds".to_owned());
-        let chunk_ref = |x| ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from(format!(
-                "0000000000/000000000{}-000000000{}-00000000",
-                x,
-                x + 1
-            )),
+        let chunk_ref = |x| {
+            ChunkRef::new(
+                ds.clone(),
+                Arc::from(format!(
+                    "0000000000/000000000{}-000000000{}-00000000",
+                    x,
+                    x + 1
+                )),
+            )
         };
         let a = chunk_ref(0);
         let b = chunk_ref(1);
@@ -471,9 +477,7 @@ mod tests {
             DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
         );
         // A query is using `a` when the new assignment drops it and adds `c`
-        assert!(state
-            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
-            .is_some());
+        assert!(state.get_and_lock_chunk(a.clone()).is_some());
         state.set_desired_chunks([b.clone(), c.clone()].into_iter().collect());
 
         // Until the removal pass runs, downloads are gated as usual
@@ -487,9 +491,7 @@ mod tests {
         assert_eq!(state.take_next_download(), Some(c));
 
         // The draining chunk refuses new query locks
-        assert!(state
-            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
-            .is_none());
+        assert!(state.get_and_lock_chunk(a.clone()).is_none());
 
         // Releasing the last lock makes `a` physically deletable
         assert!(state.unlock_chunk(&a));
@@ -502,18 +504,16 @@ mod tests {
     #[test]
     fn redesired_draining_chunk_is_redownloaded_after_deletion() {
         let ds = Arc::new("ds".to_owned());
-        let a = ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
-        };
+        let a = ChunkRef::new(
+            ds.clone(),
+            Arc::from("0000000000/0000000000-0000000001-00000000"),
+        );
 
         let mut state = State::new(
             [a.clone()].into_iter().collect(),
             DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
         );
-        assert!(state
-            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
-            .is_some());
+        assert!(state.get_and_lock_chunk(a.clone()).is_some());
         state.set_desired_chunks(ChunkSet::new());
         assert_eq!(state.take_removals(), &[]); // `a` is draining
 
@@ -536,25 +536,21 @@ mod tests {
     #[test]
     fn unlock_signals_only_the_last_lock_on_an_undesired_chunk() {
         let ds = Arc::new("ds".to_owned());
-        let a = ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
-        };
+        let a = ChunkRef::new(
+            ds.clone(),
+            Arc::from("0000000000/0000000000-0000000001-00000000"),
+        );
 
         let mut state = State::new(
             [a.clone()].into_iter().collect(),
             DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
         );
-        assert!(state
-            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
-            .is_some());
+        assert!(state.get_and_lock_chunk(a.clone()).is_some());
         // Unlocking a still-desired chunk doesn't require a removal pass
         assert!(!state.unlock_chunk(&a));
 
-        assert!(state
-            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
-            .is_some());
-        assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_some());
+        assert!(state.get_and_lock_chunk(a.clone()).is_some());
+        assert!(state.get_and_lock_chunk(a.clone()).is_some());
         state.set_desired_chunks(ChunkSet::new());
         assert!(!state.unlock_chunk(&a), "one lock is still held");
         assert!(state.unlock_chunk(&a), "the last lock was released");
@@ -566,10 +562,7 @@ mod tests {
     #[test]
     fn failing_download_is_given_up_after_attempt_cap() {
         let ds = Arc::new("ds".to_owned());
-        let a = ChunkRef {
-            dataset: ds,
-            chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
-        };
+        let a = ChunkRef::new(ds, Arc::from("0000000000/0000000000-0000000001-00000000"));
 
         let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         state.set_desired_chunks([a.clone()].into_iter().collect());
@@ -601,13 +594,15 @@ mod tests {
     #[test]
     fn draining_stops_undesired_chunk_relocking() {
         let ds = Arc::new("ds".to_owned());
-        let chunk_ref = |x| ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from(format!(
-                "0000000000/000000000{}-000000000{}-00000000",
-                x,
-                x + 1
-            )),
+        let chunk_ref = |x| {
+            ChunkRef::new(
+                ds.clone(),
+                Arc::from(format!(
+                    "0000000000/000000000{}-000000000{}-00000000",
+                    x,
+                    x + 1
+                )),
+            )
         };
         let a = chunk_ref(0);
         let b = chunk_ref(1);
@@ -621,14 +616,12 @@ mod tests {
 
         // A query arriving *after* the assignment switch can still lock `a` —
         // the removal pass hasn't run yet
-        assert!(state
-            .get_and_lock_chunk(ds.clone(), a.chunk.clone())
-            .is_some());
+        assert!(state.get_and_lock_chunk(a.clone()).is_some());
 
         // The removal pass starts draining `a`: new locks are refused from here on,
         // and downloads are not held back
         assert_eq!(state.take_removals(), &[]);
-        assert!(state.get_and_lock_chunk(ds, a.chunk.clone()).is_none());
+        assert!(state.get_and_lock_chunk(a.clone()).is_none());
         assert_eq!(state.take_next_download(), Some(b));
 
         // The last unlock releases `a` for deletion; it stays unlockable
@@ -639,13 +632,15 @@ mod tests {
     #[test]
     fn fully_applied_ignores_stale_downloads() {
         let ds = Arc::new("ds".to_owned());
-        let chunk_ref = |x| ChunkRef {
-            dataset: ds.clone(),
-            chunk: Arc::from(format!(
-                "0000000000/000000000{}-000000000{}-00000000",
-                x,
-                x + 1
-            )),
+        let chunk_ref = |x| {
+            ChunkRef::new(
+                ds.clone(),
+                Arc::from(format!(
+                    "0000000000/000000000{}-000000000{}-00000000",
+                    x,
+                    x + 1
+                )),
+            )
         };
         let a = chunk_ref(0);
         let b = chunk_ref(1);

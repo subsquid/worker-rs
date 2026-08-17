@@ -141,9 +141,7 @@ fn apply_op(state: &mut State, shadow: &mut Shadow, op: &Op) {
         Op::Lock { target } => {
             let target = chunk(*target);
             let draining = state.is_draining(&target);
-            if let Some(locked) =
-                state.get_and_lock_chunk(target.dataset.clone(), target.chunk.clone())
-            {
+            if let Some(locked) = state.get_and_lock_chunk(target.clone()) {
                 assert!(!draining, "a draining chunk accepted a new query lock");
                 shadow.locks_held.push(locked);
             }
@@ -264,14 +262,14 @@ fn assert_no_overcommit(state: &State) {
 fn chunk(i: usize) -> ChunkRef {
     // Two datasets so the per-dataset download scheduling is exercised too
     let dataset = if i < UNIVERSE / 2 { "ds0" } else { "ds1" };
-    ChunkRef {
-        dataset: Arc::new(dataset.to_owned()),
-        chunk: Arc::from(format!(
+    ChunkRef::new(
+        Arc::new(dataset.to_owned()),
+        Arc::from(format!(
             "0000000000/000000000{}-000000000{}-00000000",
             i,
             i + 1
         )),
-    }
+    )
 }
 
 fn chunk_set(indexes: &[usize]) -> ChunkSet {

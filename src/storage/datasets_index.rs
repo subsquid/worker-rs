@@ -104,7 +104,12 @@ impl DatasetsIndex {
                 let chunks = worker
                     .iter_chunks_with_ref()
                     .map(|(chunk_ref, chunk)| {
-                        (pool.chunk_ref(chunk.dataset_id(), chunk.id()), chunk_ref)
+                        (
+                            // Legacy assignments have no versions: every chunk is the ingested
+                            // copy, stored where it has always been.
+                            pool.chunk_ref(chunk.dataset_id(), chunk.id(), 0),
+                            chunk_ref,
+                        )
                     })
                     .collect();
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
@@ -137,7 +142,10 @@ impl DatasetsIndex {
                             "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
                         );
                     }
-                    chunks.insert(pool.chunk_ref(chunk.dataset().id(), &id), chunk_ref);
+                    chunks.insert(
+                        pool.chunk_ref(chunk.dataset().id(), &id, chunk.version()),
+                        chunk_ref,
+                    );
                 }
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
             }
@@ -229,10 +237,11 @@ struct StringPool {
 }
 
 impl StringPool {
-    fn chunk_ref(&mut self, dataset: &str, chunk: &str) -> ChunkRef {
+    fn chunk_ref(&mut self, dataset: &str, chunk: &str, version: u32) -> ChunkRef {
         ChunkRef {
             dataset: self.get(dataset),
             chunk: Arc::from(chunk),
+            version,
         }
     }
 

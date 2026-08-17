@@ -572,11 +572,22 @@ impl Harness {
 
     /// The on-disk directory a committed chunk lives in — for comparing against HC-2's ledger.
     pub fn chunk_dir(&self, chunk_id: &str) -> std::path::PathBuf {
+        self.dataset_dir().join(chunk_id)
+    }
+
+    /// Where a chunk republished at `version` lives: its own subtree, so it neither overwrites
+    /// the ingested copy nor is mistaken for it.
+    pub fn chunk_dir_at_version(&self, chunk_id: &str, version: u32) -> std::path::PathBuf {
+        self.dataset_dir()
+            .join(format!("_v{version}"))
+            .join(chunk_id)
+    }
+
+    fn dataset_dir(&self) -> std::path::PathBuf {
         self.data_dir
             .path()
             .join("worker")
             .join(sqd_worker::types::dataset::encode_dataset(DATASET))
-            .join(chunk_id)
     }
 }
 

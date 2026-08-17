@@ -279,12 +279,67 @@ mod worker_assignment {
             index.chunk_schema(&chunk),
             ChunkSchema::Pinned(SchemaId::new(7))
         );
-        let absent = ChunkRef {
-            dataset: std::sync::Arc::new(DATASET.to_owned()),
-            chunk: std::sync::Arc::from("nope"),
-        };
+        let absent = ChunkRef::new(
+            std::sync::Arc::new(DATASET.to_owned()),
+            std::sync::Arc::from("nope"),
+        );
         // Distinct from `Unpinned`: an unassigned chunk must not resolve by dataset type.
         assert_eq!(index.chunk_schema(&absent), ChunkSchema::Unassigned);
+    }
+
+    /// A rewrite is another copy of the same id, so it is keyed by its version and stored under
+    /// it, and its files come from the generation prefix the dataset registers for that version.
+    #[test]
+    fn a_republished_chunk_is_keyed_and_addressed_by_its_version() {
+        const GENERATION: &str = "_bf/01HQZK3M7X8P2NVWTC4RYFGDS9";
+
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+        builder.register_write_schema(7, &["blocks"]).unwrap();
+        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
+        dataset.register_generation(2, GENERATION).unwrap();
+        dataset
+            .new_chunk()
+            .id(CHUNK_ID)
+            .block_range(221000000..=221000649)
+            .size(1000000)
+            .version(2)
+            .write_schema_id(7)
+            .worker_indexes(&[0])
+            .finish()
+            .unwrap();
+        dataset.finish().unwrap();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        let assignment = WorkerAssignment::from_owned(builder.finish()).unwrap();
+
+        let index = DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment),
+            "test-asgn",
+            &keypair,
+            all_schemas_available,
+        )
+        .expect("assignment is well-formed");
+
+        let chunk = index
+            .chunks()
+            .keys()
+            .next()
+            .expect("the chunk is assigned to this worker")
+            .clone();
+        assert_eq!(
+            chunk.chunk.as_ref(),
+            CHUNK_ID,
+            "the id is what it always was"
+        );
+        assert_eq!(chunk.version, 2);
+        assert_eq!(chunk.store_path(), format!("_v2/{CHUNK_ID}"));
+        assert_eq!(
+            index.list_files(&chunk).expect("files resolve")[0]
+                .url
+                .as_str(),
+            format!("{BASE_URL}/{GENERATION}/{CHUNK_ID}/blocks.parquet"),
+        );
     }
 
     /// Otherwise the failure — or a silent wrong-version match — surfaces only at query time.
@@ -356,10 +411,10 @@ mod worker_assignment {
         )
         .unwrap();
 
-        let expected = ChunkRef {
-            dataset: std::sync::Arc::new(DATASET.to_owned()),
-            chunk: std::sync::Arc::from(CHUNK_ID),
-        };
+        let expected = ChunkRef::new(
+            std::sync::Arc::new(DATASET.to_owned()),
+            std::sync::Arc::from(CHUNK_ID),
+        );
         assert!(index.chunks().contains_key(&expected));
         assert_eq!(index.assignment_id(), "test-asgn");
         assert_eq!(index.status(), sqd_assignments::WorkerStatus::Ok);

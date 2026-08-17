@@ -113,8 +113,8 @@ impl Pipeline {
 }
 
 fn chunk() -> ChunkRef {
-    ChunkRef {
-        dataset: Arc::new("ds".to_owned()),
-        chunk: Arc::from("0000000000/0000000000-0000000001-00000000"),
-    }
+    ChunkRef::new(
+        Arc::new("ds".to_owned()),
+        Arc::from("0000000000/0000000000-0000000001-00000000"),
+    )
 }

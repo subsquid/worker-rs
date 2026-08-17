@@ -256,7 +256,7 @@ async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
             .origin
             .served_bytes_in(&generation, &chunk.id, name)
             .unwrap_or_else(|| panic!("IB-41b: {name} was not fetched from the generation"));
-        let on_disk = std::fs::read(h.chunk_dir(&chunk.id).join(name))
+        let on_disk = std::fs::read(h.chunk_dir_at_version(&chunk.id, 1).join(name))
             .unwrap_or_else(|e| panic!("committed chunk is missing {name}: {e}"));
         assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
     }
@@ -265,6 +265,51 @@ async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
         0,
         "the ingested copy is not where a republished chunk lives"
     );
+    assert!(
+        !h.chunk_dir(&chunk.id).exists(),
+        "a rewrite is stored under its version, not where the ingested copy goes"
+    );
+}
+
+/// The reason the version is part of a chunk's identity: an assignment that republishes a chunk
+/// the worker already holds has to make it fetch the new copy. Keyed by id alone, the reconciler
+/// would see a chunk it already has and keep serving bytes the assignment no longer names.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
+    use harness::scheduler::{Format, Scheduler};
+    use harness::Config;
+
+    let mut h = Harness::with_config(Config {
+        format: Format::Worker,
+        ..Config::default()
+    })
+    .await;
+
+    let chunk = corpus::chunk(6_000, 6_009, 1);
+    h.publish_and_apply("assignment-1", &[h.host_chunk(&chunk)])
+        .await;
+    h.await_all_chunks_available().await;
+    assert!(h.chunk_dir(&chunk.id).exists(), "the ingested copy is held");
+
+    // Same chunk, rewritten by a batch job: same id, new version, files under its prefix.
+    h.publish_and_apply("assignment-2", &[h.host_republished_chunk(&chunk, 1)])
+        .await;
+    h.await_all_chunks_available().await;
+
+    let generation = Scheduler::generation_prefix(1);
+    for (name, _) in &chunk.files {
+        let served = h
+            .origin
+            .served_bytes_in(&generation, &chunk.id, name)
+            .unwrap_or_else(|| panic!("the rewrite's {name} was never fetched"));
+        let on_disk = std::fs::read(h.chunk_dir_at_version(&chunk.id, 1).join(name))
+            .unwrap_or_else(|e| panic!("committed rewrite is missing {name}: {e}"));
+        assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
+    }
+    h.await_condition("the superseded copy is removed", || async {
+        !h.chunk_dir(&chunk.id).exists()
+    })
+    .await;
 }
 
 /// FM-53b: without the schema bundle the worker would hold chunks it cannot answer queries about.

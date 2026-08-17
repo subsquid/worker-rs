@@ -371,16 +371,19 @@ impl StateManager {
     }
 
     /// Lock order: index, then state.
+    ///
+    /// A query names no version, so it asks for the ingested copy. A chunk the assignment
+    /// republished at another version is held under that version and does not answer here.
     pub fn get_query_chunk(
         self: Arc<Self>,
         dataset: Dataset,
         chunk_id: &str,
     ) -> Option<QueryChunk<impl FnOnce(PathBuf)>> {
         let index = self.datasets_index.lock();
-        let chunk = self
-            .state
-            .lock()
-            .get_and_lock_chunk(Arc::new(dataset), Arc::from(chunk_id.to_string()))?;
+        let chunk = self.state.lock().get_and_lock_chunk(ChunkRef::new(
+            Arc::new(dataset),
+            Arc::from(chunk_id.to_string()),
+        ))?;
         let schema = index.as_ref().map_or(ChunkSchema::NoAssignment, |index| {
             index.chunk_schema(&chunk)
         });
@@ -440,9 +443,10 @@ impl StateManager {
         if representatives.is_empty() {
             return;
         }
+        let root = self.fs.root.clone();
         tokio::task::spawn_blocking(move || {
             for path in representatives {
-                layout::clean_chunk_ancestors(&path)
+                layout::clean_chunk_ancestors(&path, &root)
                     .unwrap_or_else(|e| warn!("Couldn't clean chunk ancestors: {e:?}"));
             }
         })
@@ -454,7 +458,7 @@ impl StateManager {
         self.fs
             .root
             .join(dataset::encode_dataset(&chunk_ref.dataset))
-            .join(chunk_ref.chunk.as_ref())
+            .join(chunk_ref.store_path().as_ref())
     }
 
     fn mark_current_assignment_settled_if_ready(&self) {
@@ -515,7 +519,7 @@ fn remove_temps(fs: &LocalFs) -> Result<()> {
                 info!("Removing temp dir '{}'", path.display());
                 std::fs::remove_dir_all(&path)
                     .context(format!("Couldn't remove dir '{}'", path.display()))?;
-                layout::clean_chunk_ancestors(PathBuf::try_from(path)?)?;
+                layout::clean_chunk_ancestors(PathBuf::try_from(path)?, &fs.root)?;
             }
             Err(e) => warn!("Couldn't read dir: {}", e),
         };
@@ -533,14 +537,15 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
         }
         let dirname = dir.file_name().unwrap();
         if let Some(dataset) = dataset::decode_dataset(dirname) {
-            let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
+            let chunks: Vec<(u32, DataChunk)> = layout::read_all_versions(&fs.cd(dirname))
                 .await
                 .context(format!("Invalid layout in '{dir}'"))?;
             let dataset = Arc::new(dataset);
-            for chunk in chunks {
+            for (version, chunk) in chunks {
                 result.insert(ChunkRef {
                     dataset: dataset.clone(),
                     chunk: Arc::from(chunk.id),
+                    version,
                 });
             }
         } else {
@@ -634,10 +639,10 @@ mod tests {
 
         // A chunk left on disk, the way a restart finds one.
         let dataset = "s3://test".to_owned();
-        let chunk = ChunkRef {
-            dataset: Arc::new(dataset.clone()),
-            chunk: Arc::from("0000000000/0000000000-0000000010-aaaaaaaa"),
-        };
+        let chunk = ChunkRef::new(
+            Arc::new(dataset.clone()),
+            Arc::from("0000000000/0000000000-0000000010-aaaaaaaa"),
+        );
         *manager.state.lock() = State::new(
             ChunkSet::from([chunk.clone()]),
             crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
@@ -669,6 +674,71 @@ mod tests {
             held.schema,
             ChunkSchema::Unassigned,
             "assignment A covers no chunks, so this one is not ours to answer for"
+        );
+    }
+
+    /// A restart has only the store to go on, so the version has to be recoverable from where the
+    /// chunk sits — otherwise a rewrite would read back as the copy it replaced.
+    #[tokio::test]
+    async fn a_restart_recovers_each_chunk_at_the_version_it_is_stored_under() {
+        use std::sync::Arc;
+
+        use crate::types::state::ChunkRef;
+
+        let dataset = "s3://test".to_owned();
+        let id = "0000000000/0000000000-0000000010-aaaaaaaa";
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let dataset_dir = workdir.join(encode_dataset(&dataset));
+        std::fs::create_dir_all(dataset_dir.join(id)).unwrap();
+        std::fs::create_dir_all(dataset_dir.join("_v4").join(id)).unwrap();
+
+        let manager =
+            test_manager(workdir, Keypair::generate_ed25519().public().to_peer_id()).await;
+
+        let available = manager.state.lock().status().available;
+        let versioned = |version| ChunkRef {
+            dataset: Arc::new(dataset.clone()),
+            chunk: Arc::from(id),
+            version,
+        };
+        assert_eq!(
+            available.into_iter().collect::<Vec<_>>(),
+            [versioned(0), versioned(4)],
+            "one id, two copies — distinct chunks the worker holds independently"
+        );
+    }
+
+    /// The path is the whole mechanism: two copies of one id must not contend for one directory,
+    /// and the ingested one must land where a store written before versions existed has it.
+    #[tokio::test]
+    async fn a_rewrite_is_stored_beside_the_ingested_copy_not_over_it() {
+        use std::sync::Arc;
+
+        use crate::types::state::ChunkRef;
+
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let manager = test_manager(
+            workdir.clone(),
+            Keypair::generate_ed25519().public().to_peer_id(),
+        )
+        .await;
+        let dataset = Arc::new("s3://test".to_owned());
+        let id = "0000000000/0000000000-0000000010-aaaaaaaa";
+        let dataset_dir = workdir.join(encode_dataset(&dataset));
+
+        assert_eq!(
+            manager.chunk_path(&ChunkRef::new(dataset.clone(), Arc::from(id))),
+            dataset_dir.join(id)
+        );
+        assert_eq!(
+            manager.chunk_path(&ChunkRef {
+                dataset,
+                chunk: Arc::from(id),
+                version: 1,
+            }),
+            dataset_dir.join("_v1").join(id)
         );
     }
 
@@ -775,10 +845,7 @@ mod tests {
         use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
-        let chunk = |id: &str| ChunkRef {
-            dataset: Arc::new("ds".to_owned()),
-            chunk: Arc::from(id),
-        };
+        let chunk = |id: &str| ChunkRef::new(Arc::new("ds".to_owned()), Arc::from(id));
         let chunk_a = chunk("a");
         let chunk_b = chunk("b");
 
@@ -858,10 +925,7 @@ mod tests {
         use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
-        let chunk_a = ChunkRef {
-            dataset: Arc::new("ds".to_owned()),
-            chunk: Arc::from("a"),
-        };
+        let chunk_a = ChunkRef::new(Arc::new("ds".to_owned()), Arc::from("a"));
 
         let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         state.set_desired_chunks([chunk_a.clone()].into_iter().collect());

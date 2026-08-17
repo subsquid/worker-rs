@@ -7,9 +7,11 @@ use camino::Utf8Path as Path;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
+use super::local_fs::LocalFs;
 use super::Filesystem;
+use crate::types::state::VERSION_PREFIX;
 
 // TODO: use u64
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
@@ -150,6 +152,38 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
     Ok(entries)
 }
 
+/// Every chunk in a dataset's directory, with the version whose subtree holds it. Version 0 sits
+/// at the root — where a legacy chunk is — so a store written before versions existed reads back
+/// as it always did. Each version is validated on its own, so two versions of one chunk may
+/// legally cover the same block range.
+pub async fn read_all_versions(fs: &LocalFs) -> Result<Vec<(u32, DataChunk)>> {
+    let mut result: Vec<(u32, DataChunk)> = read_all_chunks(fs)
+        .await?
+        .into_iter()
+        .map(|chunk| (0, chunk))
+        .collect();
+    for dir in fs.ls_root().await? {
+        let Some(name) = dir.file_name().filter(|n| n.starts_with(VERSION_PREFIX)) else {
+            continue;
+        };
+        let Some(version) = parse_version_dir(name) else {
+            warn!("Unrecognized version dir in the chunk store: '{dir}'");
+            continue;
+        };
+        let chunks = read_all_chunks(&fs.cd(name))
+            .await
+            .context(format!("Invalid layout in '{dir}'"))?;
+        result.extend(chunks.into_iter().map(|chunk| (version, chunk)));
+    }
+    Ok(result)
+}
+
+fn parse_version_dir(name: &str) -> Option<u32> {
+    let version: u32 = name.strip_prefix(VERSION_PREFIX)?.parse().ok()?;
+    // Version 0 is stored at the root and has no subtree, so `_v0` describes nothing.
+    (version != 0).then_some(version)
+}
+
 pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     let tops = list_top_dirs(fs).await?;
     let mut handles = Vec::new();
@@ -202,9 +236,14 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     Ok(nested_chunks.into_iter().flatten().collect())
 }
 
-pub fn clean_chunk_ancestors(path: impl AsRef<Path>) -> Result<()> {
-    // take(2) limits it to removing range dir and dataset dir but not the workdir itself
-    for dir in path.as_ref().ancestors().skip(1).take(2) {
+/// Removes the chunk's now-empty ancestors — its top directory, the version subtree when it is in
+/// one, and the dataset directory — stopping at the workdir, which is not ours to remove.
+pub fn clean_chunk_ancestors(path: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<()> {
+    let root = root.as_ref();
+    for dir in path.as_ref().ancestors().skip(1) {
+        if dir == root || !dir.starts_with(root) {
+            break;
+        }
         if is_dir_empty(dir) {
             info!("Removing empty dir '{dir}'");
             if let Err(e) = std::fs::remove_dir(dir) {
@@ -353,6 +392,70 @@ mod tests {
             assert_eq!(chunk.first_block, 0u64.into());
             assert_eq!(chunk.last_block, 1000u64.into());
         }
+    }
+
+    /// One id at two versions, which only the subtree tells apart. Legal because each version is
+    /// validated on its own — as one tree they would be an illegal exact-range overlap.
+    #[tokio::test]
+    async fn every_version_subtree_is_read_with_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let id = "0000001000/0000001000-0000001999-abcdef12";
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        std::fs::create_dir_all(root.join("_v3").join(id)).unwrap();
+
+        let mut found = super::read_all_versions(&LocalFs::new(root)).await.unwrap();
+        found.sort_by_key(|(version, _)| *version);
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|(version, chunk)| (*version, chunk.id.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, id), (3, id)],
+            "the version comes from the subtree, the id from the chunk dir"
+        );
+    }
+
+    /// A directory whose name promises a version it doesn't name is not a store the worker can
+    /// read, so its chunks stay invisible rather than being adopted at the wrong version.
+    #[tokio::test]
+    async fn a_dir_that_names_no_version_holds_no_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let id = "0000001000/0000001000-0000001999-abcdef12";
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        // `_v0` too: version 0 lives at the root, so a subtree for it describes nothing.
+        for bad in ["_v0", "_vfoo"] {
+            std::fs::create_dir_all(root.join(bad).join(id)).unwrap();
+        }
+
+        let found = super::read_all_versions(&LocalFs::new(root)).await.unwrap();
+
+        assert_eq!(found.len(), 1, "only the chunk at the root is adopted");
+        assert_eq!(found[0].0, 0);
+    }
+
+    #[test]
+    fn cleaning_ancestors_stops_at_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let chunk = root
+            .join("ds")
+            .join("_v1")
+            .join("0000001000")
+            .join("0000001000-0000001999-abcdef12");
+        std::fs::create_dir_all(&chunk).unwrap();
+        // The state of things right after a removal: the chunk dir is gone, its ancestors aren't.
+        std::fs::remove_dir(&chunk).unwrap();
+
+        super::clean_chunk_ancestors(&chunk, &root).unwrap();
+
+        assert!(
+            !root.join("ds").exists(),
+            "an emptied dataset dir goes, version subtree and all"
+        );
+        assert!(root.exists(), "the workdir is not ours to remove");
     }
 
     #[tokio::test]
