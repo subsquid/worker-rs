@@ -210,9 +210,11 @@ maps that id to a sorted table list which the chunk's `tables_present` bitmap na
 Files are then `base_url + generation prefix + chunk id + <table>.parquet`, where
 `base_url` belongs to the chunk's dataset rather than the chunk, and the prefix is empty
 at `version` 0 — the ingested copy — and otherwise comes from the dataset's `generations`
-entry naming that version. `[MUST — intent, currently violated: GAP-34]` a version that
-moves under a chunk already held re-fetches it; today the chunk's id alone identifies it,
-so the old copy stays. A chunk carries neither its id nor its dataset: both are
+entry naming that version. The version is part of the chunk's identity (DEF-4), so a chunk
+the assignment republishes is fetched afresh, stored apart from the copy it replaces
+(DEF-6), and the superseded copy is removed by ordinary reconciliation. A query naming no
+version asks for version 0, so a rewrite is held but unreachable until portals name one
+(GAP-34). A chunk carries neither its id nor its dataset: both are
 rebuilt from the columns holding them, so an id that will not assemble is a malformed
 document. A chunk whose `write_schema_id` has no roster, or whose schema the bundle
 published with the document doesn't carry,

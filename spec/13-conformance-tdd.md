@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
 Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-18**
-(baseline commit `a1ea825`). Statuses: **C** covered · **P** partial · **U** unchecked;
+(baseline commit `f86047c`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -270,7 +270,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 | GAP-31 | The two oversize paths emit divergent `server_error` strings (`Response too large` at the engine's uncompressed cap vs `query result too large` at the encoded-message downgrade); portals special-case only the former, so the latter degrades to a terminal generic failure client-side | RP-14, IB-13 | P2 | drive both oversize paths; assert one verdict surface |
 | GAP-32 | Boundary emission (RP-11) is provided by the legacy engine's weight-0 pinning but is unverified for the dynamic engine; if the dynamic engine returns zero records for an evaluated-but-unmatched range, portal-side client resumption breaks the moment portals adopt it | RP-11 (boundary emission) | P1 | both engines: a selective query matching nothing over an evaluated range returns the boundary records, last record = coverage cursor |
 | GAP-33 | Freshness rejections blame the client: a timestamp outside P-TS-WINDOW — a verdict whose reference input is the worker's own clock — is typed `bad_request`, which routing clients treat as terminal, so one skewed worker converts valid queries into client-visible terminal errors with no reroute; no skew signal or alarm exists | INV-26, RP-20 (freshness verdict), FM-55, OB-15 | P1 | CT-4: skew the SUT clock past P-TS-WINDOW; a valid signed query must yield `server_error` (never `bad_request`), OB-15 signals must move, alarm past P-SKEW-ALARM |
-| GAP-34 | A chunk's `version` (IB-41b) is not part of its local identity: chunks are keyed by dataset and id, both of which a rewrite keeps. An assignment that republishes a held chunk at a new version — addressed under a different generation prefix — therefore leaves the old copy in place and keeps serving it. A chunk fetched for the first time resolves its version correctly, so this is a held chunk going stale silently, not a wrong download | IB-41b, INV-13 | P1 | HC-1 republishes a held chunk at version 1 under a generation prefix: the worker must re-fetch it, or refuse the assignment — never keep the version-0 bytes |
+| GAP-34 | A query names no version, so it always asks for version 0 (DEF-4). While an assignment holds a chunk at a rewrite's version the worker has it, reports it available in the DEF-13 map, and answers `not_found` for the id a portal actually sends — honest about what it holds, useless to the client, and indistinguishable from data it never had. Latent: it needs the scheduler to publish a non-zero version | IB-41b, RP-20 | P1 | HC-1 assigns a chunk at version 1; a query naming that id must either resolve the assigned version or say something a portal can act on |
 
 ## Build order
 

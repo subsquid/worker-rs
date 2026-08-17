@@ -20,9 +20,14 @@ truth for the chunk's range on the read path (ADR-4); the sole sanctioned parse 
 into a range is the metering chip computation (DEF-24 — a known architectural debt,
 GAP-13).
 
-**DEF-4 — Chunk ref.** The pair ⟨dataset, chunk id⟩ — the global key of a chunk. All
-state sets (DEF-10) contain chunk refs. The worker orders chunk refs lexicographically
-by ⟨dataset, chunk id⟩; this ordering defines the availability map (DEF-13).
+**DEF-4 — Chunk ref.** The triple ⟨dataset, chunk id, version⟩ — the global key of a
+chunk. The **version** says which copy: 0 is what ingest wrote, anything else a batch
+job's rewrite of it, published under its own storage prefix (IB-41b). Legacy assignments
+carry no versions, so every chunk of one is version 0, and a query naming no version asks
+for 0. All state sets (DEF-10) contain chunk refs. The worker orders chunk refs
+lexicographically by ⟨dataset, chunk id, version⟩ — version last, so a rewrite sorts
+beside the copy it replaces rather than after every chunk in its dataset; this ordering
+defines the availability map (DEF-13).
 
 **DEF-5 — Assignment.** A network-published document: an identifier (opaque, ADR-16),
 per-dataset chunk lists (each chunk with its file names, download addresses, and
@@ -30,8 +35,12 @@ declared size), a worker roster with per-worker chunk subsets and an assessed **
 state** (ok / unreliable / deprecated version / unsupported version), and per-worker
 encrypted download credentials. The worker's slice: the chunk refs listed for it.
 
-**DEF-6 — Chunk store.** The worker's persistent store of chunk data. Its layout
-invariants (no partial range overlaps within a dataset; identical-range forks legal) are
+**DEF-6 — Chunk store.** The worker's persistent store of chunk data. A chunk at version 0
+is stored under its dataset exactly where it always was, so a store written before versions
+existed adopts unchanged; every other version is stored under a subtree of its own, so two
+copies of one id never contend for one directory and a restart can tell which copy it
+holds. Its layout
+invariants (no partial range overlaps within a dataset and version; identical-range forks legal) are
 INV-3; the store is the single source of truth for what is available (INV-2) — there is
 no separate manifest or journal.
 
@@ -76,8 +85,9 @@ persistent; recovery resets `L = ∅`.
 
 **DEF-13 — Unavailability map.** A bit sequence with one bit per desired chunk in
 chunk-ref order (DEF-4), bit = 1 iff the chunk is not available. Reported in the
-heartbeat (RP-21). ⚠ Whether this order matches the scheduler's interpretation for
-suffix forks is OQ-1.
+heartbeat (RP-21). Because DEF-4 sorts on the version last, and an assignment names one
+version per chunk id, a reader that knows only the ids computes the same order. ⚠ Whether
+this order matches the scheduler's interpretation for suffix forks is OQ-1.
 
 **DEF-14 — Log cursor.** The pair ⟨timestamp, query id⟩ under lexicographic order; the
 resumption token of log delivery (RP-22). Records are served only once their timestamp
