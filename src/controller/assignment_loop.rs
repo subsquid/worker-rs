@@ -267,13 +267,18 @@ impl AssignmentApplier {
             }
         }
 
-        let worker = Arc::clone(&self.worker);
-        tokio::task::spawn_blocking(move || {
-            worker.register_prepared_assignment(prepared_assignment)
-        })
-        .instrument(tracing::info_span!("set_assignment", id = %update.id))
-        .await
-        .expect("register_assignment shouldn't panic");
+        // A bundle-only publication still revalidates the complete pair, but re-registering the
+        // assignment would reset its exhausted download budget even though its document did not
+        // change. Assignment ids are content identities, so the active id makes this a no-op.
+        if self.worker.registered_assignment_id().as_deref() != Some(update.id.as_str()) {
+            let worker = Arc::clone(&self.worker);
+            tokio::task::spawn_blocking(move || {
+                worker.register_prepared_assignment(prepared_assignment)
+            })
+            .instrument(tracing::info_span!("set_assignment", id = %update.id))
+            .await
+            .expect("register_assignment shouldn't panic");
+        }
 
         ApplyOutcome::Applied
     }
