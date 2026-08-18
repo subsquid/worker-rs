@@ -153,7 +153,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
 | REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `query_concurrency`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
-| REQ-24 | CT-4/9 | U⊘ | known-violated (GAP-2, GAP-4) |
+| REQ-24 | CT-4/9 | P⊘ | one malformed input is now survivable and asserted (FM-11's unusable address); the rest of GAP-2 and GAP-4 stand |
 | REQ-25 | CT-4 | U⊘ | no floor exists (GAP-3) |
 
 ### Properties
@@ -205,7 +205,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-1 | CT-4/9 | U⊘ | known-violated (GAP-2) |
 | FM-2..3 | CT-4 | U | |
 | FM-10 | CT-4 | U | |
-| FM-11 | CT-4 | U⊘ | panic path (GAP-2) |
+| FM-11 | CT-4 | P | an unusable address is driven end to end: the worker gives the chunk up, moves OB-17, and converges on the next assignment. The credential half is FM-12's whole-document path, since neither format carries credentials per chunk |
 | FM-12 | CT-4 | U⊘ | unbounded intake (GAP-4) |
 | FM-13 | CT-4 | U⊘ | no floor (GAP-3) |
 | FM-14 | CT-7 | U⊘ | no age signal (GAP-23) |
@@ -239,7 +239,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | GAP | Statement | Violates | Pri | First test |
 |---|---|---|---|---|
-| GAP-2 | Externally supplied content can terminate the process: a malformed file address in an assignment panics the reconciler; a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic | FM-1, FM-11, FM-52, REQ-24 | P0 | HC-1 assignment containing one bad URL: worker must survive, alarm, and keep serving |
+| GAP-2 | Externally supplied content can terminate the process: a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic. The malformed-address clause is closed — an unaddressable chunk now fails on its own (FM-11, OB-17) | FM-1, FM-52, REQ-24 | P0 | HC-1 roster carrying an unparseable peer id: worker must reject the document, alarm, and keep serving |
 | GAP-3 | No reconciliation deletion floor: one empty/short assignment wipes the whole store next pass | REQ-25, FM-13, RS-2 | P0 | publish an assignment with zero chunks for the worker: store must survive with an alarm |
 | GAP-4 | Assignment intake is unverified and unbounded: unvalidated binary document parsed unsafely; decompression size uncapped | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
 | GAP-5 | No payload/content verification anywhere: corrupt origin bytes commit (INV-13), power-loss-truncated chunks are adopted (CN-4), and local corruption surfaces as client-blamed `bad_request` (FM-32) | INV-13, CN-4, FM-22, FM-32 | P1 | HC-2 corrupts one file's bytes: commit must be refused (fails today) |
@@ -309,7 +309,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside and able to republish a chunk at a version whose files live under a generation prefix (IB-41b). Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside and able to republish a chunk at a version whose files live under a generation prefix (IB-41b). Fault corpus holds 3 of the CT-4 cases (bad file URL and empty slice, both driven by `e2e`; truncated document, wired but undriven) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

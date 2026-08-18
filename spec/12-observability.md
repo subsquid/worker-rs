@@ -65,6 +65,14 @@ worker-clock offset from authenticated queries' timestamps, so a skewed worker i
 diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12) has
 a level-readable witness. Scalar signals only (OB-14).
 
+**OB-17 — Unaddressable chunks.** [MUST] A counter of chunks the applied assignment
+carries no usable address for: a base url that will not parse, or a version whose dataset
+registers no generation (FM-11). It must be distinguishable from an ordinary download
+failure — both leave the chunk missing and both move `chunks_failed_download`, but one is
+an origin that may come back and the other is a document that will still be unusable after
+every retry, so without the distinction a scheduler publishing bad addresses reads exactly
+like a flaky origin. Scalar signal only (OB-14). Bound in IB-31.
+
 **OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, a counter of
 failures to load one, and a counter of assignments refused because the bundle published
 with them did not cover them (FM-53c). The last is the scheduler's invariant breaking

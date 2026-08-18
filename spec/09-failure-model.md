@@ -38,7 +38,7 @@ budget → that operator (INV-35); one assignment document → intake of that do
 | # | Fault | Required response |
 |---|---|---|
 | FM-10 | network-state/assignment endpoint unreachable or slow | mask: retry per WP-1; previous assignment stays in force; alarm past P-STALL-MAX (LIV-13) |
-| FM-11 | document with malformed per-chunk entries (bad address, bad credential) | degrade: affected chunks fail per-chunk (WP-2); rest of the document applies; alarm. [Currently: process panic — GAP-2] |
+| FM-11 | document with malformed per-chunk entries (bad address, bad credential) | degrade: affected chunks fail per-chunk (WP-2); rest of the document applies; alarm (OB-17). Credentials are per worker in both formats, not per chunk, so one that won't decrypt is FM-12's whole-document rejection |
 | FM-12 | document malformed as a whole, oversized, undecodable, or missing this worker | fail-safe + alarm: reject whole document (WP-2); keep prior assignment; keep serving. [Oversize unbounded today — GAP-4] |
 | FM-13 | equivocating/regressive document (wipes the store, flip-flops) | degrade + alarm: REQ-25 deletion floor holds data; application order is arrival order (NG2) — flip-flops churn but never corrupt |
 | FM-14 | stale document served long-term (worker dropped or endpoint frozen) | degrade + alarm: serve last-applied data honestly; assignment-age observable (OB-13) rises. [No age alarm exists today — GAP-23] |
