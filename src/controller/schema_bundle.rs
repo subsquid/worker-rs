@@ -15,8 +15,7 @@ use crate::metrics;
 use crate::query::result::QueryError;
 use crate::types::schema::SchemaId;
 
-/// Caps the compressed download, and — once the hash has been verified — everything the archive
-/// decompresses, whether or not it is kept.
+/// Maximum compressed and decompressed bundle size.
 const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 
 const TEMP_PREFIX: &str = "temp-";
@@ -247,10 +246,7 @@ impl SchemaRegistry {
         self.snapshot.load_full()
     }
 
-    /// The `Other` verdict below is load-bearing beyond "no schemas yet": it is what a chunk with
-    /// no pinned id resolves to under `--assignment-source worker`, where nothing ever fills this
-    /// index (IB-41b). Turning it into a client-facing error would blame a portal for a chunk the
-    /// worker holds and cannot describe.
+    /// Missing type schemas are server errors because worker-mode bundles populate only IDs.
     pub fn get_by_type(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
         let snapshot = self.snapshot();
         if !snapshot.legacy_loaded {
@@ -495,10 +491,7 @@ fn read_store(dir: &Utf8Path) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDes
             Ok(description) => {
                 schemas.insert(id, Arc::new(description));
             }
-            // Leaving it in place would wedge the store: the worker can't answer a query with a
-            // schema it can't read, and every later bundle carrying the id would compare against
-            // these bytes and refuse the whole merge as a republished id (ADR-21). Removing it
-            // leaves the store smaller rather than false (IB-44b), so a bundle reinstalls the id.
+            // Remove unreadable files so a later bundle can reinstall the ID.
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = ?e, "Removing an unreadable stored schema");
                 if let Err(e) = std::fs::remove_file(&path) {
@@ -544,13 +537,7 @@ async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> anyhow::Result<TempDir> 
     .context("unpack task panicked")?
 }
 
-/// Fails a read once `limit` decompressed bytes have passed through it.
-///
-/// The tar reader skips an entry it has no use for by *reading* it — a gzip stream is not
-/// seekable — so an entry is decompressed whether or not anything is written from it. Counting
-/// the schemas actually kept therefore bounds the store while leaving the work unbounded: one
-/// oversized member under a name we ignore decompresses in full. Counting here bounds both, and
-/// does not take the archive's word for its own entry sizes.
+/// Limits all decompressed bytes, including ignored tar entries.
 struct Bounded<R> {
     inner: R,
     limit: usize,
@@ -571,8 +558,7 @@ impl<R: std::io::Read> std::io::Read for Bounded<R> {
     }
 }
 
-/// Extracts root-level `<id>.yaml` files and ignores unknown entries. `limit` bounds everything
-/// decompressed, not just what is written.
+/// Extracts root-level `<id>.yaml` files and ignores other entries.
 fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> anyhow::Result<()> {
     let mut archive = tar::Archive::new(Bounded {
         inner: flate2::read::GzDecoder::new(bytes),
@@ -672,8 +658,6 @@ async fn classify_cached(
     .context("schema cache comparison task panicked")?
 }
 
-/// Shared with the assignment loop's tests, so one definition of "a well-formed bundle" serves
-/// both.
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) const SCHEMA: &str = r#"
@@ -768,11 +752,6 @@ mod tests {
         assert_eq!(schema_id(".yaml"), None);
     }
 
-    /// The tar reader skips an entry it has no use for by reading it, so an ignored member is
-    /// decompressed in full. Counting only the schemas kept bounded the store while leaving the
-    /// work unbounded — one oversized member under an ignored name burns a blocking thread for
-    /// as long as it takes to inflate, which the hash check does not prevent because the bundle
-    /// is exactly what the network state advertised.
     #[test]
     fn an_ignored_entry_counts_against_the_unpacked_cap() {
         let dir = tempfile::tempdir().unwrap();
@@ -1135,10 +1114,7 @@ mod tests {
         assert_eq!(stored(&dir), vec!["7.yaml"], "the unreadable one is gone");
     }
 
-    /// An unclean shutdown can leave a zero-length file behind: schemas are written into
-    /// staging and renamed into the store with no fsync. Adopting nothing from it is not
-    /// enough — while it sits there it is neither absent nor equal, so it reads as a
-    /// republished id and refuses every bundle that carries it, for good.
+    /// An unreadable cached schema must not block its ID from being reinstalled.
     #[tokio::test]
     async fn a_bundle_reinstalls_a_schema_the_store_could_not_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -1167,8 +1143,6 @@ mod tests {
         );
     }
 
-    /// The repair is only for what the worker couldn't read: a schema it did adopt still
-    /// holds the id against a bundle that changes its meaning (ADR-21).
     #[tokio::test]
     async fn an_adopted_schema_still_refuses_a_republished_id() {
         let dir = tempfile::tempdir().unwrap();

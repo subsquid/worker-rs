@@ -27,20 +27,11 @@ pub struct DatasetsIndex {
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
 }
 
-/// How a query resolves the schema for a chunk the worker holds.
-///
-/// The store decides what can be answered — the layout scan recovers every chunk and its version,
-/// so a locked chunk has bytes on disk whatever the assignment says. This only decides how to read
-/// them, which is why there is no "not ours to serve" state: an assignment describes what the
-/// worker should hold, not what it may answer for (INV-2).
+/// How a query resolves the schema for a stored chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSchema {
-    /// The assignment names the schema the chunk was written with.
     Pinned(SchemaId),
-    /// Nothing names one, so the query's dataset type does. Sound wherever the type registry is
-    /// loaded at all: only the legacy CDN manifest fills it, and that carries one schema per
-    /// type. A bundle installs by id alone, so this can never reach for a bundle's schema and
-    /// pick the wrong version of a type.
+    /// Resolve through the legacy type registry.
     ByType,
 }
 
@@ -50,19 +41,12 @@ pub struct RemoteFile {
     pub name: String,
 }
 
-/// Why the assignment can't say where a chunk's files live.
-///
-/// The two are told apart because they are answers to different questions: one says the caller
-/// asked about a chunk this assignment never mentioned, the other that the document itself is
-/// unusable for a chunk it does mention (FM-11).
+/// Why an assignment cannot locate a chunk's files.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UnresolvedChunk {
-    /// The ref didn't come from this assignment — the caller holds state this index never
-    /// produced.
     #[error("chunk is not in this assignment")]
     NotAssigned,
-    /// The document mentions the chunk but carries no usable address for it: a base url that
-    /// won't parse, a version whose dataset registers no generation, a hash that isn't UTF-8.
+    /// The assigned chunk has no usable address.
     #[error("{0}")]
     NoAddress(String),
 }
@@ -95,8 +79,6 @@ impl DatasetsIndex {
                 let chunk = assignment
                     .get_chunk(*chunk_ref)
                     .ok_or(UnresolvedChunk::NotAssigned)?;
-                // The chunk composes its own url: the dataset's base, the prefix of the
-                // generation its `version` names, then the chunk id.
                 let chunk_url = chunk.url().ok_or_else(|| {
                     UnresolvedChunk::NoAddress(format!(
                         "chunk {} of dataset '{}' is at version {}, which the assignment gives no \
@@ -163,8 +145,6 @@ impl DatasetsIndex {
                 };
                 let mut chunks = HashMap::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-                    // Rebuilt from the chunk's columns, so an id that won't assemble is a
-                    // malformed document rather than a missing field.
                     let Some(id) = chunk.id() else {
                         anyhow::bail!(
                             "chunk {} of dataset '{}' has a hash that isn't UTF-8",
