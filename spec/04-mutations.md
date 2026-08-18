@@ -62,7 +62,9 @@ queue; the queue MAY coalesce to the newest.
 *Post:* `X′ = new document`, `N′ = its slice for this worker`, `P′ = N′ \ A \ D`.
 `A`, `D`, `L`, `Q` unchanged — application never deletes or interrupts anything by
 itself; deletions happen only via subsequent WP-14. Applying a document yielding
-`N′ = N` is a no-op apart from `X′`.
+`N′ = N` changes `X′` and, if fetches were given up under the previous budget (WP-13),
+returns them to `P′` — an unchanged slice is not a no-op for reconciliation, which the
+application must wake — and is otherwise a no-op.
 
 **WP-11 — fetch-start.**
 *Pre:* `c ∈ P`, `|D| < P-DL-CONC`.

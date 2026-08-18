@@ -273,13 +273,13 @@ impl StateManager {
         let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
-        match state.set_desired_chunks(chunks) {
-            UpdateStatus::Unchanged => {}
-            UpdateStatus::Updated => {
-                info!("Got new assignment");
-                self.notify.notify_one();
-            }
+        if let UpdateStatus::Updated = state.set_desired_chunks(chunks) {
+            info!("Got new assignment");
         }
+        // Registration always wakes the reconciler: an unchanged slice still restores the budget
+        // of chunks given up on (WP-13), and only the reconciler starts them. A spurious wake is
+        // one idle pass.
+        self.notify.notify_one();
         *index = Some(datasets_index);
         {
             assignment_application.current_assignment_id = Some(current_assignment_id);
@@ -743,6 +743,79 @@ mod tests {
             manager.current_status().await.assignment_id.as_deref(),
             Some("A")
         );
+    }
+
+    /// One chunk this worker holds, at a dataset address that doesn't parse (FM-11).
+    fn unaddressable_assignment_for(
+        peer_id: sqd_contract_client::PeerId,
+    ) -> sqd_assignments::Assignment {
+        let mut builder =
+            sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
+        builder
+            .new_chunk()
+            .id("0000000000/0000000000-0000000010-aaaaaaaa")
+            .dataset_id("s3://test")
+            .dataset_base_url("not a url")
+            .block_range(0..=10)
+            .size(1)
+            .worker_indexes(&[0])
+            .files(&["blocks.parquet".to_owned()])
+            .finish()
+            .unwrap();
+        builder.finish_dataset();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0]);
+        sqd_assignments::Assignment::from_owned(builder.finish()).unwrap()
+    }
+
+    /// A successor that changes nothing about the slice still restores the budget of chunks
+    /// given up on (WP-13), and only the reconciler can spend it: registering it must wake the
+    /// loop, or the chunk is never retried and the assignment never settles.
+    #[tokio::test]
+    async fn a_same_slice_successor_wakes_the_reconciler() {
+        use std::sync::Arc;
+
+        use super::AssignmentOutcome;
+
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let manager = Arc::new(test_manager(workdir, worker_id).await);
+        let token = CancellationToken::new();
+        let running = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let token = token.clone();
+            async move { manager.run(token).await }
+        });
+
+        for id in ["A", "B"] {
+            manager.set_prepared_assignment(
+                manager
+                    .prepare_assignment(
+                        AssignmentBlob::Legacy(unaddressable_assignment_for(worker_id)),
+                        id,
+                        &keypair,
+                        no_schemas_needed,
+                    )
+                    .expect("the document lists this worker"),
+            );
+            let verdict = tokio::time::timeout(
+                Duration::from_secs(5),
+                manager.wait_until_assignment_settled(id, token.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("assignment {id} was never judged: the reconciler was not woken")
+            });
+            assert_eq!(
+                verdict,
+                Some(AssignmentOutcome::Stalled),
+                "the chunk has no address, so {id} stalls — but it is judged"
+            );
+        }
+
+        token.cancel();
+        running.await.unwrap();
     }
 
     /// Documents the current fatal response to a chunk-removal failure.

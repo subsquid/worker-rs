@@ -233,10 +233,18 @@ async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
         "there was no address to fetch from"
     );
 
-    let usable = corpus::chunk(7_010, 7_019, 1);
-    h.publish_and_apply("assignment-2", &[h.host_chunk(&usable)])
+    // The recovery WP-13 promises: the scheduler corrects the address, which changes nothing
+    // about the slice — same chunk, same version — and the next assignment restores the budget
+    // the chunk was given up under. Only the reconciler can spend it, so registration must wake
+    // it even though the desired set is unchanged.
+    h.publish_and_apply("assignment-2", &[h.host_chunk(&unusable)])
         .await;
     h.await_all_chunks_available().await;
+    assert_eq!(
+        h.origin.fetch_count(&unusable.id, "blocks.parquet"),
+        1,
+        "the corrected document is fetched from, once"
+    );
 }
 
 /// Worker assignments derive files and query schemas from the write-schema roster.
