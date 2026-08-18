@@ -176,6 +176,44 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
+/// FM-11 / GAP-2: a chunk whose address the document doesn't yield fails on its own — the rest of
+/// the assignment still applies and the worker keeps working. It used to panic the state loop,
+/// which takes the whole process down over one unusable row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
+    use harness::scheduler::AssignmentFault;
+
+    let mut h = Harness::start().await;
+
+    let unusable = corpus::chunk(7_000, 7_009, 1);
+    let before = sqd_worker::metrics::CHUNKS_UNADDRESSABLE.get();
+    h.publish(
+        "assignment-1",
+        &[h.host_chunk(&unusable)],
+        AssignmentFault::UnparseableFileUrl,
+    );
+    assert!(
+        h.poll_and_apply().await,
+        "the document is well-formed; only one chunk's address isn't"
+    );
+    h.await_condition("the unusable chunk is given up on", || async {
+        sqd_worker::metrics::CHUNKS_UNADDRESSABLE.get() > before
+    })
+    .await;
+    assert_eq!(
+        h.origin.fetch_count(&unusable.id, "blocks.parquet"),
+        0,
+        "there was no address to fetch from"
+    );
+
+    // The proof that the loop survived: a later assignment still converges, which only a running
+    // state loop can do.
+    let usable = corpus::chunk(7_010, 7_019, 1);
+    h.publish_and_apply("assignment-2", &[h.host_chunk(&usable)])
+        .await;
+    h.await_all_chunks_available().await;
+}
+
 /// IB-40b/41b/44b: the file list is derived from the assignment's inline schema roster, and the
 /// query executes against the chunk's `write_schema_id`, not the query's dataset type.
 #[tokio::test(flavor = "multi_thread")]
