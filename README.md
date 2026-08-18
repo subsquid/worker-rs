@@ -70,8 +70,9 @@ no fallback if `worker_assignment` is absent. This changes five things:
 - **A chunk may be republished.** Each chunk carries a `version`: 0 is the copy ingest wrote,
   anything else a batch job's rewrite, stored by the network under that generation's own prefix.
   The version is part of the chunk's identity, so a rewrite is downloaded rather than assumed to
-  be the copy already held, and it is stored under `<data-dir>/<dataset>/_v<version>/<chunk id>`
-  while version 0 stays where it has always been. Queries name no version yet, so they always ask
+  be the copy already held, and it is stored under
+  `<data-dir>/worker/<base64url(dataset)>/_v<version>/<chunk id>` while version 0 stays where it
+  has always been. Queries name no version yet, so they always ask
   for version 0: while a chunk is assigned at a rewrite's version, the worker holds it but has no
   way to serve it.
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
@@ -87,7 +88,9 @@ no fallback if `worker_assignment` is absent. This changes five things:
   from earlier bundles keep answering queries, but do not stand in for the bundle a new
   assignment came with — applying half a pair would report an assignment as held that the worker
   only half-holds. A bundle that does not cover its assignment is a scheduler fault and raises
-  `schema_bundle_mismatches`.
+  `schema_bundle_mismatches`. Correcting the bundle is enough to recover: the worker reads the
+  assignment pointer and the bundle as one announcement, so a new bundle hash re-offers the
+  assignment with it and the scheduler need not publish a new assignment id.
 - **Assignments are applied strictly in order**, each waiting for the previous one to settle,
   instead of immediately on arrival.
 

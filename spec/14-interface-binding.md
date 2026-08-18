@@ -198,11 +198,21 @@ These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are uncha
 `worker_assignment: {id, fb_url_v1, effective_from}` and `schema_bundle: {hash, url}`;
 both fields are mandatory when the worker consumes `worker_assignment`; a state missing either
 is not applicable. The legacy `assignment` key is ignored and never falls back to. A network
-mid-migration may publish either pointer for workers in the corresponding mode. The two worker
-references are versioned independently: either can
-change without the other, and each is deduplicated against what the worker last *read* — not
-against what it applied. Whether an announced pair applied, and whether another attempt could
-end differently, is knowable only where it was attempted (WP-1, FM-12).
+mid-migration may publish either pointer for workers in the corresponding mode. The two
+references move independently on the wire — either can change without the other — but the worker
+reads them as one announcement: a change to either half re-announces the **pair**, deduplicated
+against the pair last *read*, not against what it applied. Whether an announced pair applied, and
+whether another attempt could end differently, is knowable only where it was attempted (WP-1,
+FM-12).
+
+Reading them as a pair is what makes coverage decidable: the bundle is judged against the document
+it accompanies (ADR-21) rather than against whichever index happens to be in force, and an
+assignment refused for coverage (FM-53c) is reconsidered as soon as its bundle is corrected, since
+the correction *is* a new pair. It costs a re-fetch and re-validation of the document whenever only
+the bundle moved. Registration is skipped when the id has not changed, so the download budget of an
+assignment already in force survives a bundle correction; that skip assumes an id names one
+document for all time, which ADR-16 does not guarantee — ids are opaque, not content-addressed, so
+a scheduler republishing different content under one id would leave the worker on the old index.
 
 **IB-41b — Worker assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
 FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no file
