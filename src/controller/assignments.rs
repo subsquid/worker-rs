@@ -113,9 +113,17 @@ async fn poll_network_state(
         );
         return Ok(None);
     };
+    // Half a pair. The state parsed; it just isn't applicable, so it is answered like a state
+    // carrying no assignment at all — nothing applied, re-read at the poll cadence, no backoff
+    // ladder. An incomplete state is a legal condition of a rolling migration (IB-40b), not a
+    // failure to read one, and the scheduler is who resolves it (FM-53d).
     if assignment_source == AssignmentSource::Worker && published_bundle.is_none() {
-        metrics::SCHEMA_BUNDLE_FAILURES.inc();
-        anyhow::bail!("network state publishes a worker assignment but no schema bundle");
+        metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+        tracing::warn!(
+            assignment_id = %assignment.id,
+            "Network state publishes a worker assignment but no schema bundle; waiting"
+        );
+        return Ok(None);
     }
 
     published_update(assignment, published_bundle, announced)
@@ -404,28 +412,40 @@ mod tests {
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
     }
 
+    /// Erroring here would take the poll off its tick and onto the fetch-retry ladder, which
+    /// doubles to `assignment_fetch_max_delay` — hours of not noticing a scheduler that has
+    /// already fixed the state. A half-published state is a legal condition of a rolling
+    /// migration, so it is a non-event like any other unchanged poll.
     #[tokio::test]
-    async fn worker_mode_requires_a_bundle_when_the_assignment_is_unchanged() {
+    async fn a_state_missing_the_bundle_is_not_applicable_rather_than_an_error() {
         let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#;
         let url = serve_responses(vec![http_ok(state)]).await;
         let mut announced = NetworkPair {
             assignment_id: Some("assignment-1".to_owned()),
             bundle_hash: Some(hash(0xaa)),
         };
+        let mismatches_before = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
 
-        let error = match poll_network_state(
+        let update = poll_network_state(
             &url,
             &test_client(),
             AssignmentSource::Worker,
             &mut announced,
         )
         .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("missing bundle must be rejected"),
-        };
+        .expect("a half-published state is not a failure to read one");
 
-        assert!(error.to_string().contains("no schema bundle"));
+        assert!(update.is_none(), "half a pair is not applicable");
+        assert_eq!(
+            metrics::SCHEMA_BUNDLE_MISMATCHES.get(),
+            mismatches_before + 1,
+            "the scheduler is who resolves it, so it counts with the other pair faults"
+        );
+        assert_eq!(
+            announced.bundle_hash,
+            Some(hash(0xaa)),
+            "nothing was announced, so the pair is offered whole when the bundle returns"
+        );
     }
 
     #[tokio::test]

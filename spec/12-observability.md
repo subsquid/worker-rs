@@ -82,8 +82,9 @@ every retry, so without the distinction a scheduler publishing bad addresses rea
 like a flaky origin. Scalar signal only (OB-14). Bound in IB-31.
 
 **OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, a counter of
-failures to load one, and a counter of assignments refused because the bundle published
-with them did not cover them (FM-53c). The last is the scheduler's invariant breaking
+failures to load one, and a counter of **pairs the scheduler published that do not hold
+together**: an assignment refused because its bundle does not cover it (FM-53c), or a state
+carrying only one half (FM-53d). The last is the scheduler's invariant breaking
 rather than the worker's, and it must be distinguishable from an ordinary intake failure —
 a worker refusing every assignment because the pair it is served diverges looks identical
 to one that cannot reach the network. Under `--assignment-source worker` a bundle that never

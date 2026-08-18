@@ -172,7 +172,7 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
     );
     registry.register(
         "schema_bundle_mismatches",
-        "Number of assignments refused because their schema bundle did not cover them",
+        "Number of pairs the scheduler published that do not hold together",
         SCHEMA_BUNDLE_MISMATCHES.clone(),
     );
 
