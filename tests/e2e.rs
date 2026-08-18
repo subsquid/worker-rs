@@ -176,6 +176,47 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
+/// IB-13/IB-41b: a query names which copy of the chunk to read, so a rewrite is reachable. The
+/// field is a bare `uint32`, so a portal that names nothing asks for the ingested copy — and gets
+/// `not_found` here, since only the rewrite was ever assigned.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_format_serves_the_version_the_query_names() {
+    use harness::scheduler::Format;
+    use harness::Config;
+
+    let mut h = Harness::with_config(Config {
+        format: Format::Worker,
+        ..Config::default()
+    })
+    .await;
+
+    let chunk = corpus::chunk(8_000, 8_009, 1);
+    h.publish_and_apply("assignment-1", &[h.host_republished_chunk(&chunk, 1)])
+        .await;
+    h.await_all_chunks_available().await;
+
+    let query = h.all_blocks_query_at_version(&chunk.id, (8_000, 8_009), 1);
+    let served = h.serve(query.clone()).await;
+    let (response, _) = served.expect_admitted();
+    validators::query_response(response, &query, h.worker_id).assert_none("query response");
+    let query_result::Result::Ok(ok) = response.result.as_ref().unwrap() else {
+        panic!("expected a successful result, got {:?}", response.result);
+    };
+    assert_eq!(ok.last_block, 8_009, "the rewrite answered the query");
+
+    let unversioned = h.all_blocks_query(&chunk.id, (8_000, 8_009));
+    let served = h.serve(unversioned).await;
+    let (response, _) = served.expect_admitted();
+    let query_result::Result::Err(err) = response.result.as_ref().unwrap() else {
+        panic!("expected an error, got {:?}", response.result);
+    };
+    assert!(
+        matches!(err.err, Some(sqd_messages::query_error::Err::NotFound(_))),
+        "version 0 was never assigned, so it is not here: {:?}",
+        err.err
+    );
+}
+
 /// FM-11 / GAP-2: a chunk whose address the document doesn't yield is given up on rather than
 /// taking the worker down — it used to panic the state loop, which ends the whole process over one
 /// unusable row. FM-11's other half, that the rest of the document still applies, is not shown

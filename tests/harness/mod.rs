@@ -423,8 +423,19 @@ impl Harness {
 
     /// A JSONL dynamic-engine query selecting every block header in the range.
     pub fn all_blocks_query(&self, chunk_id: &str, range: (u64, u64)) -> Query {
+        self.all_blocks_query_at_version(chunk_id, range, 0)
+    }
+
+    /// The same query, naming which copy of the chunk to read (IB-13).
+    pub fn all_blocks_query_at_version(
+        &self,
+        chunk_id: &str,
+        range: (u64, u64),
+        chunk_version: u32,
+    ) -> Query {
         self.portal
             .query(self.worker_id, DATASET, chunk_id, range)
+            .chunk_version(chunk_version)
             .body(
                 serde_json::json!({
                     "type": "evm",

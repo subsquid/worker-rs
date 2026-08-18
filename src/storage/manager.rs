@@ -364,24 +364,27 @@ impl StateManager {
         self: Arc<Self>,
         dataset: Dataset,
         chunk_id: &str,
+        version: u32,
     ) -> Option<scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>> {
-        Some(self.get_query_chunk(dataset, chunk_id)?.path)
+        Some(self.get_query_chunk(dataset, chunk_id, version)?.path)
     }
 
     /// Lock order: index, then state.
     ///
-    /// A query names no version, so it asks for the ingested copy. A chunk the assignment
-    /// republished at another version is held under that version and does not answer here.
+    /// `version` is the copy the query named — 0 for the ingested one, which is also what a
+    /// query that names nothing carries, since the field is a bare proto3 `uint32` (IB-13).
     pub fn get_query_chunk(
         self: Arc<Self>,
         dataset: Dataset,
         chunk_id: &str,
+        version: u32,
     ) -> Option<QueryChunk<impl FnOnce(PathBuf)>> {
         let index = self.datasets_index.lock();
-        let chunk = self.state.lock().get_and_lock_chunk(ChunkRef::new(
-            Arc::new(dataset),
-            Arc::from(chunk_id.to_string()),
-        ))?;
+        let chunk = self.state.lock().get_and_lock_chunk(ChunkRef {
+            dataset: Arc::new(dataset),
+            chunk: Arc::from(chunk_id.to_string()),
+            version,
+        })?;
         let schema = index
             .as_ref()
             .map_or(ChunkSchema::ByType, |index| index.chunk_schema(&chunk));
@@ -657,7 +660,7 @@ mod tests {
 
         let held = manager
             .clone()
-            .get_query_chunk(dataset.clone(), &chunk.chunk)
+            .get_query_chunk(dataset.clone(), &chunk.chunk, 0)
             .expect("the chunk is available");
         assert_eq!(
             held.schema,
@@ -679,7 +682,7 @@ mod tests {
 
         let held = manager
             .clone()
-            .get_query_chunk(dataset, &chunk.chunk)
+            .get_query_chunk(dataset, &chunk.chunk, 0)
             .expect("still available: removal is a later pass");
         assert_eq!(
             held.schema,

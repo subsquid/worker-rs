@@ -123,6 +123,7 @@ impl Worker {
         dataset: Dataset,
         block_range: (u64, u64),
         chunk_id: &str,
+        chunk_version: u32,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult {
@@ -154,7 +155,7 @@ impl Worker {
         // enforced at admission, so it can only reach the experimental path here.
         match query_type {
             QueryType::PlainQuery => {
-                self.execute_query(query_str, dataset, block_range, chunk_id)
+                self.execute_query(query_str, dataset, block_range, chunk_id, chunk_version)
                     .await
             }
             QueryType::ExperimentalQuery { output_format } => {
@@ -163,11 +164,15 @@ impl Worker {
                     dataset,
                     block_range,
                     chunk_id,
+                    chunk_version,
                     output_format,
                 )
                 .await
             }
-            QueryType::SqlQuery => self.execute_sql_query(query_str, dataset, chunk_id).await,
+            QueryType::SqlQuery => {
+                self.execute_sql_query(query_str, dataset, chunk_id, chunk_version)
+                    .await
+            }
         }
     }
 
@@ -182,6 +187,7 @@ impl Worker {
         dataset: Dataset,
         block_range: (u64, u64),
         chunk_id: &str,
+        chunk_version: u32,
     ) -> QueryResult {
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
@@ -190,7 +196,11 @@ impl Worker {
         query.set_first_block(from_block);
         query.set_last_block(Some(to_block));
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk_id) else {
+        let Some(chunk_guard) =
+            self.state_manager
+                .clone()
+                .get_chunk(dataset, chunk_id, chunk_version)
+        else {
             return Err(QueryError::NotFound);
         };
 
@@ -260,14 +270,15 @@ impl Worker {
         dataset: Dataset,
         block_range: (u64, u64),
         chunk_id: &str,
+        chunk_version: u32,
         output_format: OutputFormat,
     ) -> QueryResult {
         let dataset_type = experimental_engine::extract_dataset_type(query_str)?;
 
-        let Some(chunk) = self
-            .state_manager
-            .clone()
-            .get_query_chunk(dataset, chunk_id)
+        let Some(chunk) =
+            self.state_manager
+                .clone()
+                .get_query_chunk(dataset, chunk_id, chunk_version)
         else {
             return Err(QueryError::NotFound);
         };
@@ -313,6 +324,7 @@ impl Worker {
         query_str: &str,
         dataset: Dataset,
         chunk_id: &str,
+        chunk_version: u32,
     ) -> QueryResult {
         let Ok(query_bytes) = base64.decode(query_str) else {
             return Err(QueryError::BadRequest(format!(
@@ -325,10 +337,10 @@ impl Worker {
             )));
         };
 
-        let Some(chunk_guard) = self
-            .state_manager
-            .clone()
-            .get_chunk(dataset.clone(), chunk_id)
+        let Some(chunk_guard) =
+            self.state_manager
+                .clone()
+                .get_chunk(dataset.clone(), chunk_id, chunk_version)
         else {
             return Err(QueryError::NotFound);
         };

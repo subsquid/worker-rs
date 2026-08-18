@@ -65,6 +65,8 @@ impl Portal {
                 query_engine: QueryEngine::Dynamic as i32,
                 output_format: OutputFormat::Jsonl as i32,
                 request_id: format!("conformance-request-{n}"),
+                // 0 is the ingested copy, which is also what a portal that names nothing sends.
+                chunk_version: 0,
             },
         }
     }
@@ -80,6 +82,13 @@ pub struct Draft<'a> {
 impl Draft<'_> {
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.query.query = body.into();
+        self
+    }
+
+    /// Names the copy of the chunk to read; 0 is the ingested one (IB-13). Not covered by the
+    /// query signature, so a corrupted one would still verify.
+    pub fn chunk_version(mut self, version: u32) -> Self {
+        self.query.chunk_version = version;
         self
     }
 

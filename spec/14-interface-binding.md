@@ -56,6 +56,7 @@ existing field. This file and the CT-5 conformance corpus change in the same com
 | `dataset` | string | exact match against assignment dataset ids |
 | `query` | string | engine-specific body; interpretation per `query_engine` |
 | `chunk_id` | string | opaque exact-match key (DEF-3) |
+| `chunk_version` | uint32 | which copy of that chunk to read; proto default 0 is the ingested one, so a portal that names nothing asks for it (DEF-4, IB-41b). **Not** signature-covered |
 | `block_range` | `{begin, end}` uint64 | required in practice (absence → post-admission `bad_request`); overrides any range in the query body (the SQL surface ignores it — GAP-24) |
 | `timestamp_ms` | uint64 | freshness check window P-TS-WINDOW |
 | `signature` | bytes | covers fields per RP-2 |
@@ -225,9 +226,10 @@ Files are then `base_url + generation prefix + chunk id + <table>.parquet`, wher
 at `version` 0 — the ingested copy — and otherwise comes from the dataset's `generations`
 entry naming that version. The version is part of the chunk's identity (DEF-4), so a chunk
 the assignment republishes is fetched afresh, stored apart from the copy it replaces
-(DEF-6), and the superseded copy is removed by ordinary reconciliation. A query naming no
-version asks for version 0, so a rewrite is held but unreachable until portals name one
-(GAP-34). A chunk carries neither its id nor its dataset: both are
+(DEF-6), and the superseded copy is removed by ordinary reconciliation. A query names the copy it wants in
+`Query.chunk_version` (IB-13); the field is a bare `uint32`, so a portal that names nothing asks
+for version 0 — the ingested copy — and a version the worker does not hold answers `not_found`,
+which routing clients treat as a reroute rather than a fault. A chunk carries neither its id nor its dataset: both are
 rebuilt from the columns holding them, so an id that will not assemble is a malformed
 document. A chunk whose `write_schema_id` has no roster, or whose schema the bundle
 published with the document doesn't carry,

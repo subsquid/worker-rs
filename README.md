@@ -72,9 +72,9 @@ no fallback if `worker_assignment` is absent. This changes five things:
   The version is part of the chunk's identity, so a rewrite is downloaded rather than assumed to
   be the copy already held, and it is stored under
   `<data-dir>/worker/<base64url(dataset)>/_v<version>/<chunk id>` while version 0 stays where it
-  has always been. Queries name no version yet, so they always ask
-  for version 0: while a chunk is assigned at a rewrite's version, a query can still reach the
-  superseded copy until reconciliation removes it, and `not_found` after that.
+  has always been. A query names the copy it wants in `chunk_version`, defaulting to 0 — the
+  ingested one — so a portal reads a rewrite by naming its version, and a version this worker
+  does not hold answers `not_found`.
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
   `<schema_id>.yaml`, verified against its `sha256:` hash) rather than from
   `--query-schemas-url`, which is not polled at all in this mode. Bundles are *merged* into

@@ -754,6 +754,7 @@ pub async fn execute<W: QueryRunner, A: CuChecker>(
             query.dataset.clone(),
             block_range,
             &query.chunk_id,
+            query.chunk_version,
             Some(peer_id),
             query_type,
         )

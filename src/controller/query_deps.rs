@@ -33,6 +33,7 @@ pub trait QueryRunner {
         dataset: Dataset,
         block_range: (u64, u64),
         chunk_id: &str,
+        chunk_version: u32,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult;
@@ -46,6 +47,7 @@ impl QueryRunner for Worker {
         dataset: Dataset,
         block_range: (u64, u64),
         chunk_id: &str,
+        chunk_version: u32,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult {
@@ -55,6 +57,7 @@ impl QueryRunner for Worker {
             dataset,
             block_range,
             chunk_id,
+            chunk_version,
             client_id,
             query_type,
         )
@@ -139,6 +142,7 @@ pub mod mocks {
             _dataset: Dataset,
             _block_range: (u64, u64),
             _chunk_id: &str,
+            _chunk_version: u32,
             _client_id: Option<PeerId>,
             _query_type: QueryType,
         ) -> QueryResult {
