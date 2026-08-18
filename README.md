@@ -73,8 +73,8 @@ no fallback if `worker_assignment` is absent. This changes five things:
   be the copy already held, and it is stored under
   `<data-dir>/worker/<base64url(dataset)>/_v<version>/<chunk id>` while version 0 stays where it
   has always been. Queries name no version yet, so they always ask
-  for version 0: while a chunk is assigned at a rewrite's version, the worker holds it but has no
-  way to serve it.
+  for version 0: while a chunk is assigned at a rewrite's version, a query can still reach the
+  superseded copy until reconciliation removes it, and `not_found` after that.
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
   `<schema_id>.yaml`, verified against its `sha256:` hash) rather than from
   `--query-schemas-url`, which is not polled at all in this mode. Bundles are *merged* into

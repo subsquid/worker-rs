@@ -285,8 +285,11 @@ mod worker_assignment {
             std::sync::Arc::new(DATASET.to_owned()),
             std::sync::Arc::from("nope"),
         );
-        // Distinct from `Unpinned`: an unassigned chunk must not resolve by dataset type.
-        assert_eq!(index.chunk_schema(&absent), ChunkSchema::Unassigned);
+        // A chunk this assignment doesn't name has no pinned id, so the query's dataset type
+        // decides — safe because only the legacy manifest fills the type registry, and it is not
+        // filled at all under `--assignment-source worker`
+        // (`restored_bundle_schemas_do_not_mark_legacy_schemas_loaded`).
+        assert_eq!(index.chunk_schema(&absent), ChunkSchema::ByType);
     }
 
     /// A rewrite is another copy of the same id, so it is keyed by its version and stored under
@@ -446,7 +449,7 @@ mod worker_assignment {
         .unwrap();
 
         let chunk = index.chunks().keys().next().unwrap().clone();
-        assert_eq!(index.chunk_schema(&chunk), ChunkSchema::Unpinned);
+        assert_eq!(index.chunk_schema(&chunk), ChunkSchema::ByType);
     }
 
     /// Keying is unchanged from the legacy path, so the manager's chunk bookkeeping survives.

@@ -26,12 +26,21 @@ pub struct DatasetsIndex {
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
 }
 
+/// How a query resolves the schema for a chunk the worker holds.
+///
+/// The store decides what can be answered — the layout scan recovers every chunk and its version,
+/// so a locked chunk has bytes on disk whatever the assignment says. This only decides how to read
+/// them, which is why there is no "not ours to serve" state: an assignment describes what the
+/// worker should hold, not what it may answer for (INV-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSchema {
+    /// The assignment names the schema the chunk was written with.
     Pinned(SchemaId),
-    Unpinned,
-    Unassigned,
-    NoAssignment,
+    /// Nothing names one, so the query's dataset type does. Sound wherever the type registry is
+    /// loaded at all: only the legacy CDN manifest fills it, and that carries one schema per
+    /// type. A bundle installs by id alone, so this can never reach for a bundle's schema and
+    /// pick the wrong version of a type.
+    ByType,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -205,14 +214,14 @@ impl DatasetsIndex {
 
     pub fn chunk_schema(&self, chunk: &ChunkRef) -> ChunkSchema {
         let Some(chunk_ref) = self.chunks.get(chunk) else {
-            return ChunkSchema::Unassigned;
+            return ChunkSchema::ByType;
         };
         match &self.assignment {
-            AssignmentBlob::Legacy(_) => ChunkSchema::Unpinned,
+            AssignmentBlob::Legacy(_) => ChunkSchema::ByType,
             AssignmentBlob::Worker(assignment) => assignment
                 .get_chunk(*chunk_ref)
                 .map(|c| ChunkSchema::Pinned(SchemaId::from(c.write_schema_id())))
-                .unwrap_or(ChunkSchema::Unassigned),
+                .unwrap_or(ChunkSchema::ByType),
         }
     }
 

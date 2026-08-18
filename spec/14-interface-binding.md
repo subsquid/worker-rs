@@ -243,11 +243,19 @@ id, so the fault is the worker's own (INV-26, ADR-20), and FM-53c means it shoul
 reachable at all. Under IB-41 (legacy) there is no per-chunk schema and the query's
 dataset type selects it, which is sound only while one schema exists per type.
 
-Type-keyed selection is available *only* there. A chunk on disk that the assignment in
-force does not cover answers `not_found` — the same verdict it gets once removal catches
-up — and one held before any assignment applies answers `server_error`, since the worker
-cannot yet say what it means. Neither falls back to the dataset type: with several
-versions of a type loaded, that returns a wrong version rather than an error.
+What the worker may answer for is decided by the store, not by the assignment: the layout
+scan recovers every chunk it holds and the version each sits under, so a chunk that locks
+has bytes to read whatever the assignment says (INV-2). An assignment describes what the
+worker should *hold*. So a chunk the assignment in force does not cover, and one held
+before any assignment applies, are both answered from — the engines that need no schema
+read them directly, and the dynamic engine falls back to the query's dataset type.
+
+That fallback cannot return a wrong version of a type, which is what would make it
+dangerous: only the legacy manifest (IB-44) ever fills the type-keyed registry, and it
+carries one schema per type, while a bundle installs by id alone (IB-44b). Under
+`--assignment-source worker` the type registry is therefore never filled at all, and the
+dynamic engine answers `server_error` for any chunk with no pinned id — the truthful
+verdict, since the worker holds bytes it cannot describe.
 
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against

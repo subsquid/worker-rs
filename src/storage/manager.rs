@@ -403,9 +403,9 @@ impl StateManager {
             Arc::new(dataset),
             Arc::from(chunk_id.to_string()),
         ))?;
-        let schema = index.as_ref().map_or(ChunkSchema::NoAssignment, |index| {
-            index.chunk_schema(&chunk)
-        });
+        let schema = index
+            .as_ref()
+            .map_or(ChunkSchema::ByType, |index| index.chunk_schema(&chunk));
         drop(index);
 
         let path = self.chunk_path(&chunk);
@@ -646,8 +646,13 @@ mod tests {
             .unwrap()
     }
 
+    /// The store decides what can be answered, not the assignment: a chunk on disk resolves its
+    /// schema by dataset type whenever nothing names one for it — before the first assignment, and
+    /// under an assignment that doesn't cover it. That cannot reach for the wrong version of a
+    /// type, because only the legacy manifest fills the type registry and a bundle installs by id
+    /// alone (`schema_bundle::tests::restored_bundle_schemas_do_not_mark_legacy_schemas_loaded`).
     #[tokio::test]
-    async fn a_chunk_the_assignment_does_not_cover_is_not_reported_as_legacy() {
+    async fn a_chunk_outside_the_assignment_still_resolves_by_type() {
         use std::sync::Arc;
 
         use super::super::datasets_index::ChunkSchema;
@@ -677,8 +682,8 @@ mod tests {
             .expect("the chunk is available");
         assert_eq!(
             held.schema,
-            ChunkSchema::NoAssignment,
-            "nothing has said what this chunk means yet"
+            ChunkSchema::ByType,
+            "the bytes are on disk and readable; nothing about an absent assignment changes that"
         );
         drop(held);
 
@@ -695,8 +700,8 @@ mod tests {
             .expect("still available: removal is a later pass");
         assert_eq!(
             held.schema,
-            ChunkSchema::Unassigned,
-            "assignment A covers no chunks, so this one is not ours to answer for"
+            ChunkSchema::ByType,
+            "assignment A covers no chunks, which says what to keep, not what to answer for"
         );
     }
 

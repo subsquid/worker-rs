@@ -298,17 +298,12 @@ impl Worker {
                 }
                 schema
             }
-            ChunkSchema::Unpinned => self.query_schemas.get_by_type(&dataset_type)?,
-            // On disk but not ours to serve: it is waiting to be removed, and this is the same
-            // answer the worker gives once it is.
-            ChunkSchema::Unassigned => return Err(QueryError::NotFound),
-            // Held over from a previous run with nothing yet to say what it means. Transient and
-            // the worker's own state, so it is retryable, not the client's fault.
-            ChunkSchema::NoAssignment => {
-                return Err(QueryError::Other(
-                    "no assignment is applied yet, so this chunk's schema is unknown".to_owned(),
-                ))
-            }
+            // No pinned id: a legacy assignment, a chunk the assignment no longer covers, or one
+            // held before any assignment applied. The store says we have the bytes; the type
+            // registry says whether we can describe them, and its own error is the verdict when we
+            // cannot — which under `--assignment-source worker` is always, since nothing fills it
+            // there.
+            ChunkSchema::ByType => self.query_schemas.get_by_type(&dataset_type)?,
         };
 
         let query_str = query_str.to_owned();
