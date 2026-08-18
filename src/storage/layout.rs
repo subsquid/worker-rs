@@ -178,10 +178,16 @@ pub async fn read_all_versions(fs: &LocalFs) -> Result<Vec<(u32, DataChunk)>> {
     Ok(result)
 }
 
+/// Only the canonical spelling the worker writes. `str::parse` would also accept `_v+1` and
+/// `_v01`, letting two directories name one version — and the chunks under the one that isn't
+/// canonical would be adopted at a path the worker never reads or writes. A leading zero is
+/// rejected with them, which covers `_v0`: version 0 lives at the root and has no subtree.
 fn parse_version_dir(name: &str) -> Option<u32> {
-    let version: u32 = name.strip_prefix(VERSION_PREFIX)?.parse().ok()?;
-    // Version 0 is stored at the root and has no subtree, so `_v0` describes nothing.
-    (version != 0).then_some(version)
+    let digits = name.strip_prefix(VERSION_PREFIX)?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
@@ -392,6 +398,31 @@ mod tests {
             assert_eq!(chunk.first_block, 0u64.into());
             assert_eq!(chunk.last_block, 1000u64.into());
         }
+    }
+
+    /// The two directory levels are told apart by disjoint rules — a name cannot satisfy both.
+    /// Version dirs additionally admit one spelling only, since a second one would name a version
+    /// whose chunks live where the worker never looks.
+    #[test]
+    fn a_version_dir_is_spelled_one_way_and_is_never_a_top_dir() {
+        use super::parse_version_dir;
+
+        assert_eq!(parse_version_dir("_v1"), Some(1));
+        assert_eq!(parse_version_dir("_v4294967295"), Some(4_294_967_295));
+        // `str::parse` accepts all three as 1.
+        assert_eq!(parse_version_dir("_v+1"), None);
+        assert_eq!(parse_version_dir("_v01"), None);
+        assert_eq!(parse_version_dir("_v0001"), None);
+        // Version 0 is the root, so its subtree describes nothing.
+        assert_eq!(parse_version_dir("_v0"), None);
+        assert_eq!(parse_version_dir("_vfoo"), None);
+        assert_eq!(parse_version_dir("_v"), None);
+        assert_eq!(parse_version_dir("0000001000"), None);
+
+        // The other direction: a top dir is ten characters that parse as a number, which the `_`
+        // rules out however the version is written.
+        assert!(BlockNumber::try_from("0000001000").is_ok());
+        assert!(BlockNumber::try_from("_v00000001").is_err());
     }
 
     /// One id at two versions, which only the subtree tells apart. Legal because each version is
