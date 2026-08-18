@@ -176,9 +176,11 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
-/// FM-11 / GAP-2: a chunk whose address the document doesn't yield fails on its own — the rest of
-/// the assignment still applies and the worker keeps working. It used to panic the state loop,
-/// which takes the whole process down over one unusable row.
+/// FM-11 / GAP-2: a chunk whose address the document doesn't yield is given up on rather than
+/// taking the worker down — it used to panic the state loop, which ends the whole process over one
+/// unusable row. FM-11's other half, that the rest of the document still applies, is not shown
+/// here: the fault knob substitutes the *dataset's* base url, so every chunk in the document is
+/// unaddressable and a mixed one cannot be built with it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
     use harness::scheduler::AssignmentFault;

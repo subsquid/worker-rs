@@ -425,8 +425,8 @@ mod tests {
         assert!(BlockNumber::try_from("_v00000001").is_err());
     }
 
-    /// One id at two versions, which only the subtree tells apart. Legal because each version is
-    /// validated on its own — as one tree they would be an illegal exact-range overlap.
+    /// One id at two versions, which only the subtree tells apart — in one tree they could not
+    /// coexist at all, since they would be the same directory.
     #[tokio::test]
     async fn every_version_subtree_is_read_with_its_version() {
         let dir = tempfile::tempdir().unwrap();

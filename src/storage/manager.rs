@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use sqd_contract_client::PeerId;
 use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::{
     metrics,
@@ -263,27 +263,6 @@ impl StateManager {
                 .last_applied_assignment_id
                 .clone(),
         }
-    }
-
-    pub fn set_assignment(
-        &self,
-        assignment: AssignmentBlob,
-        id: impl Into<String>,
-        key: &Keypair,
-        schema_available: impl Fn(SchemaId) -> bool,
-    ) -> bool {
-        let datasets_index = match self.prepare_assignment(assignment, id, key, schema_available) {
-            Ok(result) => result,
-            Err(e) => {
-                if self.datasets_index.lock().is_none() {
-                    metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                }
-                error!("Can not get assigned chunks: {e}");
-                return false;
-            }
-        };
-        self.set_prepared_assignment(datasets_index);
-        true
     }
 
     pub fn prepare_assignment(
@@ -687,12 +666,16 @@ mod tests {
         );
         drop(held);
 
-        assert!(manager.set_assignment(
-            AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
-            "A",
-            &keypair,
-            no_schemas_needed,
-        ));
+        manager.set_prepared_assignment(
+            manager
+                .prepare_assignment(
+                    AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
+                    "A",
+                    &keypair,
+                    no_schemas_needed,
+                )
+                .expect("the document lists this worker"),
+        );
 
         let held = manager
             .clone()
@@ -770,27 +753,28 @@ mod tests {
         );
     }
 
-    // Known limitation (not yet fixed): when registering an assignment fails
-    // (here: the assignment has no entry for this worker), the worker silently
-    // stays on the previous assignment. Combined with the id dedup in the
-    // assignments stream (see `assignment_id_is_consumed_before_the_assignment_
-    // is_known_to_apply` in controller::assignments), the failed assignment is
-    // never offered again — the worker idles on stale data until the network
-    // publishes a *different* assignment id.
+    // WP-2: a document that cannot be applied leaves the previous one in force. The applier
+    // classifies this as `Refused` rather than retrying, since no later attempt at the same pair
+    // can end differently, so recovery waits for a different pair — which since IB-40b's pair
+    // announcement includes a corrected bundle under the same assignment id.
     #[tokio::test]
-    async fn failed_set_assignment_leaves_the_worker_on_the_old_assignment() {
+    async fn a_refused_assignment_leaves_the_worker_on_the_old_one() {
         let keypair = Keypair::generate_ed25519();
         let worker_id = keypair.public().to_peer_id();
         let dir = tempfile::tempdir().unwrap();
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
         let manager = test_manager(workdir, worker_id).await;
 
-        assert!(manager.set_assignment(
-            AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
-            "A",
-            &keypair,
-            no_schemas_needed,
-        ));
+        manager.set_prepared_assignment(
+            manager
+                .prepare_assignment(
+                    AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
+                    "A",
+                    &keypair,
+                    no_schemas_needed,
+                )
+                .expect("the document lists this worker"),
+        );
         assert_eq!(
             manager.current_status().await.assignment_id.as_deref(),
             Some("A")
@@ -798,12 +782,14 @@ mod tests {
 
         // Assignment B doesn't include this worker, so registration fails...
         let other_worker = Keypair::generate_ed25519().public().to_peer_id();
-        assert!(!manager.set_assignment(
-            AssignmentBlob::Legacy(empty_assignment_for(other_worker)),
-            "B",
-            &keypair,
-            no_schemas_needed,
-        ));
+        assert!(manager
+            .prepare_assignment(
+                AssignmentBlob::Legacy(empty_assignment_for(other_worker)),
+                "B",
+                &keypair,
+                no_schemas_needed,
+            )
+            .is_err());
 
         // ...and the worker keeps reporting A, with no retry path for B
         assert_eq!(
@@ -832,12 +818,16 @@ mod tests {
         let manager = test_manager(workdir, worker_id).await;
 
         // The new assignment holds no chunks, scheduling the local one for removal
-        assert!(manager.set_assignment(
-            AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
-            "A",
-            &keypair,
-            no_schemas_needed,
-        ));
+        manager.set_prepared_assignment(
+            manager
+                .prepare_assignment(
+                    AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
+                    "A",
+                    &keypair,
+                    no_schemas_needed,
+                )
+                .expect("the document lists this worker"),
+        );
 
         // Sabotage the removal: the chunk dir vanishes behind the manager's back
         std::fs::remove_dir_all(&chunk_dir).unwrap();

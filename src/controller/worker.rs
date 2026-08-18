@@ -70,17 +70,6 @@ impl Worker {
         self.query_schemas.clone()
     }
 
-    pub fn register_assignment(
-        &self,
-        assignment: AssignmentBlob,
-        id: impl Into<String>,
-        key: &Keypair,
-        covered_by_bundle: impl Fn(SchemaId) -> bool,
-    ) -> bool {
-        self.state_manager
-            .set_assignment(assignment, id, key, covered_by_bundle)
-    }
-
     pub fn prepare_assignment(
         &self,
         assignment: AssignmentBlob,
@@ -283,9 +272,8 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        // Resolve by what the chunk was written with. Resolving by dataset type instead would
-        // pick whichever version of that type is loaded, which is a wrong answer rather than an
-        // error — so only a legacy assignment, which has one schema per type, may do it.
+        // Resolve by what the chunk was written with wherever the assignment says so; the
+        // query's own dataset type is then only a cross-check.
         let schema = match chunk.schema {
             ChunkSchema::Pinned(schema_id) => {
                 let schema = self.query_schemas.get_by_id(schema_id)?;

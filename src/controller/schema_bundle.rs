@@ -15,7 +15,8 @@ use crate::metrics;
 use crate::query::result::QueryError;
 use crate::types::schema::SchemaId;
 
-/// Caps both compressed and unpacked input before verification.
+/// Caps the compressed download, and — once the hash has been verified — everything the archive
+/// decompresses, whether or not it is kept.
 const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 
 const TEMP_PREFIX: &str = "temp-";
@@ -246,6 +247,10 @@ impl SchemaRegistry {
         self.snapshot.load_full()
     }
 
+    /// The `Other` verdict below is load-bearing beyond "no schemas yet": it is what a chunk with
+    /// no pinned id resolves to under `--assignment-source worker`, where nothing ever fills this
+    /// index (IB-41b). Turning it into a client-facing error would blame a portal for a chunk the
+    /// worker holds and cannot describe.
     pub fn get_by_type(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
         let snapshot = self.snapshot();
         if !snapshot.legacy_loaded {
