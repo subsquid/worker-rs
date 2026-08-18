@@ -5,25 +5,20 @@ pub type ChunkSet = BTreeSet<ChunkRef>;
 pub type DatasetId = Arc<Dataset>;
 pub type ChunkId = Arc<str>;
 
-/// Names the directory a non-zero version's chunks live under. Leading `_` so it can never be
-/// read as a top directory, which is always ten digits.
+/// Prefix for non-zero chunk-version directories.
 pub const VERSION_PREFIX: &str = "_v";
 
-/// The global key of a chunk (DEF-4). Field order is the order DEF-13's bit sequence follows, so
-/// a republished chunk sorts beside the copy it replaces rather than after every other chunk in
-/// its dataset.
+/// Global chunk key (DEF-4). Field order preserves DEF-13's chunk-id ordering.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkRef {
     pub dataset: DatasetId,
     pub chunk: ChunkId,
-    /// Which copy of the chunk: 0 is what ingest wrote, anything else a batch job's rewrite of
-    /// it (IB-41b). Legacy assignments carry no versions, so every chunk of one is 0.
+    /// Zero for the ingested copy; non-zero for a rewrite (IB-41b).
     pub version: u32,
 }
 
 impl ChunkRef {
-    /// The ingested copy — what a legacy assignment names, and what a query naming no version
-    /// asks for.
+    /// Constructs a reference to the ingested copy.
     pub fn new(dataset: DatasetId, chunk: ChunkId) -> Self {
         Self {
             dataset,
@@ -32,10 +27,7 @@ impl ChunkRef {
         }
     }
 
-    /// Where the chunk's files live under its dataset's directory. Version 0 sits exactly where a
-    /// legacy chunk does, so a store written before versions existed reads back unchanged; every
-    /// other version gets its own subtree, so two copies of one chunk id never contend for one
-    /// directory.
+    /// Returns the path below the dataset directory, preserving the legacy path for version zero.
     pub fn store_path(&self) -> Cow<'_, str> {
         match self.version {
             0 => Cow::Borrowed(self.chunk.as_ref()),
@@ -76,9 +68,6 @@ mod tests {
         assert_eq!(chunk_ref(ID, 2).store_path(), format!("_v2/{ID}"));
     }
 
-    /// DEF-13's bit order is chunk-ref order, and the scheduler reads that map having only the
-    /// chunk ids. So a rewrite has to sort where its id does, not after every chunk in the
-    /// dataset — which is why the version is the last field rather than part of the id.
     #[test]
     fn a_rewrite_sorts_beside_the_copy_it_replaces() {
         let ingested = chunk_ref(ID, 0);

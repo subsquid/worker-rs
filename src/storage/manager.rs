@@ -154,10 +154,7 @@ impl StateManager {
             }
 
             let removals = self.state.lock().take_removals();
-            // Concurrent, but a barrier for this batch: the downloads below
-            // start only after every already-deletable chunk is gone. Draining
-            // chunks are not in the batch — they stay on disk until their last
-            // query ends and a later pass collects them.
+            // Finish deletions before starting downloads to preserve the storage bound.
             futures::stream::iter(&removals)
                 .for_each_concurrent(CONCURRENT_REMOVALS, |chunk| async move {
                     info!("Removing chunk {chunk}");
@@ -174,9 +171,7 @@ impl StateManager {
                 continue;
             };
             while downloader.download_count() < self.concurrent_downloads {
-                // Bound before the `let`, not taken in its scrutinee: a scrutinee temporary lives
-                // to the end of the block, so the guard would still be held below — and this lock
-                // is not reentrant.
+                // Bind before matching so the non-reentrant state lock is released.
                 let next = self.state.lock().take_next_download();
                 let Some(chunk_ref) = next else {
                     break;
@@ -185,15 +180,11 @@ impl StateManager {
                 let dst = self.chunk_path(&chunk_ref);
                 let files = match dataset_index.list_files(&chunk_ref) {
                     Ok(files) => files,
-                    // The chunk was queued from the very index being read here — the loop holds
-                    // its lock across both — so a miss is this worker's bug, not the document's.
+                    // The queue and lookup use the same locked index, so a miss is an invariant bug.
                     Err(UnresolvedChunk::NotAssigned) => panic!(
                         "chunk {chunk_ref} was queued from an assignment that doesn't carry it"
                     ),
-                    // FM-11: the document is unusable for this chunk, but the rest of it still
-                    // applies. Given up on rather than retried, since a document does not change
-                    // between attempts; that settles the assignment as stalled instead of taking
-                    // the worker down over one row.
+                    // The document cannot change between attempts; fail only this chunk (FM-11).
                     Err(e) => {
                         warn!(chunk = %chunk_ref, error = %e, "Can't address chunk");
                         metrics::CHUNKS_UNADDRESSABLE.inc();
@@ -210,10 +201,7 @@ impl StateManager {
         info!("State manager loop finished");
     }
 
-    /// Subscribe to the "assignment settled" signal: an event fires when the
-    /// current assignment becomes fully applied (all chunks present) or stalls
-    /// (some chunks exhausted their download attempts). Used to refresh the
-    /// reported status promptly instead of waiting for the periodic timer.
+    /// Subscribes to applied and stalled assignment outcomes.
     pub fn subscribe_assignment_settled(
         &self,
     ) -> tokio::sync::watch::Receiver<Option<AssignmentSettled>> {
@@ -281,11 +269,7 @@ impl StateManager {
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
         let mut index = self.datasets_index.lock();
-        // The settled-check correlates current_assignment_id with the chunk
-        // state, so both must change under the application lock (lock order:
-        // index → application → state); otherwise the check could pair the new
-        // desired set with the old id and confirm a never-applied assignment
-        // (see `super::regression`).
+        // Lock order: index → application → state. The ID and desired set must change atomically.
         let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
@@ -356,10 +340,7 @@ impl StateManager {
         }
     }
 
-    /// Returns the on-disk path to a locally available chunk, or `None` if
-    /// the chunk isn't present. The chunk is reference-counted for the
-    /// lifetime of the returned guard — it won't be evicted by the state
-    /// manager until every guard for it is dropped.
+    /// Pins an available chunk against eviction for the lifetime of the returned guard.
     pub fn get_chunk(
         self: Arc<Self>,
         dataset: Dataset,
@@ -369,10 +350,7 @@ impl StateManager {
         Some(self.get_query_chunk(dataset, chunk_id, version)?.path)
     }
 
-    /// Lock order: index, then state.
-    ///
-    /// `version` is the copy the query named — 0 for the ingested one, which is also what a
-    /// query that names nothing carries, since the field is a bare proto3 `uint32` (IB-13).
+    /// Lock order: index, then state. Version zero is the ingested copy (IB-13).
     pub fn get_query_chunk(
         self: Arc<Self>,
         dataset: Dataset,
@@ -393,8 +371,6 @@ impl StateManager {
         let path = self.chunk_path(&chunk);
         let guard = scopeguard::guard(path, move |_| {
             if self.state.lock().unlock_chunk(&chunk) {
-                // The last query holding a removable chunk finished — wake the
-                // state loop to delete it promptly.
                 self.notify.notify_one();
             }
         });
@@ -420,10 +396,7 @@ impl StateManager {
         Ok(())
     }
 
-    /// Prunes now-empty ancestor dirs after a removal pass. Deduplicated per
-    /// parent dir — a mass removal touches each directory once, not once per
-    /// chunk — and run off the async thread. Best-effort housekeeping: an
-    /// empty leftover dir is harmless, so failures only warn.
+    /// Prunes empty ancestors once per parent on the blocking pool.
     async fn sweep_removal_ancestors(&self, removals: &[ChunkRef]) {
         let mut seen_parents = std::collections::BTreeSet::new();
         let representatives: Vec<PathBuf> = removals
@@ -464,8 +437,6 @@ impl StateManager {
     }
 }
 
-// Free function so tests can drive the check-and-mark critical section without
-// constructing a full `StateManager`.
 #[doc(hidden)]
 pub fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
@@ -476,23 +447,13 @@ pub fn mark_assignment_settled_if_ready(
     let Some(current_assignment_id) = assignment_application.current_assignment_id.clone() else {
         return;
     };
-    // Whether this assignment's verdict is out is a question about the channel, not about the
-    // last id that applied: `last_applied_assignment_id` reports the newest assignment that ever
-    // applied (IB-22), so it can still name an id whose verdict a later assignment has replaced.
-    // Asking it instead would answer "already settled" for an id the channel no longer names,
-    // and re-registering that id would then never settle at all.
-    //
-    // The borrow is bound rather than left in the `if`, because holding a `watch` read guard
-    // across `send_replace` below would deadlock.
+    // Check the published verdict, not historical last-applied state. Drop the watch guard before
+    // send_replace to avoid deadlock.
     let verdict_is_published = assignment_settled_tx
         .borrow()
         .as_ref()
         .is_some_and(|settled| settled.id == current_assignment_id);
-    // A published verdict is terminal while its id stands, which is what makes this a
-    // short-circuit and not just a duplicate filter: an applied assignment has every desired
-    // chunk available, a stalled one has a chunk in `failed_downloads`, and only a new desired
-    // set clears that — so neither verdict can turn into the other, and the recomputation below
-    // (O(desired) on every state-loop pass) would always reach the same answer.
+    // A verdict remains terminal until a new desired set is installed.
     if verdict_is_published {
         return;
     }
@@ -500,8 +461,7 @@ pub fn mark_assignment_settled_if_ready(
         let state = state.lock();
         (state.is_fully_applied(), state.is_stalled())
     };
-    // send_replace, not send: send stores nothing without subscribers, and the guard above never
-    // re-sends a verdict — it would be lost forever.
+    // `send` loses the value when there are no subscribers; `send_replace` retains it.
     if applied {
         assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
         assignment_settled_tx.send_replace(Some(AssignmentSettled {
@@ -560,9 +520,7 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
     Ok(result)
 }
 
-/// Walks the entire directory tree, so it also accounts for files not tracked by the worker.
-/// The walk runs on the blocking thread pool — a full scan of a large workdir may take minutes
-/// and must never run directly on the async runtime.
+/// Counts all files on the blocking pool, including files not tracked by the worker.
 async fn get_directory_size(path: PathBuf) -> u64 {
     tokio::task::spawn_blocking(move || {
         let mut result = 0;

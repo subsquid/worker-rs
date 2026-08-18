@@ -152,10 +152,7 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
     Ok(entries)
 }
 
-/// Every chunk in a dataset's directory, with the version whose subtree holds it. Version 0 sits
-/// at the root — where a legacy chunk is — so a store written before versions existed reads back
-/// as it always did. Each version is validated on its own, so two versions of one chunk may
-/// legally cover the same block range.
+/// Reads every chunk and its version. Each version is validated independently.
 pub async fn read_all_versions(fs: &LocalFs) -> Result<Vec<(u32, DataChunk)>> {
     let mut result: Vec<(u32, DataChunk)> = read_all_chunks(fs)
         .await?
@@ -178,10 +175,7 @@ pub async fn read_all_versions(fs: &LocalFs) -> Result<Vec<(u32, DataChunk)>> {
     Ok(result)
 }
 
-/// Only the canonical spelling the worker writes. `str::parse` would also accept `_v+1` and
-/// `_v01`, letting two directories name one version — and the chunks under the one that isn't
-/// canonical would be adopted at a path the worker never reads or writes. A leading zero is
-/// rejected with them, which covers `_v0`: version 0 lives at the root and has no subtree.
+/// Accepts only `_vN`; version zero lives at the dataset root.
 fn parse_version_dir(name: &str) -> Option<u32> {
     let digits = name.strip_prefix(VERSION_PREFIX)?;
     if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -224,8 +218,7 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
                 }
             }
             for (cur, next) in chunks.iter().tuple_windows() {
-                // Two chunks sharing the exact same range are allowed —
-                // suffix-distinguished forks. Anything else overlapping bails.
+                // Suffix-distinguished chunks may share an exact range.
                 let same_range =
                     cur.first_block == next.first_block && cur.last_block == next.last_block;
                 if !same_range && cur.last_block >= next.first_block {
@@ -242,8 +235,7 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     Ok(nested_chunks.into_iter().flatten().collect())
 }
 
-/// Removes the chunk's now-empty ancestors — its top directory, the version subtree when it is in
-/// one, and the dataset directory — stopping at the workdir, which is not ours to remove.
+/// Removes empty chunk ancestors without removing the workdir.
 pub fn clean_chunk_ancestors(path: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<()> {
     let root = root.as_ref();
     for dir in path.as_ref().ancestors().skip(1) {
@@ -253,10 +245,7 @@ pub fn clean_chunk_ancestors(path: impl AsRef<Path>, root: impl AsRef<Path>) -> 
         if is_dir_empty(dir) {
             info!("Removing empty dir '{dir}'");
             if let Err(e) = std::fs::remove_dir(dir) {
-                // Racing housekeeping is benign: the dir may already be
-                // gone (NotFound) or a download may have started repopulating
-                // it between the emptiness check and the removal
-                // (DirectoryNotEmpty). Either way the dir needs no action.
+                // Another cleanup or download may race this best-effort removal.
                 match e.kind() {
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty => {}
                     _ => return Err(e).context(format!("Couldn't remove dir '{dir}'")),
@@ -400,9 +389,6 @@ mod tests {
         }
     }
 
-    /// The two directory levels are told apart by disjoint rules — a name cannot satisfy both.
-    /// Version dirs additionally admit one spelling only, since a second one would name a version
-    /// whose chunks live where the worker never looks.
     #[test]
     fn a_version_dir_is_spelled_one_way_and_is_never_a_top_dir() {
         use super::parse_version_dir;

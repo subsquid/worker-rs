@@ -1,21 +1,14 @@
-//! End-to-end path: assign → download → query → verify → logs pull.
-//!
-//! Part of the conformance tier (spec/13). Run the whole tier with
-//! `cargo test --test e2e --test query_surface --test query_concurrency`. A failure
-//! prints the run seed; replay with `SQD_CONFORMANCE_SEED=0x…`.
+//! End-to-end conformance tests. Replay failures with the reported `SQD_CONFORMANCE_SEED`.
 
 mod harness;
 
 use harness::{corpus, validators, Harness};
 use sqd_messages::query_result;
 
-/// One test rather than four: the point is that the stubs, the real subsystems and the
-/// validators compose into a working loop.
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke_assign_download_query_verify_logs() {
     let mut h = Harness::start().await;
 
-    // assign (IB-40/41 → WP-2)
     let chunk = corpus::chunk(1_000, 1_009, 1);
     let placement = h.host_chunk(&chunk);
     let assignment = h.publish_and_apply("assignment-1", &[placement]).await;
@@ -24,7 +17,6 @@ async fn smoke_assign_download_query_verify_logs() {
     assert_eq!(status.assignment_id, assignment.id, "RP-21: applied id");
     validators::status(&status, 1).assert_none("status after application");
 
-    // download (WP-11/12)
     h.await_all_chunks_available().await;
 
     // INV-13: what was committed is byte-identical to what the origin served.
@@ -46,7 +38,6 @@ async fn smoke_assign_download_query_verify_logs() {
     );
     assert!(status.stored_bytes.unwrap() > 0, "OB-5: stored bytes");
 
-    // query (RP-1 → RP-15)
     let query = h.all_blocks_query(&chunk.id, (1_000, 1_009));
     let served = h.serve(query.clone()).await;
     let (response, log) = served.expect_admitted();
@@ -79,14 +70,13 @@ async fn smoke_assign_download_query_verify_logs() {
         log.result
     );
 
-    // logs pull (RP-22): the serving lag withholds a record this fresh...
+    // The serving lag withholds a fresh log record.
     let withheld = h.logs_page(None).await;
     assert!(
         withheld.queries_executed.is_empty(),
         "RP-22: records younger than P-LOGS-LAG must not be served"
     );
 
-    // ...and reading past it returns exactly the one record the query produced.
     let now = sqd_worker::util::timestamp_now_ms();
     let page = h.logs_page_until(None, now).await;
     assert_eq!(page.queries_executed.len(), 1, "INV-32: one record");
@@ -102,10 +92,7 @@ async fn smoke_assign_download_query_verify_logs() {
     );
 }
 
-/// WP-2 / DEF-13: the worker fetches the chunks its own slice names and no others.
-///
-/// Guards the harness too — a placement that named this worker regardless of `assigned` would
-/// leave both the flag and `AssignmentFault::NoChunksForWorker` inert.
+/// The worker fetches only chunks assigned to its slice (WP-2, DEF-13).
 #[tokio::test(flavor = "multi_thread")]
 async fn only_assigned_chunks_are_fetched() {
     let mut h = Harness::start().await;
@@ -120,7 +107,6 @@ async fn only_assigned_chunks_are_fetched() {
     h.publish_and_apply("assignment-1", &placements).await;
     h.await_all_chunks_available().await;
 
-    // The slice is one chunk wide, though the document describes two.
     let status = h.status().await;
     validators::status(&status, 1).assert_none("status with an unassigned chunk present");
 
@@ -138,7 +124,6 @@ async fn only_assigned_chunks_are_fetched() {
     );
 }
 
-/// The GAP-3 fault input: a worker in the roster holding no chunks at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_slice_assigns_nothing() {
     use harness::scheduler::AssignmentFault;
@@ -176,9 +161,7 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
-/// IB-13/IB-41b: a query names which copy of the chunk to read, so a rewrite is reachable. The
-/// field is a bare `uint32`, so a portal that names nothing asks for the ingested copy — and gets
-/// `not_found` here, since only the rewrite was ever assigned.
+/// Queries address a chunk version; zero selects the ingested copy (IB-13, IB-41b).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_serves_the_version_the_query_names() {
     use harness::scheduler::Format;
@@ -217,11 +200,7 @@ async fn worker_format_serves_the_version_the_query_names() {
     );
 }
 
-/// FM-11 / GAP-2: a chunk whose address the document doesn't yield is given up on rather than
-/// taking the worker down — it used to panic the state loop, which ends the whole process over one
-/// unusable row. FM-11's other half, that the rest of the document still applies, is not shown
-/// here: the fault knob substitutes the *dataset's* base url, so every chunk in the document is
-/// unaddressable and a mixed one cannot be built with it.
+/// An unaddressable chunk stalls its assignment without stopping reconciliation (FM-11).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
     use harness::scheduler::AssignmentFault;
@@ -254,16 +233,13 @@ async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
         "there was no address to fetch from"
     );
 
-    // The proof that the loop survived: a later assignment still converges, which only a running
-    // state loop can do.
     let usable = corpus::chunk(7_010, 7_019, 1);
     h.publish_and_apply("assignment-2", &[h.host_chunk(&usable)])
         .await;
     h.await_all_chunks_available().await;
 }
 
-/// IB-40b/41b/44b: the file list is derived from the assignment's inline schema roster, and the
-/// query executes against the chunk's `write_schema_id`, not the query's dataset type.
+/// Worker assignments derive files and query schemas from the write-schema roster.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assign_download_query() {
     use harness::scheduler::Format;
@@ -285,7 +261,6 @@ async fn worker_format_assign_download_query() {
 
     h.await_all_chunks_available().await;
 
-    // The document lists no files; these names come from the roster.
     for (name, _) in &chunk.files {
         let served = h
             .origin
@@ -296,7 +271,6 @@ async fn worker_format_assign_download_query() {
         assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
     }
 
-    // The schemas came from the bundle, not the CDN manifest.
     let query = h.all_blocks_query(&chunk.id, (2_000, 2_009));
     let served = h.serve(query.clone()).await;
     let (response, _) = served.expect_admitted();
@@ -317,9 +291,7 @@ async fn worker_format_assign_download_query() {
     assert_eq!(blocks, (2_000..=2_009).collect::<Vec<_>>(), "RP-12");
 }
 
-/// IB-41b: a chunk at a non-zero `version` is a batch job's rewrite, and its files live under the
-/// prefix the dataset registers for that version — not at the dataset root. The chunk is hosted
-/// only there, so a worker that ignored `version` would fetch nothing.
+/// Rewritten chunks resolve through their generation prefix (IB-41b).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
     use harness::scheduler::{Format, Scheduler};
@@ -357,9 +329,7 @@ async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
     );
 }
 
-/// The reason the version is part of a chunk's identity: an assignment that republishes a chunk
-/// the worker already holds has to make it fetch the new copy. Keyed by id alone, the reconciler
-/// would see a chunk it already has and keep serving bytes the assignment no longer names.
+/// Republishing a chunk at a new version fetches and serves the new copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
     use harness::scheduler::{Format, Scheduler};
@@ -377,7 +347,6 @@ async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
     h.await_all_chunks_available().await;
     assert!(h.chunk_dir(&chunk.id).exists(), "the ingested copy is held");
 
-    // Same chunk, rewritten by a batch job: same id, new version, files under its prefix.
     h.publish_and_apply("assignment-2", &[h.host_republished_chunk(&chunk, 1)])
         .await;
     h.await_all_chunks_available().await;
@@ -398,7 +367,7 @@ async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
     .await;
 }
 
-/// FM-53b: without the schema bundle the worker would hold chunks it cannot answer queries about.
+/// An assignment is not applied without its schema bundle (FM-53b).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assignment_waits_for_its_schema_bundle() {
     use harness::scheduler::{AssignmentFault, Format};
@@ -430,9 +399,7 @@ async fn worker_format_assignment_waits_for_its_schema_bundle() {
     );
 }
 
-/// FM-53c / ADR-21: the pair is one state. A bundle that does not cover the assignment it is
-/// published with is the scheduler's invariant breaking, and the worker refuses the assignment
-/// rather than covering for it — even where its own store could have answered.
+/// A bundle that does not cover its assignment causes the pair to be refused (FM-53c).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_refuses_an_assignment_its_bundle_does_not_cover() {
     use harness::scheduler::{AssignmentFault, Format};
@@ -444,14 +411,12 @@ async fn worker_format_refuses_an_assignment_its_bundle_does_not_cover() {
     })
     .await;
 
-    // First the covering pair, so the worker holds the assignment's schema in its store.
     let first = corpus::chunk(6_000, 6_009, 1);
     let placement = h.host_chunk(&first);
     let applied = h.publish_and_apply("assignment-1", &[placement]).await;
     h.await_all_chunks_available().await;
     assert_eq!(h.status().await.assignment_id, applied.id);
 
-    // Then a pair that disagrees: the bundle carries a schema the assignment never references.
     let second = corpus::chunk(7_000, 7_009, 1);
     let placement = h.host_chunk(&second);
     h.scheduler.publish_bundle_missing_the_assignment_schema();

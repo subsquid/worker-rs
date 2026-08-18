@@ -10,8 +10,8 @@ use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
 
-/// Identifies an (assignment, bundle) pair — ADR-21's unit of intake. What to fetch; the
-/// applier's queue dedups on this, and an id names one document for all time (IB-40b).
+/// Identifies an assignment and schema bundle announcement (ADR-21). Identity, not location: an
+/// id names one document for all time (IB-40b).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NetworkPair {
     pub assignment_id: Option<String>,
@@ -63,10 +63,7 @@ pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client
         .unwrap()
 }
 
-/// Yields published state that differs from what this stream last announced (WP-1: an
-/// unchanged pair is a no-op). What became of an announced pair — applied, refused, or
-/// still being fetched — is the consumer's business: only it knows whether another attempt
-/// could end differently, so only it may ask for one.
+/// Yields each assignment-bundle pair once; the consumer owns retry policy.
 pub fn new_assignments_stream(
     url: String,
     frequency: Duration,
@@ -132,10 +129,7 @@ async fn poll_network_state(
         );
         return Ok(None);
     };
-    // Half a pair. The state parsed; it just isn't applicable, so it is answered like a state
-    // carrying no assignment at all — nothing applied, re-read at the poll cadence, no backoff
-    // ladder. An incomplete state is a legal condition of a rolling migration (IB-40b), not a
-    // failure to read one, and the scheduler is who resolves it (FM-53d).
+    // A half-published pair is re-read at the poll cadence, not the error backoff (FM-53d).
     if assignment_source == AssignmentSource::Worker && published_bundle.is_none() {
         metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
         tracing::warn!(

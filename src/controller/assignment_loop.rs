@@ -1,9 +1,4 @@
-//! Applying the assignments the network announces.
-//!
-//! [`super::assignments`] answers "what is new?"; this module answers "what do we do about it?",
-//! including whether a failed attempt deserves another. Keeping the second question here is the
-//! point: only this side knows *why* an attempt failed, so only this side can tell a refusal
-//! that no retry can change from a fetch that might succeed next time.
+//! Applies assignments announced by [`super::assignments`].
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -23,41 +18,27 @@ use crate::metrics;
 use crate::storage::datasets_index::AssignmentBlob;
 use crate::storage::manager::AssignmentOutcome;
 
-/// How many announced assignments may queue up behind the one being applied.
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
 
-/// P-ASSIGN-RETRY-BASE for the document stage; doubles per attempt, jittered, capped at the
-/// poll period. The cap matters more than usual here: the stream does not re-announce a pair it
-/// has already offered, so this backoff is the only thing that brings the worker back to a
-/// failed fetch, and stretching it past one poll would idle the worker longer than the network
-/// is quiet.
+/// The stream re-announces a pair only when its location moves, so retries cannot wait longer
+/// than the poll period without idling past whatever the network last published.
 const RETRY_BASE: Duration = Duration::from_secs(1);
 
 /// What one attempt at an announced pair came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyOutcome {
-    /// Registered. Under `--assignment-source worker` this is now the assignment being
-    /// converged to.
     Applied,
-    /// Refused for a reason no later attempt can change: the document carries no entry for this
-    /// worker, a chunk's write schema has no roster, the bundle doesn't carry a schema the
-    /// document uses, or the credentials won't decrypt. Each is a property of the pair itself,
-    /// so the worker keeps the assignment in force and waits for a *different* pair rather than
-    /// fetching this one again (WP-2, FM-12).
+    /// Invalid pair; retry only after a different pair is announced.
     Refused,
-    /// The attempt failed on something outside the pair — the network, or the local disk. Worth
-    /// another attempt.
+    /// Transient network or local failure.
     Failed,
 }
 
 /// Whether the assignment that just failed is still the one to try.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wait {
-    /// The backoff elapsed; put it back at the front of the queue.
     Retry,
-    /// A newer assignment is queued, which subsumes this one — drop it.
     Superseded,
-    /// The update stream ended or the subsystem was cancelled.
     Stop,
 }
 
@@ -100,16 +81,11 @@ impl AssignmentApplier {
                 .fuse(),
         );
         let mut pending: VecDeque<AssignmentUpdate> = VecDeque::new();
-        // The last pair refused. A refusal is a property of the document, and an id names one
-        // document for all time (IB-40b), so a new location for it changes nothing. One slot:
-        // a bad pair sits published until someone fixes it, and alternating bad pairs cost one
-        // wasted fetch each, which is not worth a cache to avoid.
+        // The last pair refused; a new location for it changes nothing. One slot, so alternating
+        // bad pairs cost one wasted fetch each.
         let mut refused: Option<NetworkPair> = None;
         let mut processing_id: Option<String> = None;
-        // The assignment in `processing_id` stalled: some of its chunks exhausted
-        // their download attempts, so it will never become fully applied.
         let mut processing_stalled = false;
-        // The base cannot outrun the ceiling it grows towards.
         let base = RETRY_BASE.min(self.retry_cap);
         let mut backoff = base;
 
@@ -124,8 +100,6 @@ impl AssignmentApplier {
                                 processing_stalled = false;
                             }
                         }
-                        // Nothing to wait for and nothing to redo: the next *different* pair is
-                        // the only thing that can move this on.
                         ApplyOutcome::Refused => {
                             refused = Some(update.pair());
                             backoff = base;
@@ -155,10 +129,6 @@ impl AssignmentApplier {
             }
 
             match processing_id.clone() {
-                // The stalled assignment can never be fully applied. Jump to
-                // the most recent pending assignment as soon as one exists;
-                // until then only watch the update stream — the stall is
-                // terminal, so there is nothing to wait for.
                 Some(id) if processing_stalled => {
                     if !pending.is_empty() {
                         let skipped = keep_only_latest_pending_assignment(&mut pending);
@@ -251,17 +221,10 @@ impl AssignmentApplier {
             Ok(Err(e)) => {
                 return self.refuse(update, e);
             }
-            // Reading the document can panic where no verification helps: a roster entry's peer
-            // id is a fixed-size struct, so the flatbuffers verifier only checks its bytes are
-            // in bounds, and the reader panics when they don't decode. `spawn_blocking` has
-            // already contained it, so this is one more unusable document (FM-12) — re-raising
-            // it here would forward the panic to the subsystem tree and take the worker down
-            // over a document the network can republish.
+            // FlatBuffers verification does not validate peer-id bytes; contain reader panics.
             Err(e) if e.is_panic() => {
                 return self.refuse(update, "reading it panicked");
             }
-            // Blocking tasks are not cancelled by dropping the handle, so this is the runtime
-            // going away underneath us — nothing about the pair.
             Err(e) => {
                 warn!(assignment_id = %update.id, error = %e, "Validation didn't finish");
                 return ApplyOutcome::Failed;
@@ -276,9 +239,7 @@ impl AssignmentApplier {
             }
         }
 
-        // A bundle-only publication still revalidates the complete pair, but re-registering the
-        // assignment would reset its exhausted download budget even though its document did not
-        // change. Assignment ids are content identities, so the active id makes this a no-op.
+        // Do not reset the download budget for a bundle-only update.
         if self.worker.registered_assignment_id().as_deref() != Some(update.id.as_str()) {
             let worker = Arc::clone(&self.worker);
             tokio::task::spawn_blocking(move || {
@@ -292,9 +253,7 @@ impl AssignmentApplier {
         ApplyOutcome::Applied
     }
 
-    /// Refuses the pair, keeping whatever is in force. No later attempt at *this* pair can end
-    /// differently, so the counter is what tells a worker starved of usable documents from one
-    /// that cannot reach the network at all (OB-18).
+    /// Refuses the pair without replacing the active assignment.
     fn refuse(&self, update: &AssignmentUpdate, reason: impl std::fmt::Display) -> ApplyOutcome {
         if self.worker.registered_assignment_id().is_none() {
             metrics::set_status(metrics::WorkerStatus::NotRegistered);
@@ -335,13 +294,9 @@ impl AssignmentApplier {
         ))
     }
 
-    /// Queues an announced update, unless there is nothing to do with it.
-    ///
-    /// The stream announces a change of location as well as of identity, because a corrected url
-    /// is the only thing that can rescue a fetch that keeps failing. But a location only matters
-    /// while a fetch of that identity is still outstanding: moved under a pair already applied,
-    /// or one already refused, it is not work — and re-applying on it would re-fetch the whole
-    /// document every time the network rotated a url.
+    /// Queues an update unless nothing is outstanding for its pair. A location only matters
+    /// while a fetch of that identity can still be rescued by it; under a pair already applied
+    /// or refused, acting on one would re-fetch the document on every url rotation.
     fn absorb(
         &self,
         update: AssignmentUpdate,
@@ -363,9 +318,7 @@ impl AssignmentApplier {
         push_pending_assignment(pending, update)
     }
 
-    /// Backs off before another attempt, still taking in updates. A newer assignment ends the
-    /// wait at once and supersedes the one that failed: assignments are absolute, so the newer
-    /// one subsumes it, and sitting out the backoff first is head-of-line blocking.
+    /// Accepts newer assignments while waiting to retry.
     async fn wait_before_retry(
         &self,
         backoff: Duration,
