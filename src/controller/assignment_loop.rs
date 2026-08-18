@@ -43,6 +43,18 @@ enum Wait {
     Stop,
 }
 
+/// Which half of the pair could not be fetched. The bundle is prepared first, so a bundle
+/// failure must not read as a document one.
+enum Unfetched {
+    Bundle(anyhow::Error),
+    Document(anyhow::Error),
+}
+
+/// The whole cause chain on one line; `Display` alone shows only the outermost context.
+fn chain(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
 pub struct AssignmentApplier {
     worker: Arc<Worker>,
     schema_manager: Arc<SchemaManager>,
@@ -199,8 +211,12 @@ impl AssignmentApplier {
         tracing::debug!("Downloading assignment \"{}\"", update.id);
         let (document, prepared_bundle) = match self.download(update).await {
             Ok(downloaded) => downloaded,
-            Err(e) => {
-                warn!(assignment_id = %update.id, error = %e, "Failed to download assignment");
+            Err(Unfetched::Bundle(e)) => {
+                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to prepare schema bundle");
+                return ApplyOutcome::Failed;
+            }
+            Err(Unfetched::Document(e)) => {
+                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to download assignment");
                 return ApplyOutcome::Failed;
             }
         };
@@ -231,7 +247,7 @@ impl AssignmentApplier {
                 return self.refuse(update, "reading it panicked");
             }
             Err(e) => {
-                warn!(assignment_id = %update.id, error = %e, "Validation didn't finish");
+                warn!(assignment_id = %update.id, error = %chain(&e.into()), "Validation didn't finish");
                 return ApplyOutcome::Failed;
             }
         };
@@ -239,7 +255,7 @@ impl AssignmentApplier {
         if let Some(bundle) = prepared_bundle {
             if let Err(e) = bundle.install() {
                 metrics::SCHEMA_BUNDLE_FAILURES.inc();
-                warn!(assignment_id = %update.id, error = ?e, "Failed to activate schema bundle");
+                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to activate schema bundle");
                 return ApplyOutcome::Failed;
             }
         }
@@ -278,23 +294,27 @@ impl AssignmentApplier {
     async fn download(
         &self,
         update: &AssignmentUpdate,
-    ) -> anyhow::Result<(Vec<u8>, Option<PreparedSchemaUpdate>)> {
-        if self.assignment_source == AssignmentSource::Legacy {
-            return Ok((
-                assignments::fetch_document(&update.fb_url_v1, &self.client).await?,
-                None,
-            ));
-        }
-
-        let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("network state publishes a worker assignment but no schema bundle")
-        })?;
-        let prepared = self.schema_manager.prepare(bundle, &self.client).await?;
-
-        Ok((
-            assignments::fetch_document(&update.fb_url_v1, &self.client).await?,
-            Some(prepared),
-        ))
+    ) -> Result<(Vec<u8>, Option<PreparedSchemaUpdate>), Unfetched> {
+        let prepared = match self.assignment_source {
+            AssignmentSource::Legacy => None,
+            AssignmentSource::Worker => {
+                let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
+                    Unfetched::Bundle(anyhow::anyhow!(
+                        "network state publishes a worker assignment but no schema bundle"
+                    ))
+                })?;
+                Some(
+                    self.schema_manager
+                        .prepare(bundle, &self.client)
+                        .await
+                        .map_err(Unfetched::Bundle)?,
+                )
+            }
+        };
+        let document = assignments::fetch_document(&update.fb_url_v1, &self.client)
+            .await
+            .map_err(Unfetched::Document)?;
+        Ok((document, prepared))
     }
 
     /// Queues an update unless nothing is outstanding for its pair. A location only matters

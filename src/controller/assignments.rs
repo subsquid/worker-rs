@@ -92,7 +92,7 @@ pub fn new_assignments_stream(
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::warn!(error = %e, "Failed to update assignment, retrying in {:?}", current_delay);
+                        tracing::warn!(error = %format!("{e:#}"), "Failed to update assignment, retrying in {:?}", current_delay);
                         let duration = rand::rng().random_range((current_delay / 2)..current_delay);
                         tokio::time::sleep(duration).await;
                         current_delay = std::cmp::min(current_delay * 2, max_delay);
