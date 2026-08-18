@@ -9,6 +9,7 @@ use tokio::time::MissedTickBehavior;
 use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
+use crate::storage::datasets_index::AssignmentBlob;
 
 /// Identifies an assignment and schema bundle announcement (ADR-21). Identity, not location: an
 /// id names one document for all time (IB-40b).
@@ -235,21 +236,30 @@ async fn fetch_network_state(
     Ok(published)
 }
 
-pub async fn fetch_assignment(
+/// The assignment document's bytes, gunzipped. Fails on transport and gzip errors only: whether
+/// the bytes are a document is a verdict on the document, decided in [`decode_document`].
+pub async fn fetch_document(
     url: &str,
     reqwest_client: &reqwest::Client,
-) -> anyhow::Result<sqd_assignments::Assignment> {
-    let buf = download_gzipped(url, reqwest_client).await?;
-    Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
+) -> anyhow::Result<Vec<u8>> {
+    download_gzipped(url, reqwest_client).await
 }
 
-pub async fn fetch_worker_assignment(
-    url: &str,
-    reqwest_client: &reqwest::Client,
-) -> anyhow::Result<sqd_assignments::WorkerAssignment> {
-    let buf = download_gzipped(url, reqwest_client).await?;
-    sqd_assignments::WorkerAssignment::from_owned(buf)
-        .map_err(|e| anyhow::anyhow!("malformed worker assignment: {e}"))
+/// Reads a fetched document in the mode's format. A worker document is verified and a failure
+/// is a property of the bytes (FM-12); a legacy document is trusted (ADR-3), so reading it can
+/// panic later and callers contain that where they read.
+pub fn decode_document(
+    assignment_source: AssignmentSource,
+    document: Vec<u8>,
+) -> anyhow::Result<AssignmentBlob> {
+    match assignment_source {
+        AssignmentSource::Legacy => Ok(AssignmentBlob::Legacy(
+            sqd_assignments::Assignment::from_owned_unchecked(document),
+        )),
+        AssignmentSource::Worker => sqd_assignments::WorkerAssignment::from_owned(document)
+            .map(AssignmentBlob::Worker)
+            .map_err(|e| anyhow::anyhow!("malformed worker assignment: {e}")),
+    }
 }
 
 async fn download_gzipped(url: &str, reqwest_client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {

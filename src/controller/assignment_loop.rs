@@ -15,7 +15,6 @@ use super::schema_bundle::{PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
 use crate::cli::AssignmentSource;
 use crate::metrics;
-use crate::storage::datasets_index::AssignmentBlob;
 use crate::storage::manager::AssignmentOutcome;
 
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
@@ -198,7 +197,7 @@ impl AssignmentApplier {
     /// and registers the assignment — in that order (ADR-21).
     pub async fn apply(&self, update: &AssignmentUpdate) -> ApplyOutcome {
         tracing::debug!("Downloading assignment \"{}\"", update.id);
-        let (assignment, prepared_bundle) = match self.download(update).await {
+        let (document, prepared_bundle) = match self.download(update).await {
             Ok(downloaded) => downloaded,
             Err(e) => {
                 warn!(assignment_id = %update.id, error = %e, "Failed to download assignment");
@@ -210,8 +209,12 @@ impl AssignmentApplier {
         let worker = Arc::clone(&self.worker);
         let keypair = self.keypair.clone();
         let id = update.id.clone();
+        let assignment_source = self.assignment_source;
         let prepared_ids = prepared_bundle.as_ref().map(|bundle| bundle.ids());
+        // Decoding is a verdict on the document like the rest of validation (FM-12): a document
+        // that will not decode is refused, not retried, and the verifier runs off the runtime.
         let validated = tokio::task::spawn_blocking(move || {
+            let assignment = assignments::decode_document(assignment_source, document)?;
             worker.prepare_assignment(assignment, id, &keypair, |id| {
                 prepared_ids.as_ref().is_none_or(|ids| ids.contains(&id))
             })
@@ -268,17 +271,17 @@ impl AssignmentApplier {
         ApplyOutcome::Refused
     }
 
-    /// The returned [`PreparedSchemaUpdate`] holds the schema store's mutation lock until it is
-    /// installed or dropped.
+    /// The pair's bytes: the document as fetched, and the bundle prepared for install. Fails on
+    /// transport only; what the bytes are is judged with the rest of validation. The returned
+    /// [`PreparedSchemaUpdate`] holds the schema store's mutation lock until it is installed or
+    /// dropped.
     async fn download(
         &self,
         update: &AssignmentUpdate,
-    ) -> anyhow::Result<(AssignmentBlob, Option<PreparedSchemaUpdate>)> {
+    ) -> anyhow::Result<(Vec<u8>, Option<PreparedSchemaUpdate>)> {
         if self.assignment_source == AssignmentSource::Legacy {
             return Ok((
-                AssignmentBlob::Legacy(
-                    assignments::fetch_assignment(&update.fb_url_v1, &self.client).await?,
-                ),
+                assignments::fetch_document(&update.fb_url_v1, &self.client).await?,
                 None,
             ));
         }
@@ -289,9 +292,7 @@ impl AssignmentApplier {
         let prepared = self.schema_manager.prepare(bundle, &self.client).await?;
 
         Ok((
-            AssignmentBlob::Worker(
-                assignments::fetch_worker_assignment(&update.fb_url_v1, &self.client).await?,
-            ),
+            assignments::fetch_document(&update.fb_url_v1, &self.client).await?,
             Some(prepared),
         ))
     }
@@ -642,6 +643,52 @@ mod tests {
             "the schemas are in force by the time the assignment is"
         );
         assert!(f.worker.query_schemas().get_by_id(SchemaId::new(7)).is_ok());
+    }
+
+    /// A document that fails verification is a verdict on the bytes, not on the network (FM-12):
+    /// refused once and left alone, rather than fetched again — bundle and all — every retry
+    /// period until the network publishes something else.
+    #[tokio::test]
+    async fn a_document_that_will_not_decode_is_refused_not_retried() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        // A complete gzip whose payload is no worker assignment at all.
+        let document = f
+            .stub
+            .serve("/garbage.fb.gz", gzip(b"not a worker assignment"), 0);
+        let mine = f
+            .stub
+            .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
+
+        assert_eq!(
+            f.applier
+                .apply(&update("a1", document.clone(), bundle.clone()))
+                .await,
+            ApplyOutcome::Refused
+        );
+        assert!(f.worker.registered_assignment_id().is_none());
+        assert!(
+            crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
+            "an unusable document is what OB-18 counts"
+        );
+
+        // In the loop: asked once, then only a different pair moves things.
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                update("a1", document, bundle.clone()),
+                update("a2", mine, bundle),
+            ],
+        );
+        await_registered(&f.worker, "a2").await;
+        token.cancel();
+        running.await.unwrap();
+        assert_eq!(
+            f.stub.hits("/garbage.fb.gz"),
+            2,
+            "one direct attempt above and one in the loop; no retry in between"
+        );
     }
 
     /// Reading a document can panic on bytes no verification checks. Contained where it happens,
