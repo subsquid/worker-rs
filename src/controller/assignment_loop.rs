@@ -15,8 +15,8 @@ use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Instrument};
 
-use super::assignments::{self, AssignmentUpdate, NetworkUpdate};
-use super::schema_bundle::{PreparedSchemaUpdate, SchemaBundle, SchemaManager};
+use super::assignments::{self, AssignmentUpdate};
+use super::schema_bundle::{PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
 use crate::cli::AssignmentSource;
 use crate::metrics;
@@ -91,7 +91,7 @@ impl AssignmentApplier {
 
     pub async fn run(
         &self,
-        updates: impl Stream<Item = NetworkUpdate>,
+        updates: impl Stream<Item = AssignmentUpdate>,
         cancellation_token: CancellationToken,
     ) {
         let mut updates = Box::pin(
@@ -167,7 +167,7 @@ impl AssignmentApplier {
                             let Some(update) = update else {
                                 break;
                             };
-                            self.absorb_update(update, &mut pending).await;
+                            push_pending_assignment(&mut pending, update);
                         }
                         _ = cancellation_token.cancelled() => break,
                     }
@@ -178,7 +178,7 @@ impl AssignmentApplier {
                             let Some(update) = update else {
                                 break;
                             };
-                            if self.absorb_update(update, &mut pending).await {
+                            if push_pending_assignment(&mut pending, update) {
                                 warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
                                 processing_id = None;
                             }
@@ -203,7 +203,7 @@ impl AssignmentApplier {
                             let Some(update) = update else {
                                 break;
                             };
-                            self.absorb_update(update, &mut pending).await;
+                            push_pending_assignment(&mut pending, update);
                         }
                         _ = cancellation_token.cancelled() => break,
                     }
@@ -294,8 +294,7 @@ impl AssignmentApplier {
     }
 
     /// The returned [`PreparedSchemaUpdate`] holds the schema store's mutation lock until it is
-    /// installed or dropped, so it must not be kept alive across anything that prepares another
-    /// bundle — [`Self::absorb_update`] in particular.
+    /// installed or dropped.
     async fn download(
         &self,
         update: &AssignmentUpdate,
@@ -322,46 +321,6 @@ impl AssignmentApplier {
         ))
     }
 
-    /// A bundle that moved without its assignment. Best effort: a bundle is only *needed* by an
-    /// assignment, and every assignment is announced with its own reference to the bundle it
-    /// needs, so what fails here the next pair brings back.
-    pub async fn install_bundle_alone(&self, bundle: &SchemaBundle) {
-        match self.schema_manager.prepare(bundle, &self.client).await {
-            Ok(prepared)
-                if self
-                    .worker
-                    .assignment_schemas_covered_by(|id| prepared.contains(id)) =>
-            {
-                if let Err(e) = prepared.install() {
-                    metrics::SCHEMA_BUNDLE_FAILURES.inc();
-                    warn!(hash = %bundle.hash, error = ?e, "Failed to activate schema bundle");
-                }
-            }
-            Ok(_) => {
-                metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
-                warn!(hash = %bundle.hash, "Schema bundle does not cover the assignment in force");
-            }
-            Err(e) => {
-                warn!(hash = %bundle.hash, error = ?e, "Failed to merge schema bundle");
-            }
-        }
-    }
-
-    /// Returns whether the pending queue overflowed, which drops everything but the latest.
-    async fn absorb_update(
-        &self,
-        update: NetworkUpdate,
-        pending: &mut VecDeque<AssignmentUpdate>,
-    ) -> bool {
-        match update {
-            NetworkUpdate::Assignment(update) => push_pending_assignment(pending, update),
-            NetworkUpdate::SchemaBundle(bundle) => {
-                self.install_bundle_alone(&bundle).await;
-                false
-            }
-        }
-    }
-
     /// Backs off before another attempt, still taking in updates. A newer assignment ends the
     /// wait at once and supersedes the one that failed: assignments are absolute, so the newer
     /// one subsumes it, and sitting out the backoff first is head-of-line blocking.
@@ -369,7 +328,7 @@ impl AssignmentApplier {
         &self,
         backoff: Duration,
         pending: &mut VecDeque<AssignmentUpdate>,
-        updates: &mut (impl Stream<Item = NetworkUpdate> + Unpin),
+        updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
         cancellation_token: &CancellationToken,
     ) -> Wait {
         if !pending.is_empty() {
@@ -383,7 +342,7 @@ impl AssignmentApplier {
                     let Some(update) = update else {
                         return Wait::Stop;
                     };
-                    self.absorb_update(update, pending).await;
+                    push_pending_assignment(pending, update);
                     if !pending.is_empty() {
                         return Wait::Superseded;
                     }
@@ -474,7 +433,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::controller::schema_bundle::test_support::{targz, SCHEMA};
-    use crate::controller::schema_bundle::BundleHash;
+    use crate::controller::schema_bundle::{BundleHash, SchemaBundle};
     use crate::storage::downloader::DownloadConfig;
     use crate::storage::manager::StateManager;
     use crate::types::schema::SchemaId;
@@ -693,13 +652,7 @@ mod tests {
     ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
         let token = CancellationToken::new();
         let applier = Arc::clone(applier);
-        let stream = futures::stream::iter(
-            updates
-                .into_iter()
-                .map(NetworkUpdate::Assignment)
-                .collect::<Vec<_>>(),
-        )
-        .chain(futures::stream::pending());
+        let stream = futures::stream::iter(updates).chain(futures::stream::pending());
         let running = tokio::spawn({
             let token = token.clone();
             async move { applier.run(stream, token).await }
@@ -801,6 +754,61 @@ mod tests {
             f.stub.hits("/a1.fb.gz"),
             2,
             "the network failing is not the pair's fault: back off and ask again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bundle_that_fails_to_download_is_tried_again() {
+        let f = fixture().await;
+        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        let bundle = (
+            BundleHash::of(&archive),
+            f.stub.serve("/bundle-retry.tar.gz", archive, 1),
+        );
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+
+        let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
+        await_registered(&f.worker, "a1").await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.stub.hits("/bundle-retry.tar.gz"),
+            2,
+            "observing a bundle hash must not consume a transiently failed pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_bundle_reoffers_a_refused_assignment() {
+        let f = fixture().await;
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        let wrong_archive = targz(&[("9.yaml", SCHEMA.as_bytes())]);
+        let wrong_bundle = (
+            BundleHash::of(&wrong_archive),
+            f.stub.serve("/bundle-wrong.tar.gz", wrong_archive, 0),
+        );
+        let corrected_bundle = bundle(&f.stub);
+
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                update("a1", document.clone(), wrong_bundle),
+                update("a1", document, corrected_bundle),
+            ],
+        );
+        await_registered(&f.worker, "a1").await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.stub.hits("/a1.fb.gz"),
+            2,
+            "a bundle change makes a new pair whose assignment must be reconsidered"
         );
     }
 

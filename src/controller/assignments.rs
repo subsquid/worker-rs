@@ -34,11 +34,6 @@ impl AssignmentUpdate {
     }
 }
 
-pub enum NetworkUpdate {
-    Assignment(AssignmentUpdate),
-    SchemaBundle(SchemaBundle),
-}
-
 pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client {
     let version = env!("CARGO_PKG_VERSION");
     reqwest::Client::builder()
@@ -60,7 +55,7 @@ pub fn new_assignments_stream(
     max_delay: Duration,
     peer_id: PeerId,
     assignment_source: AssignmentSource,
-) -> impl Stream<Item = NetworkUpdate> {
+) -> impl Stream<Item = AssignmentUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -96,7 +91,7 @@ async fn poll_network_state(
     reqwest_client: &reqwest::Client,
     assignment_source: AssignmentSource,
     announced: &mut NetworkPair,
-) -> anyhow::Result<Option<NetworkUpdate>> {
+) -> anyhow::Result<Option<AssignmentUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
     let published_bundle = (assignment_source == AssignmentSource::Worker)
@@ -123,14 +118,12 @@ async fn poll_network_state(
         anyhow::bail!("network state publishes a worker assignment but no schema bundle");
     }
 
-    if announced.assignment_id.as_deref() == Some(assignment.id.as_str()) {
-        // The halves are versioned independently (IB-40b), so a bundle can move on its own.
-        let Some(bundle) = published_bundle.filter(|b| announced.bundle_hash != Some(b.hash))
-        else {
-            return Ok(None);
-        };
-        announced.bundle_hash = Some(bundle.hash);
-        return Ok(Some(NetworkUpdate::SchemaBundle(bundle)));
+    let current = NetworkPair {
+        assignment_id: Some(assignment.id.clone()),
+        bundle_hash: published_bundle.as_ref().map(|bundle| bundle.hash),
+    };
+    if *announced == current {
+        return Ok(None);
     }
 
     let update = AssignmentUpdate {
@@ -144,7 +137,7 @@ async fn poll_network_state(
     };
     tracing::debug!("Discovered assignment \"{}\"", update.id);
     *announced = update.pair();
-    Ok(Some(NetworkUpdate::Assignment(update)))
+    Ok(Some(update))
 }
 
 fn visible_assignment(
@@ -305,28 +298,6 @@ mod tests {
             .unwrap()
     }
 
-    #[track_caller]
-    fn assignment_of(update: Option<NetworkUpdate>) -> AssignmentUpdate {
-        match update {
-            Some(NetworkUpdate::Assignment(update)) => update,
-            Some(NetworkUpdate::SchemaBundle(b)) => {
-                panic!("expected an assignment, got schema bundle {}", b.hash)
-            }
-            None => panic!("expected an assignment, got no update"),
-        }
-    }
-
-    #[track_caller]
-    fn bundle_of(update: Option<NetworkUpdate>) -> SchemaBundle {
-        match update {
-            Some(NetworkUpdate::SchemaBundle(bundle)) => bundle,
-            Some(NetworkUpdate::Assignment(a)) => {
-                panic!("expected a bundle on its own, got assignment {}", a.id)
-            }
-            None => panic!("expected a bundle, got no update"),
-        }
-    }
-
     fn test_client() -> reqwest::Client {
         new_reqwest_client(Duration::from_secs(5), PeerId::random())
     }
@@ -347,19 +318,17 @@ mod tests {
         let source = AssignmentSource::Worker;
         let mut announced = NetworkPair::default();
 
-        let update = assignment_of(
-            poll_network_state(&url, &client, source, &mut announced)
-                .await
-                .unwrap(),
-        );
+        let update = poll_network_state(&url, &client, source, &mut announced)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(update.id, "assignment-1");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
-        let update = assignment_of(
-            poll_network_state(&url, &client, source, &mut announced)
-                .await
-                .unwrap(),
-        );
+        let update = poll_network_state(&url, &client, source, &mut announced)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(update.id, "assignment-2");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
@@ -371,15 +340,12 @@ mod tests {
             "neither half moved"
         );
 
-        assert_eq!(
-            bundle_of(
-                poll_network_state(&url, &client, source, &mut announced)
-                    .await
-                    .unwrap()
-            )
-            .hash,
-            hash(0xbb)
-        );
+        let update = poll_network_state(&url, &client, source, &mut announced)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.id, "assignment-2");
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xbb));
     }
 
     #[tokio::test]
@@ -393,7 +359,7 @@ mod tests {
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap();
-        assert_eq!(assignment_of(update).id, "assignment-1");
+        assert_eq!(update.unwrap().id, "assignment-1");
 
         assert!(
             poll_network_state(&url, &client, source, &mut announced)
@@ -406,7 +372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bundle_announced_alone_leaves_its_assignment_still_to_come() {
+    async fn a_bundle_change_reoffers_the_assignment_as_a_pair() {
         let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state)]).await;
         let mut announced = NetworkPair {
@@ -422,7 +388,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(assignment_of(update).id, "assignment-1");
+        let update = update.unwrap();
+        assert_eq!(update.id, "assignment-1");
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
     }
 
     #[tokio::test]
@@ -463,7 +431,7 @@ mod tests {
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap();
-        let update = assignment_of(update);
+        let update = update.unwrap();
         assert_eq!(update.id, "a1");
         assert!(
             update.schema_bundle.is_none(),

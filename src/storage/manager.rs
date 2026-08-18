@@ -429,13 +429,6 @@ impl StateManager {
             .map(|index| index.assignment_id().to_owned())
     }
 
-    pub fn assignment_schemas_covered_by(&self, covers: impl Fn(SchemaId) -> bool) -> bool {
-        self.datasets_index
-            .lock()
-            .as_ref()
-            .is_some_and(|index| index.schemas_covered_by(covers))
-    }
-
     #[instrument(err, skip(self))]
     async fn drop_chunk(&self, chunk: &ChunkRef) -> Result<()> {
         let path = self.chunk_path(chunk);

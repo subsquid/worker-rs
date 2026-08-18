@@ -28,9 +28,7 @@ use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::{
-    PreparedSchemaUpdate, SchemaBundle, SchemaManager, SchemaRegistry,
-};
+use sqd_worker::controller::schema_bundle::{SchemaManager, SchemaRegistry};
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::manager::StateManager;
@@ -116,11 +114,10 @@ pub struct Harness {
     keypair: Keypair,
     format: Format,
     schemas: Arc<SchemaRegistry>,
-    schema_manager: Arc<SchemaManager>,
     query_schemas: Arc<SchemaRegistry>,
     schema_stub: HttpStub,
-    assignment_stream: std::pin::Pin<Box<dyn futures::Stream<Item = assignments::NetworkUpdate>>>,
-    assignment_client: reqwest::Client,
+    assignment_stream:
+        std::pin::Pin<Box<dyn futures::Stream<Item = assignments::AssignmentUpdate>>>,
     applier: AssignmentApplier,
     shutdown: CancellationToken,
     // Dropped last: the data dir must outlive every subsystem that writes into it.
@@ -276,11 +273,9 @@ impl Harness {
             keypair,
             format: config.format,
             schemas,
-            schema_manager,
             query_schemas,
             schema_stub,
             assignment_stream,
-            assignment_client,
             applier,
             shutdown,
             data_dir,
@@ -341,31 +336,10 @@ impl Harness {
     /// Waits for the next network-state change and drives the production apply step over it.
     /// Returns whether the assignment registered (WP-2: a failed application changes nothing).
     pub async fn poll_and_apply(&mut self) -> bool {
-        let update = loop {
-            let update = tokio::time::timeout(CONVERGE_TIMEOUT, self.assignment_stream.next())
-                .await
-                .expect("HC-1 published an assignment within the convergence timeout")
-                .expect("assignment stream is still open");
-            match update {
-                assignments::NetworkUpdate::Assignment(update) => break update,
-                // SchemaBundle moved without the assignment: install and keep waiting, like production.
-                assignments::NetworkUpdate::SchemaBundle(bundle) => {
-                    let prepared = self
-                        .install_schema_bundle(&bundle)
-                        .await
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "schema bundle {} could not be installed: {e:?}",
-                                bundle.hash
-                            )
-                        });
-                    assert!(self
-                        .worker
-                        .assignment_schemas_covered_by(|id| prepared.contains(id)));
-                    prepared.install().unwrap();
-                }
-            }
-        };
+        let update = tokio::time::timeout(CONVERGE_TIMEOUT, self.assignment_stream.next())
+            .await
+            .expect("HC-1 published an assignment within the convergence timeout")
+            .expect("assignment stream is still open");
 
         match self.applier.apply(&update).await {
             ApplyOutcome::Applied => true,
@@ -373,15 +347,6 @@ impl Harness {
             // previous assignment in force, which is what the tests assert on.
             ApplyOutcome::Refused | ApplyOutcome::Failed => false,
         }
-    }
-
-    async fn install_schema_bundle(
-        &self,
-        bundle: &SchemaBundle,
-    ) -> anyhow::Result<PreparedSchemaUpdate> {
-        self.schema_manager
-            .prepare(bundle, &self.assignment_client)
-            .await
     }
 
     /// Blocks until every assigned chunk is locally available (LIV-1 convergence).

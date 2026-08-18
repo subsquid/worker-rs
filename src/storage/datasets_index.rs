@@ -228,17 +228,6 @@ impl DatasetsIndex {
         &self.assignment_id
     }
 
-    pub fn schemas_covered_by(&self, covers: impl Fn(SchemaId) -> bool) -> bool {
-        match &self.assignment {
-            AssignmentBlob::Legacy(_) => true,
-            AssignmentBlob::Worker(assignment) => self.chunks.values().all(|chunk_ref| {
-                assignment
-                    .get_chunk(*chunk_ref)
-                    .is_some_and(|chunk| covers(SchemaId::from(chunk.write_schema_id())))
-            }),
-        }
-    }
-
     pub fn chunks(&self) -> &HashMap<ChunkRef, ChunkAssignmentRef> {
         &self.chunks
     }
