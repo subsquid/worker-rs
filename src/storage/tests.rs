@@ -396,6 +396,39 @@ mod worker_assignment {
         );
     }
 
+    /// A table name is joined onto the chunk's directory, so one that is a path rather than a
+    /// file name writes outside it while the chunk still commits — a chunk held and reported
+    /// while quietly missing a table, which queries answer as empty rather than as an error.
+    #[test]
+    fn a_roster_naming_a_table_that_is_not_a_file_name_is_refused() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+        // Sorted, as the builder requires: '.' precedes 'b'.
+        builder
+            .register_write_schema(7, &["../escape", "blocks"])
+            .unwrap();
+        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
+        dataset
+            .new_chunk()
+            .id(CHUNK_ID)
+            .block_range(221000000..=221000649)
+            .size(1000000)
+            .write_schema_id(7)
+            .worker_indexes(&[0])
+            .finish()
+            .unwrap();
+        dataset.finish().unwrap();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        let assignment = WorkerAssignment::from_owned(builder.finish()).unwrap();
+
+        let message = expect_rejected(assignment, &keypair);
+        assert!(
+            message.contains("../escape") && message.contains("not a file name"),
+            "{message}"
+        );
+    }
+
     /// Otherwise the failure — or a silent wrong-version match — surfaces only at query time.
     #[test]
     fn an_assignment_referencing_an_unavailable_schema_is_rejected() {

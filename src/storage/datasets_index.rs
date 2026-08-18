@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use camino::{Utf8Component, Utf8Path};
 use reqwest::Url;
 use sqd_network_transport::Keypair;
 use tracing::error;
@@ -181,11 +182,24 @@ impl DatasetsIndex {
                         );
                     }
                     let schema_id = SchemaId::from(chunk.write_schema_id());
-                    if checked.insert(schema_id) && !schema_available(schema_id) {
-                        crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
-                        anyhow::bail!(
-                            "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
-                        );
+                    // Once per schema, not per chunk: both of these are properties of the roster.
+                    if checked.insert(schema_id) {
+                        if !schema_available(schema_id) {
+                            crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+                            anyhow::bail!(
+                                "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
+                            );
+                        }
+                        if let Some(table) = assignment
+                            .get_write_schema(chunk.write_schema_id())
+                            .and_then(|roster| {
+                                roster.tables().iter().find(|table| !is_file_name(table))
+                            })
+                        {
+                            anyhow::bail!(
+                                "write schema {schema_id} names a table '{table}' that is not a file name",
+                            );
+                        }
                     }
                     chunks.insert(
                         pool.chunk_ref(chunk.dataset().id(), &id, chunk.version()),
@@ -246,6 +260,16 @@ impl DatasetsIndex {
     pub fn chunks(&self) -> &HashMap<ChunkRef, ChunkAssignmentRef> {
         &self.chunks
     }
+}
+
+/// A table name becomes `<name>.parquet` inside the chunk's directory, so it has to be a file
+/// name and not a path. `..` or a separator would write the file somewhere else while the chunk
+/// still commits, leaving one the worker holds and reports while it is quietly missing a table —
+/// which queries answer as empty rather than as an error.
+fn is_file_name(name: &str) -> bool {
+    let mut components = Utf8Path::new(name).components();
+    matches!(components.next(), Some(Utf8Component::Normal(first)) if first == name)
+        && components.next().is_none()
 }
 
 fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Result<Url, UnresolvedChunk> {
