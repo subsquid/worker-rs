@@ -788,6 +788,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_truncated_assignment_download_is_superseded_by_a_usable_copy() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        f.stub.serve(
+            "/truncated.fb.gz",
+            b"not a complete gzip stream".to_vec(),
+            0,
+        );
+
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                update("a1", f.stub.url("/truncated.fb.gz"), bundle.clone()),
+                update("a1", document, bundle),
+            ],
+        );
+        await_registered(&f.worker, "a1").await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(f.stub.hits("/truncated.fb.gz"), 1);
+        assert_eq!(f.stub.hits("/a1.fb.gz"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_bundle_activation_failure_is_tried_again_without_partial_state() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        f.schema_manager.fail_next_install();
+        let update = update("a1", document, bundle);
+
+        assert_eq!(f.applier.apply(&update).await, ApplyOutcome::Failed);
+        assert!(f.worker.registered_assignment_id().is_none());
+        assert!(f.schema_manager.installed_hash().is_none());
+
+        let (token, running) = run_loop(&f.applier, vec![update]);
+        await_registered(&f.worker, "a1").await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(f.stub.hits("/a1.fb.gz"), 2);
+        assert_eq!(f.stub.hits("/bundle.tar.gz"), 2);
+    }
+
+    #[tokio::test]
     async fn a_new_bundle_reoffers_a_refused_assignment() {
         let f = fixture().await;
         let document = f

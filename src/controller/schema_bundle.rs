@@ -155,6 +155,8 @@ pub struct SchemaRegistry {
     dir: Utf8PathBuf,
     snapshot: ArcSwap<SchemaSnapshot>,
     merge_lock: parking_lot::Mutex<()>,
+    #[cfg(test)]
+    activation_failures: std::sync::atomic::AtomicUsize,
 }
 
 pub struct SchemaManager {
@@ -191,6 +193,13 @@ impl SchemaManager {
     pub fn installed_hash(&self) -> Option<BundleHash> {
         self.registry.installed_hash()
     }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_install(&self) {
+        self.registry
+            .activation_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl SchemaRegistry {
@@ -200,6 +209,7 @@ impl SchemaRegistry {
             dir: Utf8PathBuf::new(),
             snapshot: ArcSwap::from_pointee(SchemaSnapshot::default()),
             merge_lock: parking_lot::Mutex::new(()),
+            activation_failures: Default::default(),
         }
     }
 
@@ -227,6 +237,8 @@ impl SchemaRegistry {
             dir,
             snapshot: ArcSwap::from_pointee(snapshot),
             merge_lock: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            activation_failures: Default::default(),
         }
     }
 
@@ -384,6 +396,18 @@ impl SchemaRegistry {
         bundle: PreparedBundle,
         loaded: &prometheus_client::metrics::gauge::Gauge,
     ) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if self
+            .activation_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            anyhow::bail!("injected schema bundle activation failure");
+        }
         let _updating = self.merge_lock.lock();
         match bundle.files {
             PreparedFiles::Cached => {}
