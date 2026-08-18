@@ -38,6 +38,8 @@ pub enum ApplyOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wait {
     Retry,
+    /// The network announced something else meanwhile. Whatever that queued is next; if it
+    /// queued nothing — the pair in force again — the failed pair is simply retracted.
     Superseded,
     Stop,
 }
@@ -296,7 +298,9 @@ impl AssignmentApplier {
 
     /// Queues an update unless nothing is outstanding for its pair. A location only matters
     /// while a fetch of that identity can still be rescued by it; under a pair already applied
-    /// or refused, acting on one would re-fetch the document on every url rotation.
+    /// or refused, acting on one would re-fetch the document on every url rotation. Such an
+    /// announcement is still the network's latest word, though: whatever was queued behind it
+    /// is no longer published, so it is dropped rather than applied later.
     fn absorb(
         &self,
         update: AssignmentUpdate,
@@ -309,16 +313,28 @@ impl AssignmentApplier {
             bundle_hash: self.schema_manager.installed_hash(),
         };
         if pair == applied || refused.as_ref() == Some(&pair) {
-            tracing::debug!(
-                assignment_id = %update.id,
-                "Nothing outstanding for this pair; its location moved and that is all"
-            );
+            if pending.is_empty() {
+                tracing::debug!(
+                    assignment_id = %update.id,
+                    "Nothing outstanding for this pair; its location moved and that is all"
+                );
+            } else {
+                tracing::info!(
+                    assignment_id = %update.id,
+                    retracted = pending.len(),
+                    "Network is back on a pair with nothing outstanding; dropping what was queued"
+                );
+                pending.clear();
+            }
             return false;
         }
         push_pending_assignment(pending, update)
     }
 
-    /// Accepts newer assignments while waiting to retry.
+    /// Accepts newer announcements while waiting to retry. Any announcement ends the wait: it
+    /// differs from the failing update by pair or by location, so it is either the rescue to try
+    /// next or the network moving off the failing pair — in both cases the failing update is not
+    /// what to retry.
     async fn wait_before_retry(
         &self,
         backoff: Duration,
@@ -330,22 +346,16 @@ impl AssignmentApplier {
         if !pending.is_empty() {
             return Wait::Superseded;
         }
-        let delay = tokio::time::sleep(jitter(backoff));
-        tokio::pin!(delay);
-        loop {
-            tokio::select! {
-                update = updates.next() => {
-                    let Some(update) = update else {
-                        return Wait::Stop;
-                    };
-                    self.absorb(update, pending, refused);
-                    if !pending.is_empty() {
-                        return Wait::Superseded;
-                    }
-                }
-                _ = &mut delay => return Wait::Retry,
-                _ = cancellation_token.cancelled() => return Wait::Stop,
+        tokio::select! {
+            update = updates.next() => {
+                let Some(update) = update else {
+                    return Wait::Stop;
+                };
+                self.absorb(update, pending, refused);
+                Wait::Superseded
             }
+            _ = tokio::time::sleep(jitter(backoff)) => Wait::Retry,
+            _ = cancellation_token.cancelled() => Wait::Stop,
         }
     }
 }
@@ -452,6 +462,10 @@ mod tests {
     }
 
     async fn fixture() -> Fixture {
+        fixture_with(AssignmentSource::Worker).await
+    }
+
+    async fn fixture_with(assignment_source: AssignmentSource) -> Fixture {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let dir = tempfile::tempdir().unwrap();
@@ -475,7 +489,7 @@ mod tests {
             Arc::clone(&worker),
             Arc::clone(&schema_manager),
             keypair,
-            AssignmentSource::Worker,
+            assignment_source,
             assignments::new_reqwest_client(Duration::from_secs(5), peer_id),
             // Caps the retry backoff, and with it the base, in test time.
             Duration::from_millis(40),
@@ -555,6 +569,22 @@ mod tests {
                 hash: bundle.0,
                 url: bundle.1,
             }),
+        }
+    }
+
+    /// A legacy document listing `assigned_to` with no chunks: enough to register.
+    fn legacy_assignment(assigned_to: PeerId) -> Vec<u8> {
+        let mut builder = sqd_assignments::AssignmentBuilder::new("test-secret");
+        builder.add_worker(assigned_to, sqd_assignments::WorkerStatus::Ok, &[]);
+        builder.finish()
+    }
+
+    fn legacy_update(id: &str, document_url: String) -> AssignmentUpdate {
+        AssignmentUpdate {
+            id: id.to_owned(),
+            fb_url_v1: document_url,
+            _effective_from: 0,
+            schema_bundle: None,
         }
     }
 
@@ -882,6 +912,104 @@ mod tests {
             1,
             "an assignment is absolute, so the newer one subsumes it rather than queueing \
              behind its backoff"
+        );
+    }
+
+    /// The network can take a pair back: X in force, Y published and failing to fetch, then X
+    /// again. That announcement is dropped as nothing-to-do for X — but it is also the network's
+    /// last word on Y, so Y must not be retried, let alone applied once its documents turn up.
+    /// Legacy mode, where nothing waits on a settle, so the retry itself is what is exercised.
+    #[tokio::test]
+    async fn a_pair_the_network_retracts_is_not_retried() {
+        let f = fixture_with(AssignmentSource::Legacy).await;
+        let document = gzip(&legacy_assignment(f.peer_id));
+        let x = f.stub.serve("/x.fb.gz", document.clone(), 0);
+        // Fails once, so a retry would fetch it — and, being valid, apply it.
+        let y = f.stub.serve("/y.fb.gz", document.clone(), 1);
+        let x_again = f.stub.serve("/x-again.fb.gz", document, 0);
+
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                legacy_update("x", x),
+                legacy_update("y", y),
+                legacy_update("x", x_again),
+            ],
+        );
+        await_registered(&f.worker, "x").await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while f.stub.hits("/y.fb.gz") == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("y is attempted once");
+        // Several retry periods (the cap is 40 ms): a retry that was going to happen has by now.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.stub.hits("/y.fb.gz"),
+            1,
+            "the network took y back; it is not retried"
+        );
+        assert_eq!(
+            f.worker.registered_assignment_id().as_deref(),
+            Some("x"),
+            "the network is on x, and so is the worker"
+        );
+        assert_eq!(
+            f.stub.hits("/x-again.fb.gz"),
+            0,
+            "x is in force; its new location is nothing to do"
+        );
+    }
+
+    /// The same word, heard while a pair is queued rather than mid-retry: what was queued behind
+    /// the pair in force — or behind the refused one — is no longer published, so it goes.
+    #[tokio::test]
+    async fn an_announcement_of_a_pair_with_nothing_outstanding_retracts_the_queue() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        let document = gzip(&worker_assignment(f.peer_id));
+        let x = f.stub.serve("/x.fb.gz", document.clone(), 0);
+        let x_moved = f.stub.serve("/x-moved.fb.gz", document, 0);
+        assert_eq!(
+            f.applier.apply(&update("x", x, bundle.clone())).await,
+            ApplyOutcome::Applied
+        );
+
+        let mut pending = VecDeque::from([update("y", f.stub.url("/y.fb.gz"), bundle.clone())]);
+        let overflowed = f.applier.absorb(
+            update("x", x_moved.clone(), bundle.clone()),
+            &mut pending,
+            &None,
+        );
+        assert!(!overflowed);
+        assert!(
+            pending.is_empty(),
+            "y was queued behind x; the network is back on x"
+        );
+
+        let refused = Some(NetworkPair {
+            assignment_id: Some("r".to_owned()),
+            bundle_hash: Some(bundle.0),
+        });
+        let mut pending = VecDeque::from([update("y", f.stub.url("/y.fb.gz"), bundle.clone())]);
+        f.applier.absorb(
+            update("r", f.stub.url("/r-moved.fb.gz"), bundle),
+            &mut pending,
+            &refused,
+        );
+        assert!(
+            pending.is_empty(),
+            "y was queued behind the refused r; the network is back on r"
+        );
+        assert_eq!(
+            f.stub.hits("/x-moved.fb.gz"),
+            0,
+            "nothing was fetched for any of it"
         );
     }
 

@@ -31,9 +31,10 @@ a pointer that will not decode or names no document to fetch, or under
 announced, the worker re-reads it at P-ASSIGN-POLL, and an unusable pointer alarms (OB-18)
 as an unusable bundle reference does (OB-16, FM-53d); the backoff ladder would only delay
 noticing that the scheduler has fixed it. Retries of
-one stage MUST NOT starve intake of newer assignments: a newer assignment ends the wait at
-once and supersedes the one that failed. A document rejected by WP-2 is not retried at all
-— the verdict is a property of the document, not of the attempt.
+one stage MUST NOT starve intake of newer assignments: any newer announcement ends the wait
+at once and supersedes the one that failed — a newer assignment, which is tried next, or the
+network back on the pair in force, which retracts the failed one. A document rejected by
+WP-2 is not retried at all — the verdict is a property of the document, not of the attempt.
 ⚠ Application timing relative to the document's declared effective time is OQ-8
 (applied immediately today).
 

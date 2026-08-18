@@ -217,7 +217,10 @@ against what was last *read*, not against what it applied. A change of *location
 or `schema_bundle.url` under an unchanged pair — is announced too, since a corrected url is the
 only thing that can rescue a fetch that keeps failing on the old one. It is not identity: what to
 do with it is decided where a fetch is known to be outstanding, so a location that moves under a
-pair already applied, or already refused, is nothing to do and never re-fetches a document. Whether an announced pair applied, and
+pair already applied, or already refused, is nothing to do and never re-fetches a document. It is
+still the network's latest word, though: announced while another pair is outstanding — failing
+and waiting to be retried, or queued behind a settle — it retracts that pair, which is neither
+retried nor applied later. Whether an announced pair applied, and
 whether another attempt could end differently, is knowable only where it was attempted (WP-1,
 FM-12).
 
