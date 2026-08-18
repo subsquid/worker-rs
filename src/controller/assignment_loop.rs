@@ -429,14 +429,11 @@ fn keep_only_latest_pending_assignment<T>(pending: &mut VecDeque<T>) -> usize {
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
     use sqd_network_transport::PeerId;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::controller::schema_bundle::test_support::{targz, SCHEMA};
     use crate::controller::schema_bundle::{BundleHash, SchemaBundle};
+    use crate::controller::test_support::TestServer;
     use crate::storage::downloader::DownloadConfig;
     use crate::storage::manager::StateManager;
     use crate::types::schema::SchemaId;
@@ -444,84 +441,12 @@ mod tests {
     #[path = "assignment_loop_pbt.rs"]
     mod pbt;
 
-    /// Serves fixed bodies by path and counts hits, so a test can assert what the loop fetched
-    /// and how often. A path may 404 a set number of times first, standing in for a flaky origin.
-    struct Stub {
-        base: String,
-        routes: Arc<Mutex<HashMap<String, (Vec<u8>, usize)>>>,
-        hits: Arc<Mutex<HashMap<String, usize>>>,
-    }
-
-    impl Stub {
-        async fn start() -> Self {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            let routes: Arc<Mutex<HashMap<String, (Vec<u8>, usize)>>> = Default::default();
-            let hits: Arc<Mutex<HashMap<String, usize>>> = Default::default();
-            let (served, counted) = (Arc::clone(&routes), Arc::clone(&hits));
-            tokio::spawn(async move {
-                loop {
-                    let Ok((mut socket, _)) = listener.accept().await else {
-                        return;
-                    };
-                    let (served, counted) = (Arc::clone(&served), Arc::clone(&counted));
-                    tokio::spawn(async move {
-                        let mut buf = [0u8; 4096];
-                        let read = socket.read(&mut buf).await.unwrap_or(0);
-                        let request = String::from_utf8_lossy(&buf[..read]).into_owned();
-                        let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                        *counted.lock().unwrap().entry(path.clone()).or_default() += 1;
-                        let body = match served.lock().unwrap().get_mut(&path) {
-                            Some((_, failures)) if *failures > 0 => {
-                                *failures -= 1;
-                                None
-                            }
-                            Some((body, _)) => Some(body.clone()),
-                            None => None,
-                        };
-                        let response = match body {
-                            Some(body) => {
-                                let mut response = format!(
-                                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                                    body.len()
-                                )
-                                .into_bytes();
-                                response.extend_from_slice(&body);
-                                response
-                            }
-                            None => b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                                .to_vec(),
-                        };
-                        let _ = socket.write_all(&response).await;
-                    });
-                }
-            });
-            Self { base, routes, hits }
-        }
-
-        fn serve(&self, path: &str, body: Vec<u8>, failures: usize) -> String {
-            self.routes
-                .lock()
-                .unwrap()
-                .insert(path.to_owned(), (body, failures));
-            self.url(path)
-        }
-
-        fn url(&self, path: &str) -> String {
-            format!("{}{path}", self.base)
-        }
-
-        fn hits(&self, path: &str) -> usize {
-            self.hits.lock().unwrap().get(path).copied().unwrap_or(0)
-        }
-    }
-
     struct Fixture {
         applier: Arc<AssignmentApplier>,
         worker: Arc<Worker>,
         schema_manager: Arc<SchemaManager>,
         peer_id: PeerId,
-        stub: Stub,
+        stub: TestServer,
         // Dropped last: the store outlives the worker that writes into it.
         _dir: tempfile::TempDir,
     }
@@ -560,7 +485,7 @@ mod tests {
             worker,
             schema_manager,
             peer_id,
-            stub: Stub::start().await,
+            stub: TestServer::start().await,
             _dir: dir,
         }
     }
@@ -634,7 +559,7 @@ mod tests {
     }
 
     /// The bundle every test publishes: one schema, id 7.
-    fn bundle(stub: &Stub) -> (BundleHash, String) {
+    fn bundle(stub: &TestServer) -> (BundleHash, String) {
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let hash = BundleHash::of(&archive);
         (hash, stub.serve("/bundle.tar.gz", archive, 0))

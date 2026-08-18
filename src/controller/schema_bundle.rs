@@ -694,27 +694,7 @@ tables:
 mod tests {
     use super::test_support::{targz, SCHEMA};
     use super::*;
-
-    async fn serve_once(body: Vec<u8>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let mut buf = [0u8; 4096];
-            let _ = socket.read(&mut buf).await;
-            let mut response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            )
-            .into_bytes();
-            response.extend_from_slice(&body);
-            let _ = socket.write_all(&response).await;
-        });
-        url
-    }
+    use crate::controller::test_support::TestServer;
 
     fn store(dir: &tempfile::TempDir) -> Arc<SchemaRegistry> {
         Arc::new(SchemaRegistry::open(
@@ -779,7 +759,7 @@ mod tests {
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
 
         store
@@ -800,7 +780,7 @@ mod tests {
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
 
         let prepared = registry
@@ -829,7 +809,7 @@ mod tests {
         let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let original_bundle = SchemaBundle {
             hash: BundleHash::of(&original),
-            url: serve_once(original).await,
+            url: TestServer::serve_once(original).await,
         };
         registry
             .ensure(&original_bundle, &reqwest::Client::new())
@@ -839,7 +819,7 @@ mod tests {
         let replacement = targz(&[("9.yaml", SCHEMA.as_bytes())]);
         let replacement_bundle = SchemaBundle {
             hash: BundleHash::of(&replacement),
-            url: serve_once(replacement).await,
+            url: TestServer::serve_once(replacement).await,
         };
         let prepared = registry
             .prepare_bundle(&replacement_bundle, &reqwest::Client::new())
@@ -869,7 +849,7 @@ mod tests {
             let archive = targz(&[(name, body.as_bytes())]);
             let bundle = SchemaBundle {
                 hash: BundleHash::of(&archive),
-                url: serve_once(archive).await,
+                url: TestServer::serve_once(archive).await,
             };
             store
                 .ensure(&bundle, &reqwest::Client::new())
@@ -902,7 +882,7 @@ mod tests {
             .ensure(
                 &SchemaBundle {
                     hash: BundleHash::of(&original),
-                    url: serve_once(original).await,
+                    url: TestServer::serve_once(original).await,
                 },
                 &reqwest::Client::new(),
             )
@@ -917,7 +897,7 @@ mod tests {
             .ensure(
                 &SchemaBundle {
                     hash: BundleHash::of(&changed),
-                    url: serve_once(changed).await,
+                    url: TestServer::serve_once(changed).await,
                 },
                 &reqwest::Client::new(),
             )
@@ -940,7 +920,7 @@ mod tests {
             .ensure(
                 &SchemaBundle {
                     hash: BundleHash::of(&first),
-                    url: serve_once(first).await,
+                    url: TestServer::serve_once(first).await,
                 },
                 &reqwest::Client::new(),
             )
@@ -954,7 +934,7 @@ mod tests {
             .ensure(
                 &SchemaBundle {
                     hash: BundleHash::of(&second),
-                    url: serve_once(second).await,
+                    url: TestServer::serve_once(second).await,
                 },
                 &reqwest::Client::new(),
             )
@@ -978,7 +958,7 @@ mod tests {
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
         store
             .ensure(&bundle, &reqwest::Client::new())
@@ -998,7 +978,7 @@ mod tests {
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(b"something else"),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
 
         let err = store
@@ -1019,7 +999,7 @@ mod tests {
         let archive = targz(&[("7.yaml", b"this is not a dataset description")]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
 
         let err = store
@@ -1049,7 +1029,7 @@ mod tests {
         ]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
 
         store
@@ -1078,7 +1058,7 @@ mod tests {
             let store = store(&dir);
             let bundle = SchemaBundle {
                 hash,
-                url: serve_once(archive).await,
+                url: TestServer::serve_once(archive).await,
             };
             store
                 .ensure(&bundle, &reqwest::Client::new())
@@ -1124,7 +1104,7 @@ mod tests {
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
         let bundle = SchemaBundle {
             hash: BundleHash::of(&archive),
-            url: serve_once(archive).await,
+            url: TestServer::serve_once(archive).await,
         };
         store
             .ensure(&bundle, &reqwest::Client::new())
@@ -1157,7 +1137,7 @@ mod tests {
             .ensure(
                 &SchemaBundle {
                     hash: BundleHash::of(&changed),
-                    url: serve_once(changed).await,
+                    url: TestServer::serve_once(changed).await,
                 },
                 &reqwest::Client::new(),
             )

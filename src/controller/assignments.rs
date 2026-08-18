@@ -222,7 +222,7 @@ async fn download_gzipped(url: &str, reqwest_client: &reqwest::Client) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use crate::controller::test_support::TestServer;
 
     #[path = "assignments_pbt.rs"]
     mod pbt;
@@ -285,34 +285,6 @@ mod tests {
         assert!(visible_assignment(&worker_only, AssignmentSource::Legacy).is_none());
     }
 
-    /// Serves each queued response to one connection, then stops accepting.
-    /// Returns the server's base URL.
-    async fn serve_responses(responses: Vec<Vec<u8>>) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            for response in responses {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-            }
-        });
-        url
-    }
-
-    fn http_ok(body: &[u8]) -> Vec<u8> {
-        let mut response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes();
-        response.extend_from_slice(body);
-        response
-    }
-
     fn worker_state_json(id: &str, bundle_hash: BundleHash) -> Vec<u8> {
         worker_state_json_at(id, bundle_hash, &format!("http://example.com/{id}.fb.gz"))
     }
@@ -339,13 +311,7 @@ mod tests {
         let a1b1 = worker_state_json("assignment-1", hash(0xaa));
         let a2b1 = worker_state_json("assignment-2", hash(0xaa));
         let a2b2 = worker_state_json("assignment-2", hash(0xbb));
-        let url = serve_responses(vec![
-            http_ok(&a1b1),
-            http_ok(&a2b1),
-            http_ok(&a2b1),
-            http_ok(&a2b2),
-        ])
-        .await;
+        let url = TestServer::serve_sequence(vec![a1b1, a2b1.clone(), a2b1, a2b2]).await;
         let client = test_client();
         let source = AssignmentSource::Worker;
         let mut announced = Announced::default();
@@ -388,7 +354,7 @@ mod tests {
     async fn a_moved_location_is_announced_under_an_unchanged_pair() {
         let first = worker_state_json_at("a1", hash(0xaa), "http://example.com/first.fb.gz");
         let moved = worker_state_json_at("a1", hash(0xaa), "http://example.com/moved.fb.gz");
-        let url = serve_responses(vec![http_ok(&first), http_ok(&moved), http_ok(&moved)]).await;
+        let url = TestServer::serve_sequence(vec![first, moved.clone(), moved]).await;
         let client = test_client();
         let source = AssignmentSource::Worker;
         let mut announced = Announced::default();
@@ -418,7 +384,7 @@ mod tests {
     #[tokio::test]
     async fn a_pair_already_announced_is_not_offered_again() {
         let state = worker_state_json("assignment-1", hash(0xaa));
-        let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
+        let url = TestServer::serve_sequence(vec![state.clone(), state]).await;
         let client = test_client();
         let source = AssignmentSource::Worker;
         let mut announced = Announced::default();
@@ -441,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn a_bundle_change_reoffers_the_assignment_as_a_pair() {
         let state = worker_state_json("assignment-1", hash(0xaa));
-        let url = serve_responses(vec![http_ok(&state)]).await;
+        let url = TestServer::serve_once(state).await;
         let mut announced = Announced {
             pair: NetworkPair {
                 assignment_id: None,
@@ -470,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn a_state_missing_the_bundle_is_not_applicable_rather_than_an_error() {
         let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#;
-        let url = serve_responses(vec![http_ok(state)]).await;
+        let url = TestServer::serve_once(state.to_vec()).await;
         let mut announced = Announced {
             pair: NetworkPair {
                 assignment_id: Some("assignment-1".to_owned()),
@@ -508,7 +474,7 @@ mod tests {
             r#"{{"network":"test","assignment":{{"id":"a1","fb_url_v1":"http://example.com/a1.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"sha256:aaa","url":"http://example.com/b.tar.gz"}}}}"#
         )
         .into_bytes();
-        let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
+        let url = TestServer::serve_sequence(vec![state.clone(), state]).await;
         let client = test_client();
         let source = AssignmentSource::Legacy;
         let mut announced = Announced::default();
