@@ -702,6 +702,13 @@ mod tests {
         ))
     }
 
+    async fn served_bundle(archive: Vec<u8>) -> SchemaBundle {
+        SchemaBundle {
+            hash: BundleHash::of(&archive),
+            url: TestServer::serve_once(archive).await,
+        }
+    }
+
     #[test]
     fn parses_only_sha256_hashes() {
         let hex = "a".repeat(64);
@@ -757,10 +764,7 @@ mod tests {
         let store = store(&dir);
         let registry = Arc::clone(&store);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: TestServer::serve_once(archive).await,
-        };
+        let bundle = served_bundle(archive).await;
 
         store
             .ensure(&bundle, &reqwest::Client::new())
@@ -778,10 +782,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = store(&dir);
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: TestServer::serve_once(archive).await,
-        };
+        let bundle = served_bundle(archive).await;
 
         let prepared = registry
             .prepare_bundle(&bundle, &reqwest::Client::new())
@@ -807,20 +808,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = store(&dir);
         let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let original_bundle = SchemaBundle {
-            hash: BundleHash::of(&original),
-            url: TestServer::serve_once(original).await,
-        };
+        let original_bundle = served_bundle(original).await;
         registry
             .ensure(&original_bundle, &reqwest::Client::new())
             .await
             .unwrap();
 
         let replacement = targz(&[("9.yaml", SCHEMA.as_bytes())]);
-        let replacement_bundle = SchemaBundle {
-            hash: BundleHash::of(&replacement),
-            url: TestServer::serve_once(replacement).await,
-        };
+        let replacement_bundle = served_bundle(replacement).await;
         let prepared = registry
             .prepare_bundle(&replacement_bundle, &reqwest::Client::new())
             .await
@@ -847,10 +842,7 @@ mod tests {
             ("12.yaml", SCHEMA.replace("name: evm", "name: solana")),
         ] {
             let archive = targz(&[(name, body.as_bytes())]);
-            let bundle = SchemaBundle {
-                hash: BundleHash::of(&archive),
-                url: TestServer::serve_once(archive).await,
-            };
+            let bundle = served_bundle(archive).await;
             store
                 .ensure(&bundle, &reqwest::Client::new())
                 .await
@@ -879,13 +871,7 @@ mod tests {
 
         let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         store
-            .ensure(
-                &SchemaBundle {
-                    hash: BundleHash::of(&original),
-                    url: TestServer::serve_once(original).await,
-                },
-                &reqwest::Client::new(),
-            )
+            .ensure(&served_bundle(original).await, &reqwest::Client::new())
             .await
             .unwrap();
 
@@ -894,13 +880,7 @@ mod tests {
             SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
         )]);
         let err = store
-            .ensure(
-                &SchemaBundle {
-                    hash: BundleHash::of(&changed),
-                    url: TestServer::serve_once(changed).await,
-                },
-                &reqwest::Client::new(),
-            )
+            .ensure(&served_bundle(changed).await, &reqwest::Client::new())
             .await
             .unwrap_err();
 
@@ -917,13 +897,7 @@ mod tests {
         let store = store(&dir);
         let first = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         store
-            .ensure(
-                &SchemaBundle {
-                    hash: BundleHash::of(&first),
-                    url: TestServer::serve_once(first).await,
-                },
-                &reqwest::Client::new(),
-            )
+            .ensure(&served_bundle(first).await, &reqwest::Client::new())
             .await
             .unwrap();
         let path = dir.path().join("7.yaml");
@@ -931,13 +905,7 @@ mod tests {
 
         let second = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
         store
-            .ensure(
-                &SchemaBundle {
-                    hash: BundleHash::of(&second),
-                    url: TestServer::serve_once(second).await,
-                },
-                &reqwest::Client::new(),
-            )
+            .ensure(&served_bundle(second).await, &reqwest::Client::new())
             .await
             .unwrap();
 
@@ -956,10 +924,7 @@ mod tests {
         assert!(store.get_by_id(SchemaId::new(7)).is_err());
 
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: TestServer::serve_once(archive).await,
-        };
+        let bundle = served_bundle(archive).await;
         store
             .ensure(&bundle, &reqwest::Client::new())
             .await
@@ -997,10 +962,7 @@ mod tests {
         let store = store(&dir);
         let registry = Arc::clone(&store);
         let archive = targz(&[("7.yaml", b"this is not a dataset description")]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: TestServer::serve_once(archive).await,
-        };
+        let bundle = served_bundle(archive).await;
 
         let err = store
             .ensure(&bundle, &reqwest::Client::new())
@@ -1027,10 +989,7 @@ mod tests {
             ("../escape.yaml", b"nope"),
             ("manifest.json", b"{}"),
         ]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: TestServer::serve_once(archive).await,
-        };
+        let bundle = served_bundle(archive).await;
 
         store
             .ensure(&bundle, &reqwest::Client::new())
@@ -1053,13 +1012,9 @@ mod tests {
     async fn a_restart_adopts_the_stored_schemas() {
         let dir = tempfile::tempdir().unwrap();
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let hash = BundleHash::of(&archive);
         {
             let store = store(&dir);
-            let bundle = SchemaBundle {
-                hash,
-                url: TestServer::serve_once(archive).await,
-            };
+            let bundle = served_bundle(archive).await;
             store
                 .ensure(&bundle, &reqwest::Client::new())
                 .await
@@ -1102,10 +1057,7 @@ mod tests {
         let store = store(&dir);
 
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(&archive),
-            url: TestServer::serve_once(archive).await,
-        };
+        let bundle = served_bundle(archive).await;
         store
             .ensure(&bundle, &reqwest::Client::new())
             .await
@@ -1134,13 +1086,7 @@ mod tests {
             SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
         )]);
         let err = store
-            .ensure(
-                &SchemaBundle {
-                    hash: BundleHash::of(&changed),
-                    url: TestServer::serve_once(changed).await,
-                },
-                &reqwest::Client::new(),
-            )
+            .ensure(&served_bundle(changed).await, &reqwest::Client::new())
             .await
             .unwrap_err();
 
