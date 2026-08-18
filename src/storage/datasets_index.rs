@@ -106,6 +106,9 @@ impl DatasetsIndex {
                     ))
                 })?;
                 let base_url = directory_url(&chunk_url)?;
+                // Admission refuses a document whose own roster table doesn't define a schema its
+                // chunks name (FM-12), so no chunk in this index reaches here — the arm exists
+                // because the reader's signature allows it, not because it is a live verdict.
                 let tables = assignment.chunk_tables(chunk).ok_or_else(|| {
                     UnresolvedChunk::NoAddress(format!(
                         "write schema {} has no roster in the assignment",
@@ -168,6 +171,9 @@ impl DatasetsIndex {
                             chunk.dataset().id()
                         );
                     };
+                    // Whole-document, unlike an unusable address (FM-11): a chunk naming a
+                    // schema the document's own roster table doesn't define is the document
+                    // disagreeing with itself.
                     if assignment.chunk_tables(chunk).is_none() {
                         anyhow::bail!(
                             "chunk '{id}' references write schema {} which has no roster in the assignment",
