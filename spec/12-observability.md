@@ -67,7 +67,9 @@ a level-readable witness. Scalar signals only (OB-14).
 
 **OB-18 — Refused assignments.** [MUST] A counter of announced pairs rejected as
 unusable (FM-12) — no entry for this worker, a write schema with no roster, a bundle that
-doesn't cover the document, a document that cannot be read at all. A refusal keeps the
+doesn't cover the document, a document that cannot be read at all, a network-state pointer
+that will not decode or names no document to fetch (counted per poll while it persists,
+like FM-53d). A refusal keeps the
 previous assignment in force, so nothing else moves: the chunk gauges hold, the reported
 id holds, and a worker starved of usable documents looks exactly like one whose network
 has gone quiet. This is the signal that separates them; which refusal it was stays in the

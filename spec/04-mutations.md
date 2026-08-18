@@ -23,7 +23,14 @@ P-ASSIGN-POLL and, on a changed assignment id, fetches the assignment document (
 bounded by P-ASSIGN-FETCH-TIMEOUT) and applies it (WP-10). An unchanged id is a no-op.
 Fetch/poll failures retry with jittered exponential backoff from P-ASSIGN-RETRY-BASE:
 the poll stage caps at P-ASSIGN-RETRY-MAX, the document stage at P-ASSIGN-POLL, since a
-pair is announced once and that backoff is the only thing that returns to it. Retries of
+pair is announced once and that backoff is the only thing that returns to it. A poll
+failure is a state the worker cannot read at all — transport, or a body that is not a
+JSON object. A state that reads but is not applicable — no pointer for the worker's mode,
+a pointer that will not decode or names no document to fetch, or under
+`--assignment-source worker` no usable bundle reference — is not a failure: nothing is
+announced, the worker re-reads it at P-ASSIGN-POLL, and an unusable pointer alarms (OB-18)
+as an unusable bundle reference does (OB-16, FM-53d); the backoff ladder would only delay
+noticing that the scheduler has fixed it. Retries of
 one stage MUST NOT starve intake of newer assignments: a newer assignment ends the wait at
 once and supersedes the one that failed. A document rejected by WP-2 is not retried at all
 — the verdict is a property of the document, not of the attempt.

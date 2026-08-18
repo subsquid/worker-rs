@@ -22,7 +22,7 @@ proptest! {
                 bundle_hash: Some(bundle.hash),
             };
 
-            let update = published_update(&assignment, Some(bundle), &mut announced).unwrap();
+            let update = published_update(&assignment, Some(bundle), &mut announced);
             if current == shadow {
                 prop_assert!(update.is_none(), "an unchanged pair was emitted again");
             } else {

@@ -166,8 +166,12 @@ Duration settings parse as whole seconds. Misconfiguration behavior is FM-50.
 `{network, assignment: {id, fb_url_v1, effective_from, …}}`; `effective_from` is
 currently ignored by the worker (OQ-8). `assignment` is optional — a network that has
 finished migrating stops publishing it, and its absence yields no update rather than an
-error. HC-1 serves this. Under `--assignment-source worker` this binding is replaced by
-IB-40b.
+error; so does an `assignment` that will not decode or has no `fb_url_v1`, alarmed as a
+refused assignment (OB-18) and re-read at the poll cadence (WP-1). The worker reads only
+its own pointer, so the shape of `worker_assignment`, `schema_bundle` or
+`portal_assignment` cannot make the state unreadable; only a body that is not a JSON
+object is a read failure. HC-1 serves this. Under `--assignment-source worker` this
+binding is replaced by IB-40b.
 
 **IB-41 — Assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
 FlatBuffers document — dataset table (ids, base addresses), per-dataset chunk tables
@@ -198,11 +202,14 @@ These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are uncha
 **IB-40b — Network-state document.** Same address as IB-40, but the worker reads
 `worker_assignment: {id, fb_url_v1, effective_from}` and `schema_bundle: {hash, url}`;
 both fields are mandatory when the worker consumes `worker_assignment`; a state missing either,
-or naming a bundle hash the worker cannot parse, is not applicable, and is re-read at the poll
-cadence rather than on the fetch-retry ladder — an incomplete state is a legal condition of a
-rolling migration, not a failure to read one. Only the shape that names an assignment without a
-usable bundle alarms (FM-53d); a bundle published ahead of its assignment is the same wait as a
-network that has not migrated. The legacy `assignment` key is ignored and never falls back to. A
+or whose `schema_bundle` will not decode or names a hash the worker cannot parse, is not
+applicable, and is re-read at the poll cadence rather than on the fetch-retry ladder — an
+incomplete state is a legal condition of a rolling migration, not a failure to read one. Only the
+shape that names an assignment without a usable bundle alarms (FM-53d); a bundle published ahead
+of its assignment is the same wait as a network that has not migrated, and a `worker_assignment`
+that will not decode or has no `fb_url_v1` is a refused assignment (FM-12, OB-18) that waits the
+same way. The legacy `assignment` key is ignored and never falls back to, and its shape cannot
+make the state unreadable (IB-40). A
 network mid-migration may publish either pointer for workers in the corresponding mode. The two
 references move independently on the wire — either can change without the other — but the worker
 reads them as one announcement: a change to either half re-announces the **pair**, deduplicated
