@@ -532,17 +532,48 @@ async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> anyhow::Result<TempDir> 
         let path = Utf8Path::from_path(temp.path())
             .ok_or_else(|| anyhow::anyhow!("staging directory path is not UTF-8"))?;
 
-        extract_schemas(&bytes, path)?;
+        extract_schemas(&bytes, path, MAX_BUNDLE_SIZE)?;
         Ok(temp)
     })
     .await
     .context("unpack task panicked")?
 }
 
-/// Extracts root-level `<id>.yaml` files and ignores unknown entries.
-fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
-    let mut total = 0usize;
+/// Fails a read once `limit` decompressed bytes have passed through it.
+///
+/// The tar reader skips an entry it has no use for by *reading* it — a gzip stream is not
+/// seekable — so an entry is decompressed whether or not anything is written from it. Counting
+/// the schemas actually kept therefore bounds the store while leaving the work unbounded: one
+/// oversized member under a name we ignore decompresses in full. Counting here bounds both, and
+/// does not take the archive's word for its own entry sizes.
+struct Bounded<R> {
+    inner: R,
+    limit: usize,
+    read: usize,
+}
+
+impl<R: std::io::Read> std::io::Read for Bounded<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.read = self.read.saturating_add(read);
+        if self.read > self.limit {
+            return Err(std::io::Error::other(format!(
+                "unpacked schema bundle exceeds {} bytes",
+                self.limit
+            )));
+        }
+        Ok(read)
+    }
+}
+
+/// Extracts root-level `<id>.yaml` files and ignores unknown entries. `limit` bounds everything
+/// decompressed, not just what is written.
+fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> anyhow::Result<()> {
+    let mut archive = tar::Archive::new(Bounded {
+        inner: flate2::read::GzDecoder::new(bytes),
+        limit,
+        read: 0,
+    });
     let mut written = 0usize;
 
     for entry in archive.entries()? {
@@ -561,12 +592,6 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path) -> anyhow::Result<()> {
             continue;
         };
         let name = format!("{id}.yaml");
-
-        let size = usize::try_from(entry.header().size()?).unwrap_or(usize::MAX);
-        total = total.saturating_add(size);
-        if total > MAX_BUNDLE_SIZE {
-            bail!("unpacked schema bundle exceeds {MAX_BUNDLE_SIZE} bytes");
-        }
 
         let mut file = std::fs::File::create(dest.join(&name))?;
         std::io::copy(&mut entry, &mut file)
@@ -736,6 +761,30 @@ mod tests {
         assert_eq!(schema_id("evm.yaml"), None);
         assert_eq!(schema_id("7.yml"), None);
         assert_eq!(schema_id(".yaml"), None);
+    }
+
+    /// The tar reader skips an entry it has no use for by reading it, so an ignored member is
+    /// decompressed in full. Counting only the schemas kept bounded the store while leaving the
+    /// work unbounded — one oversized member under an ignored name burns a blocking thread for
+    /// as long as it takes to inflate, which the hash check does not prevent because the bundle
+    /// is exactly what the network state advertised.
+    #[test]
+    fn an_ignored_entry_counts_against_the_unpacked_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = Utf8Path::from_path(dir.path()).unwrap();
+        let archive = targz(&[
+            ("7.yaml", SCHEMA.as_bytes()),
+            ("junk.bin", &vec![0u8; 64 * 1024]),
+        ]);
+
+        // Room for the schema and its tar framing, not for the member that is thrown away.
+        let error = extract_schemas(&archive, dest, 8 * 1024)
+            .expect_err("an ignored entry is decompressed like any other");
+        assert!(format!("{error:#}").contains("exceeds"), "{error:#}");
+
+        // The same archive is fine under the real cap, and still yields only the schema.
+        extract_schemas(&archive, dest, MAX_BUNDLE_SIZE).unwrap();
+        assert_eq!(stored(&dir), vec!["7.yaml"]);
     }
 
     #[tokio::test]

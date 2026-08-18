@@ -252,7 +252,8 @@ versions of a type loaded, that returns a wrong version rather than an error.
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against
 `schema_bundle.hash` (`sha256:<hex>`) before use. Entries that are not root-level
-`<id>.yaml` are ignored. It is fetched *before* the assignment it accompanies and is a
+`<id>.yaml` are ignored, but not for free: a tar reader skips an entry by reading it, so the
+unpacked bound is enforced over everything decompressed rather than over what is kept. It is fetched *before* the assignment it accompanies and is a
 hard prerequisite for it (FM-53b, ADR-21). HC-1 must be able to emit well-formed and
 deliberately malformed bundles.
 
