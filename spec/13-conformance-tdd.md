@@ -206,7 +206,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-2..3 | CT-4 | U | |
 | FM-10 | CT-4 | U | |
 | FM-11 | CT-4 | P | an unusable address is driven end to end: the worker gives the chunk up, moves OB-17, and converges on the next assignment. The credential half is FM-12's whole-document path, since neither format carries credentials per chunk |
-| FM-12 | CT-4 | U⊘ | unbounded intake (GAP-4) |
+| FM-12 | CT-4 | P⊘ | a document that cannot be read is refused rather than fatal, asserted at the applier with a corrupted roster; oversize intake is still unbounded (GAP-4) |
 | FM-13 | CT-4 | U⊘ | no floor (GAP-3) |
 | FM-14 | CT-7 | U⊘ | no age signal (GAP-23) |
 | FM-20..21 | CT-4 | U | |
@@ -239,7 +239,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | GAP | Statement | Violates | Pri | First test |
 |---|---|---|---|---|
-| GAP-2 | Externally supplied content can terminate the process: a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic. The malformed-address clause is closed — an unaddressable chunk now fails on its own (FM-11, OB-17) | FM-1, FM-52, REQ-24 | P0 | HC-1 roster carrying an unparseable peer id: worker must reject the document, alarm, and keep serving |
+| GAP-2 | Externally supplied content can terminate the process: a registry error at startup is fatal; a pathological per-chunk file count overflows the download-watchdog arithmetic (`s3_timeout * num_files as u32` — a narrowing cast into a multiply that panics). Two clauses are closed: an unaddressable chunk fails on its own (FM-11, OB-17), and a document the reader panics on is refused where the panic happens (FM-12, OB-18) — the reader still panics on a roster peer id that won't decode, which is a `sqd-assignments` fix | FM-1, FM-52, REQ-24 | P0 | HC-1 chunk listing enough files to overflow the watchdog: worker must survive, alarm, and keep serving |
 | GAP-3 | No reconciliation deletion floor: one empty/short assignment wipes the whole store next pass | REQ-25, FM-13, RS-2 | P0 | publish an assignment with zero chunks for the worker: store must survive with an alarm |
 | GAP-4 | Assignment intake is unverified and unbounded: unvalidated binary document parsed unsafely; decompression size uncapped | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
 | GAP-5 | No payload/content verification anywhere: corrupt origin bytes commit (INV-13), power-loss-truncated chunks are adopted (CN-4), and local corruption surfaces as client-blamed `bad_request` (FM-32) | INV-13, CN-4, FM-22, FM-32 | P1 | HC-2 corrupts one file's bytes: commit must be refused (fails today) |
@@ -283,8 +283,8 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 2. **Phase 1 — P0 gaps**: a failing test per gap, then the fix. MG-4 becomes meaningful
    here. The query-concurrency gap is closed (test first, then a one-token fix; the
    register row is gone and RP-4/REQ-22/INV-31/PF-1 no longer carry the exception).
-   GAP-2 and GAP-3 remain: their HC-1 fault knobs (`UnparseableFileUrl`,
-   `NoChunksForWorker`) exist, but no tests drive them yet.
+   GAP-3 remains: its HC-1 fault knob (`NoChunksForWorker`) exists and is driven, but no
+   deletion floor does. GAP-2 is down to its startup and watchdog clauses.
 3. **Phase 2 — correctness core**: HC-4 reference model; CT-1 property runs; CT-2
    kill-point matrix (HC-7); CT-5 accounting reconciliation. Burn P1 gaps.
 4. **Phase 3 — robustness**: CT-3 swarms, CT-4 full corpus, CT-9 fuzz; P2 gaps.

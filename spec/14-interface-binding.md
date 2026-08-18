@@ -133,7 +133,7 @@ GET only: `/worker/status` → JSON `{"state":{"available":n,"downloading":n}}` 
 `query_result_size_bytes` (OB-8), `worker_status{worker_status}` (OB-12 assessed-state
 component), `worker_info_info{version}`, `schema_bundle_loaded` /
 `schema_bundle_failures` / `schema_bundle_mismatches` (OB-16), `chunks_unaddressable`
-(OB-17). Signals OB-9/10/11/13 and the
+(OB-17), `assignments_refused` (OB-18). Signals OB-9/10/11/13 and the
 missing OB-4/7 breakdowns have no binding yet — GAP-17/GAP-23 track the additions.
 
 **IB-32 — Configuration surface.** Flags/env (defaults live in the registry):

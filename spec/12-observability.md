@@ -65,6 +65,14 @@ worker-clock offset from authenticated queries' timestamps, so a skewed worker i
 diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12) has
 a level-readable witness. Scalar signals only (OB-14).
 
+**OB-18 — Refused assignments.** [MUST] A counter of announced pairs rejected as
+unusable (FM-12) — no entry for this worker, a write schema with no roster, a bundle that
+doesn't cover the document, a document that cannot be read at all. A refusal keeps the
+previous assignment in force, so nothing else moves: the chunk gauges hold, the reported
+id holds, and a worker starved of usable documents looks exactly like one whose network
+has gone quiet. This is the signal that separates them; which refusal it was stays in the
+log. Scalar signal only (OB-14). Bound in IB-31.
+
 **OB-17 — Unaddressable chunks.** [MUST] A counter of chunks the applied assignment
 carries no usable address for: a base url that will not parse, or a version whose dataset
 registers no generation (FM-11). It must be distinguishable from an ordinary download
