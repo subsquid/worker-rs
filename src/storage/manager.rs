@@ -494,17 +494,32 @@ pub fn mark_assignment_settled_if_ready(
     let Some(current_assignment_id) = assignment_application.current_assignment_id.clone() else {
         return;
     };
-    if assignment_application.last_applied_assignment_id.as_deref()
-        == Some(current_assignment_id.as_str())
-    {
+    // Whether this assignment's verdict is out is a question about the channel, not about the
+    // last id that applied: `last_applied_assignment_id` reports the newest assignment that ever
+    // applied (IB-22), so it can still name an id whose verdict a later assignment has replaced.
+    // Asking it instead would answer "already settled" for an id the channel no longer names,
+    // and re-registering that id would then never settle at all.
+    //
+    // The borrow is bound rather than left in the `if`, because holding a `watch` read guard
+    // across `send_replace` below would deadlock.
+    let verdict_is_published = assignment_settled_tx
+        .borrow()
+        .as_ref()
+        .is_some_and(|settled| settled.id == current_assignment_id);
+    // A published verdict is terminal while its id stands, which is what makes this a
+    // short-circuit and not just a duplicate filter: an applied assignment has every desired
+    // chunk available, a stalled one has a chunk in `failed_downloads`, and only a new desired
+    // set clears that — so neither verdict can turn into the other, and the recomputation below
+    // (O(desired) on every state-loop pass) would always reach the same answer.
+    if verdict_is_published {
         return;
     }
     let (applied, stalled) = {
         let state = state.lock();
         (state.is_fully_applied(), state.is_stalled())
     };
-    // send_replace, not send: send stores nothing without subscribers, and the
-    // guards above never re-send a verdict — it would be lost forever.
+    // send_replace, not send: send stores nothing without subscribers, and the guard above never
+    // re-sends a verdict — it would be lost forever.
     if applied {
         assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
         assignment_settled_tx.send_replace(Some(AssignmentSettled {
@@ -512,14 +527,10 @@ pub fn mark_assignment_settled_if_ready(
             outcome: AssignmentOutcome::Applied,
         }));
     } else if stalled {
-        let settled = AssignmentSettled {
+        assignment_settled_tx.send_replace(Some(AssignmentSettled {
             id: current_assignment_id,
             outcome: AssignmentOutcome::Stalled,
-        };
-        // watch notifies on every send; don't wake subscribers with duplicates
-        if assignment_settled_tx.borrow().as_ref() != Some(&settled) {
-            assignment_settled_tx.send_replace(Some(settled));
-        }
+        }));
     }
 }
 
@@ -919,6 +930,76 @@ mod tests {
         assert_eq!(
             *assignment_settled_rx.borrow(),
             settled("B", AssignmentOutcome::Applied)
+        );
+    }
+
+    // A0 applies; A1 stalls, so `last_applied_assignment_id` still names A0 while the channel
+    // holds A1's verdict; then the scheduler goes back to A0. Deciding "already settled" from
+    // `last_applied` concluded A0's verdict was out when the channel no longer named it, so
+    // nothing was published again and `wait_until_assignment_settled` could not return — the
+    // applier stays parked on A0 and drains nothing (LIV-1).
+    #[test]
+    fn a_reregistered_assignment_settles_again_though_it_applied_before() {
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+
+        use super::{
+            mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
+        };
+        use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
+        use crate::types::state::{ChunkRef, ChunkSet};
+
+        let chunk_a = ChunkRef::new(Arc::new("ds".to_owned()), Arc::from("a"));
+
+        // A0 desires nothing, so it applies as soon as it is registered.
+        let state = Mutex::new(State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS));
+        let application = Mutex::new(AssignmentApplicationStatus {
+            current_assignment_id: Some("A0".to_owned()),
+            last_applied_assignment_id: None,
+        });
+        let (settled_tx, settled_rx) = tokio::sync::watch::channel(None);
+        mark_assignment_settled_if_ready(&state, &application, &settled_tx);
+        assert_eq!(
+            *settled_rx.borrow(),
+            settled("A0", AssignmentOutcome::Applied)
+        );
+
+        // A1 wants a chunk that exhausts its attempts, so it stalls. `last_applied` still says
+        // A0 — the heartbeat reports the newest assignment that actually applied.
+        {
+            let mut application = application.lock();
+            state
+                .lock()
+                .set_desired_chunks([chunk_a.clone()].into_iter().collect());
+            application.current_assignment_id = Some("A1".to_owned());
+        }
+        for _ in 0..DEFAULT_MAX_DOWNLOAD_ATTEMPTS {
+            assert_eq!(state.lock().take_next_download(), Some(chunk_a.clone()));
+            state.lock().complete_download(&chunk_a, false);
+        }
+        mark_assignment_settled_if_ready(&state, &application, &settled_tx);
+        assert_eq!(
+            *settled_rx.borrow(),
+            settled("A1", AssignmentOutcome::Stalled)
+        );
+        assert_eq!(
+            application.lock().last_applied_assignment_id,
+            Some("A0".to_owned())
+        );
+
+        // The scheduler publishes A0 again, and the worker can satisfy it again.
+        {
+            let mut application = application.lock();
+            state.lock().set_desired_chunks(ChunkSet::new());
+            application.current_assignment_id = Some("A0".to_owned());
+        }
+        mark_assignment_settled_if_ready(&state, &application, &settled_tx);
+
+        assert_eq!(
+            *settled_rx.borrow(),
+            settled("A0", AssignmentOutcome::Applied),
+            "the loop waits for A0's verdict, and the channel was still holding A1's"
         );
     }
 

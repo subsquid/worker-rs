@@ -188,7 +188,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-41 | CT-2/7 | U | |
 | INV-42 | CT-2 | U | |
 | INV-43 | CT-2 | U | |
-| LIV-1 | CT-1/6 | U | |
+| LIV-1 | CT-1/6 | U | the bound is unmeasured. One way it was violated is now pinned: an assignment the scheduler re-publishes after another one stalled settles again, where deciding from the last-applied id left the applier waiting on a verdict the channel no longer held |
 | LIV-2 | CT-1 | U | downloader has zero tests |
 | LIV-3 | CT-1/4 | U⊘ | unbounded today (GAP-8) |
 | LIV-4 | CT-1/3 | U⊘ | wake-up gap (GAP-6) |
