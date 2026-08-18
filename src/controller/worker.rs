@@ -283,8 +283,7 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        // Resolve by what the chunk was written with wherever the assignment says so; the
-        // query's own dataset type is then only a cross-check.
+        // Prefer the assignment's pinned write schema.
         let schema = match chunk.schema {
             ChunkSchema::Pinned(schema_id) => {
                 let schema = self.query_schemas.get_by_id(schema_id)?;
@@ -297,11 +296,7 @@ impl Worker {
                 }
                 schema
             }
-            // No pinned id: a legacy assignment, a chunk the assignment no longer covers, or one
-            // held before any assignment applied. The store says we have the bytes; the type
-            // registry says whether we can describe them, and its own error is the verdict when we
-            // cannot — which under `--assignment-source worker` is always, since nothing fills it
-            // there.
+            // Legacy assignments resolve through the type registry.
             ChunkSchema::ByType => self.query_schemas.get_by_type(&dataset_type)?,
         };
 

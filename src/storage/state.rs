@@ -154,18 +154,11 @@ impl State {
             .collect()
     }
 
-    /// # Panics
-    ///
-    /// Panics if `chunk` is not currently downloading — completions must
-    /// match a prior [`Self::take_next_download`].
-    /// Gives up on a chunk without spending the rest of its attempts, for a failure no retry
-    /// could answer — the assignment gives no address for it. The next assignment resets the
-    /// budget, so a document with a good address still gets its chance.
+    /// Stops retrying a chunk until the next assignment resets its budget.
     ///
     /// # Panics
     ///
-    /// If `chunk` is not currently downloading — it must have come from
-    /// [`Self::take_next_download`], like a completion.
+    /// Panics if `chunk` was not returned by [`Self::take_next_download`].
     pub fn give_up_download(&mut self, chunk: &ChunkRef) {
         let chunk = self
             .downloading
@@ -575,8 +568,6 @@ mod tests {
         assert!(state.unlock_chunk(&a), "the last lock was released");
     }
 
-    /// A document that gives no address for a chunk will give the same non-answer next time, so
-    /// the chunk is given up on rather than charged a retry budget it cannot spend usefully.
     #[test]
     fn a_chunk_given_up_on_is_not_offered_again_until_the_next_assignment() {
         let ds = Arc::new("ds".to_owned());
@@ -598,7 +589,6 @@ mod tests {
             "no work left and a desired chunk is missing"
         );
 
-        // The next assignment resets the budget — its document may carry a usable address.
         state.set_desired_chunks([a.clone()].into_iter().collect());
         assert_eq!(state.take_next_download(), Some(a));
     }

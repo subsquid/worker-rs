@@ -125,7 +125,6 @@ pub struct Harness {
     _reporter: SeedReporter,
 }
 
-/// The worker-side setting the scheduler's published format implies.
 fn assignment_source(format: Format) -> AssignmentSource {
     match format {
         Format::Legacy => AssignmentSource::Legacy,
@@ -141,7 +140,6 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
-    /// Set on both the scheduler and the worker.
     pub format: Format,
 }
 
@@ -231,7 +229,7 @@ impl Harness {
         spawn_subsystems(
             &worker,
             &allocations,
-            // The bundle is the only schema source; the CDN loop would clobber it (IB-44 / IB-44b).
+            // Worker mode must not run the legacy CDN schema loop.
             (config.format == Format::Legacy)
                 .then(|| (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH))),
             worker_id,
@@ -249,8 +247,7 @@ impl Harness {
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
-        // The production step, so the harness can't drift from it: bundle first, coverage judged
-        // against that bundle, schemas installed before the assignment registers (ADR-21).
+        // Exercise the production bundle-before-assignment ordering (ADR-21).
         let applier = AssignmentApplier::new(
             worker.clone(),
             schema_manager.clone(),
@@ -281,7 +278,6 @@ impl Harness {
             data_dir,
             _reporter: reporter,
         };
-        // Worker format has no schema source until the first assignment brings its bundle.
         if harness.format == Format::Legacy {
             harness.await_schemas_loaded().await;
         }
@@ -301,8 +297,7 @@ impl Harness {
         Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, assigned)
     }
 
-    /// Hosts `chunk` as a batch job's rewrite at `version`: its files live under that
-    /// generation's prefix and nowhere else, so an address built without it 404s.
+    /// Hosts a rewritten chunk only under its generation prefix.
     pub fn host_republished_chunk(&self, chunk: &corpus::Chunk, version: u32) -> ChunkPlacement {
         self.origin
             .host_generation(&Scheduler::generation_prefix(version), chunk);

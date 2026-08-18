@@ -19,11 +19,9 @@ const NETWORK_STATE_PATH: &str = "/network-state.json";
 const SCHEMA_BUNDLE_PATH: &str = "/schema-bundle.tar.gz";
 const STORAGE_SECRET: &str = "conformance-storage-secret";
 
-/// Roster must match the corpus files minus `.parquet` — the worker's download list (IB-41b).
 pub const WRITE_SCHEMA_ID: u32 = 7;
 const WRITE_SCHEMA_TABLES: [&str; 2] = ["blocks", "logs"];
 
-/// Legacy shared assignment (IB-40/41), or the worker-oriented pair plus bundle (IB-40b/41b/44b).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Format {
     #[default]
@@ -65,13 +63,11 @@ pub struct ChunkPlacement {
     pub files: Vec<String>,
     /// Whether this worker is assigned the chunk.
     pub assigned: bool,
-    /// Which copy of the chunk to serve; 0 is the ingested one. Worker format only.
+    /// Zero for the ingested copy.
     pub version: u32,
 }
 
 impl ChunkPlacement {
-    /// The same chunk republished by a batch job: its files move under the generation prefix
-    /// registered for `version` (IB-41b), so an address built without it doesn't resolve.
     pub fn at_version(mut self, version: u32) -> Self {
         self.version = version;
         self
@@ -83,14 +79,12 @@ pub struct Scheduler {
     rng: SplitMix64,
     published: Option<String>,
     format: Format,
-    /// `sha256:<hex>` of the served bundle. Only in worker format.
     bundle_hash: Option<String>,
 }
 
 impl Scheduler {
     pub async fn start(rng: SplitMix64, format: Format) -> Self {
         let stub = HttpStub::start().await;
-        // Must be serveable before the first assignment points at it.
         let bundle_hash = (format == Format::Worker).then(|| {
             let archive = schema_bundle(&[(WRITE_SCHEMA_ID, super::corpus::SCHEMA_YAML)]);
             let hash = format!("sha256:{:x}", Sha256::digest(&archive));
@@ -106,13 +100,11 @@ impl Scheduler {
         }
     }
 
-    /// Makes the schema bundle unfetchable — FM-53b's "the assignment must not apply without it".
     pub fn break_schema_bundle(&self, status: u16) {
         self.stub.inject(SCHEMA_BUNDLE_PATH, Fault::Status(status));
     }
 
-    /// Publishes a bundle carrying a schema the assignment does not reference, and omitting the
-    /// one it does — the scheduler shipping a pair that disagrees with itself (FM-53c).
+    /// Publishes a bundle that omits the assignment's schema (FM-53c).
     pub fn publish_bundle_missing_the_assignment_schema(&mut self) {
         let archive = schema_bundle(&[(WRITE_SCHEMA_ID + 1, super::corpus::SCHEMA_YAML)]);
         self.bundle_hash = Some(format!("sha256:{:x}", Sha256::digest(&archive)));
@@ -148,8 +140,6 @@ impl Scheduler {
         }
     }
 
-    /// Where a generation's chunks live, relative to the dataset's base url. One prefix per
-    /// version, since a test only needs them to differ.
     pub fn generation_prefix(version: u32) -> String {
         format!("_gen/{version}")
     }
@@ -207,7 +197,6 @@ impl Scheduler {
         }
     }
 
-    /// Makes the assignment document unfetchable (FM-10).
     pub fn break_document(&self, assignment: &Assignment, status: u16) {
         self.stub
             .inject(assignment.path.clone(), Fault::Status(status));
@@ -268,7 +257,6 @@ impl Scheduler {
         builder.finish()
     }
 
-    /// Worker-oriented document (IB-41b): no per-chunk file list, only [`WRITE_SCHEMA_ID`].
     fn build_worker_document(
         &mut self,
         worker: PeerId,
@@ -281,9 +269,7 @@ impl Scheduler {
             .register_write_schema(WRITE_SCHEMA_ID, &WRITE_SCHEMA_TABLES)
             .expect("roster is sorted");
 
-        // Chunks belong to the dataset they are opened under rather than naming one each, so
-        // placements are grouped by it. BTreeMap: the builder emits datasets in the order they
-        // are opened, and the reader looks them up by key, which assumes id order.
+        // BTreeMap preserves the dataset order expected by the reader.
         let mut by_dataset: BTreeMap<&str, Vec<&ChunkPlacement>> = BTreeMap::new();
         for placement in placements {
             by_dataset
@@ -327,7 +313,6 @@ impl Scheduler {
     }
 }
 
-/// A gzipped tar of `<schema_id>.yaml` at the archive root — the layout IB-44b specifies.
 fn schema_bundle(schemas: &[(u32, &str)]) -> Vec<u8> {
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),

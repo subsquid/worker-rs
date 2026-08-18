@@ -1,10 +1,4 @@
-//! Deterministic regression tests pinning counterexamples found by the
-//! property-based tests in `state_pbt.rs`.
-//!
-//! Counterexample: assignment A0 desires one chunk that is never downloaded;
-//! assignment A1 desires nothing. A settled-check that observes A1's
-//! (trivially satisfied) chunk state while `current_assignment_id` still
-//! points at A0 confirms A0 as applied even though its chunk is missing.
+//! Regression tests for counterexamples found by `state_pbt`.
 
 use std::sync::Arc;
 
@@ -18,17 +12,11 @@ use sqd_worker::storage::manager::{
 use sqd_worker::storage::state::State;
 use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
-// The counterexample replayed verbatim against the settled-check. The wrong
-// confirmation DOES happen: the mark function cannot detect the inconsistency
-// by itself — the guarantee lives in `set_assignment`, which updates the
-// desired chunks and the current id under one critical section. If this test
-// ever fails, mark became self-sufficient and that critical section can be
-// revisited.
+/// Shows why assignment ID and desired chunks must change atomically.
 #[test]
 fn mark_misattributes_application_when_observing_mixed_state() {
     let pipeline = Pipeline::new();
 
-    // A0 registered: desires one chunk, which never gets downloaded
     pipeline
         .state
         .lock()
@@ -37,8 +25,7 @@ fn mark_misattributes_application_when_observing_mixed_state() {
     pipeline.mark();
     assert_eq!(pipeline.last_applied(), None);
 
-    // The mixed observation `set_assignment`'s critical section rules out:
-    // A1's empty chunk set is visible while the current id still says A0
+    // Expose A1's desired set while the current ID still names A0.
     pipeline.state.lock().set_desired_chunks(ChunkSet::new());
     pipeline.mark();
 
@@ -49,14 +36,10 @@ fn mark_misattributes_application_when_observing_mixed_state() {
     );
 }
 
-// The same trace with desired chunks and current id changing atomically, as
-// `set_assignment` does: A0 — never applied — is never confirmed; A1 is
-// confirmed as itself.
 #[test]
 fn atomic_registration_never_confirms_the_undownloaded_assignment() {
     let pipeline = Pipeline::new();
 
-    // A0 registered atomically: desires one chunk, which never gets downloaded
     {
         let mut application = pipeline.application.lock();
         pipeline
@@ -68,7 +51,6 @@ fn atomic_registration_never_confirms_the_undownloaded_assignment() {
     pipeline.mark();
     assert_eq!(pipeline.last_applied(), None);
 
-    // A1 registered atomically: desires nothing
     {
         let mut application = pipeline.application.lock();
         pipeline.state.lock().set_desired_chunks(ChunkSet::new());
@@ -76,7 +58,6 @@ fn atomic_registration_never_confirms_the_undownloaded_assignment() {
     }
     pipeline.mark();
 
-    // A1 is genuinely applied and confirmed as itself; A0 never was
     assert_eq!(pipeline.last_applied(), Some("A1".to_owned()));
     assert_eq!(
         *pipeline.settled_tx.borrow(),

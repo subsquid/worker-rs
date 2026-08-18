@@ -30,8 +30,7 @@ impl Origin {
         }
     }
 
-    /// Publishes `chunk` under a generation prefix and nowhere else — a batch job's rewrite,
-    /// which only a reader that resolves the chunk's `version` can address (IB-41b).
+    /// Publishes a rewritten chunk only under its generation prefix.
     pub fn host_generation(&self, prefix: &str, chunk: &Chunk) {
         for (name, bytes) in &chunk.files {
             self.stub.put(
@@ -49,7 +48,6 @@ impl Origin {
         format!("/{prefix}{}", Self::path(chunk_id, file))
     }
 
-    /// Bytes the origin sent for a file of a chunk hosted under `prefix`.
     pub fn served_bytes_in(&self, prefix: &str, chunk_id: &str, file: &str) -> Option<Vec<u8>> {
         self.stub
             .last_served(&Self::generation_path(prefix, chunk_id, file))

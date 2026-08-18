@@ -117,8 +117,7 @@ fn test_chunks_with_same_block_range() {
     );
 }
 
-/// Worker assignments carry no file list: files derive from the write schema roster,
-/// narrowed by `tables_present`.
+/// Worker-assignment files derive from the write-schema roster and `tables_present`.
 #[cfg(test)]
 mod worker_assignment {
     use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
@@ -138,7 +137,6 @@ mod worker_assignment {
     const DATASET: &str = "s3://solana-mainnet-2";
     const BASE_URL: &str = "https://solana-mainnet-2.sqd-datasets.io";
 
-    /// One chunk on write schema 7; `schema_id` may point at an unregistered schema.
     fn try_build(
         peer_id: sqd_network_transport::PeerId,
         schema_id: u32,
@@ -174,7 +172,6 @@ mod worker_assignment {
         try_build(peer_id, schema_id, tables_present).expect("assignment is well-formed")
     }
 
-    /// `DatasetsIndex` isn't `Debug` (self-referencing flatbuffer), so `expect_err` is out.
     fn expect_rejected(assignment: WorkerAssignment, keypair: &Keypair) -> String {
         match DatasetsIndex::new(
             AssignmentBlob::Worker(assignment),
@@ -237,9 +234,7 @@ mod worker_assignment {
         );
     }
 
-    /// An unregistered write schema yields no file list, so the whole assignment is refused.
-    /// The builder rejects it first, as asserted here; `DatasetsIndex::new` re-checks for
-    /// foreign blobs — `from_owned` validates offsets, not that `write_schema_id` resolves.
+    /// Foreign blobs must not bypass write-schema roster validation.
     #[test]
     fn a_chunk_on_an_unregistered_write_schema_cannot_be_published() {
         let peer_id = Keypair::generate_ed25519().public().to_peer_id();
@@ -263,7 +258,6 @@ mod worker_assignment {
         );
     }
 
-    /// Query execution needs the chunk's schema, else it resolves by dataset type.
     #[test]
     fn the_chunks_write_schema_is_recoverable_from_the_index() {
         let keypair = Keypair::generate_ed25519();
@@ -285,15 +279,10 @@ mod worker_assignment {
             std::sync::Arc::new(DATASET.to_owned()),
             std::sync::Arc::from("nope"),
         );
-        // A chunk this assignment doesn't name has no pinned id, so the query's dataset type
-        // decides — safe because only the legacy manifest fills the type registry, and it is not
-        // filled at all under `--assignment-source worker`
-        // (`restored_bundle_schemas_do_not_mark_legacy_schemas_loaded`).
         assert_eq!(index.chunk_schema(&absent), ChunkSchema::ByType);
     }
 
-    /// A rewrite is another copy of the same id, so it is keyed by its version and stored under
-    /// it, and its files come from the generation prefix the dataset registers for that version.
+    /// A rewritten chunk uses its version key and generation prefix.
     #[test]
     fn a_republished_chunk_is_keyed_and_addressed_by_its_version() {
         const GENERATION: &str = "_bf/01HQZK3M7X8P2NVWTC4RYFGDS9";
@@ -347,9 +336,7 @@ mod worker_assignment {
         );
     }
 
-    /// FM-11: a chunk the document mentions but gives no usable address for fails on its own,
-    /// and says so — the worker used to conflate it with a chunk the assignment never mentioned
-    /// and take the process down over the pair.
+    /// Distinguishes an unaddressable assigned chunk from an unassigned chunk (FM-11).
     #[test]
     fn an_unusable_address_is_told_apart_from_an_unknown_chunk() {
         let keypair = Keypair::generate_ed25519();
@@ -396,9 +383,7 @@ mod worker_assignment {
         );
     }
 
-    /// A table name is joined onto the chunk's directory, so one that is a path rather than a
-    /// file name writes outside it while the chunk still commits — a chunk held and reported
-    /// while quietly missing a table, which queries answer as empty rather than as an error.
+    /// Rejects table names that could escape the chunk directory.
     #[test]
     fn a_roster_naming_a_table_that_is_not_a_file_name_is_refused() {
         let keypair = Keypair::generate_ed25519();
@@ -429,7 +414,6 @@ mod worker_assignment {
         );
     }
 
-    /// Otherwise the failure — or a silent wrong-version match — surfaces only at query time.
     #[test]
     fn an_assignment_referencing_an_unavailable_schema_is_rejected() {
         let keypair = Keypair::generate_ed25519();
@@ -450,7 +434,6 @@ mod worker_assignment {
         );
     }
 
-    /// Legacy assignments pin no schema, so query-time resolution falls back to the dataset type.
     #[test]
     fn legacy_assignments_expose_no_write_schema() {
         use sqd_assignments::AssignmentBuilder;
@@ -485,7 +468,6 @@ mod worker_assignment {
         assert_eq!(index.chunk_schema(&chunk), ChunkSchema::ByType);
     }
 
-    /// Keying is unchanged from the legacy path, so the manager's chunk bookkeeping survives.
     #[test]
     fn chunks_are_keyed_the_same_way_as_the_legacy_format() {
         let keypair = Keypair::generate_ed25519();

@@ -1,17 +1,4 @@
-//! Property-based tests for the chunk [`State`] machine and the assignment
-//! confirmation logic. Random operation sequences are folded over the state
-//! while checking, at every step, the guarantees the module is built around:
-//!
-//! 1. Deletion before download: a download is never handed out while any chunk
-//!    on disk or in flight is not part of the current assignment — except
-//!    draining chunks (undesired but still query-held), whose overcommit is
-//!    bounded by the locks held at the assignment switch.
-//! 2. No wedge states: whenever downloads are refused, the blockage is
-//!    attributable to a pending removal or a draining copy that a future
-//!    event clears, and running all pending events to completion always
-//!    reaches a terminal state with nothing left draining.
-//! 3. Correct confirmation: an assignment is only ever marked applied when all
-//!    of its chunks are actually available; a stalled assignment never is.
+//! Property tests for deletion-before-download, convergence, and assignment confirmation.
 
 use std::sync::Arc;
 
@@ -21,11 +8,9 @@ use sqd_worker::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
 use sqd_worker::storage::state::State;
 use sqd_worker::types::state::{ChunkRef, ChunkSet};
 
-/// Small chunk universe so random subsets collide and re-assignments overlap.
 const UNIVERSE: usize = 8;
 
-/// Upper bound on drain iterations; generously above any reachable amount of
-/// pending work, so hitting it means the state machine is wedged.
+/// Exceeding this generous bound indicates a wedged state machine.
 const DRAIN_STEP_LIMIT: usize = 10_000;
 
 proptest! {
@@ -45,9 +30,6 @@ proptest! {
         drain(&mut state, &mut shadow);
     }
 
-    // The attempt cap in isolation: however the failures are interleaved with
-    // other work, a chunk is offered at most the attempt cap times per
-    // assignment when every attempt fails.
     #[test]
     fn a_chunk_is_never_attempted_more_than_the_cap_per_assignment(
         target in 0..UNIVERSE,
@@ -62,7 +44,6 @@ proptest! {
             if matches!(op, Op::NewAssignment(_)) {
                 attempts_since_assignment = 0;
             }
-            // Force every download of the target chunk to fail immediately
             if matches!(op, Op::TakeDownload) {
                 if let Some(chunk) = state.take_next_download() {
                     assert_no_overcommit(&state);
@@ -88,18 +69,11 @@ proptest! {
 
 #[derive(Debug, Clone)]
 enum Op {
-    /// A new assignment arrives, desiring the given subset of the universe.
     NewAssignment(Vec<usize>),
-    /// The manager loop asks for the next download to start.
     TakeDownload,
-    /// An in-flight download finishes; `pick` selects which one.
     CompleteDownload { pick: usize, success: bool },
-    /// A query locks the chunk with the given universe index (no-op if it
-    /// isn't available).
     Lock { target: usize },
-    /// A query finishes, releasing one outstanding lock; `pick` selects which.
     Unlock { pick: usize },
-    /// The manager loop collects removable chunks.
     TakeRemovals,
 }
 
@@ -115,10 +89,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
     ]
 }
 
-/// Shadow bookkeeping mirroring what the manager and the queries hold: which
-/// downloads are in flight and which locks are outstanding. Needed both to
-/// issue only legal `complete_download`/`unlock_chunk` calls and to drain the
-/// state at the end.
+/// Tracks resources needed to generate legal completion and unlock operations.
 #[derive(Default)]
 struct Shadow {
     in_flight: Vec<ChunkRef>,
@@ -161,8 +132,6 @@ fn apply_op(state: &mut State, shadow: &mut Shadow, op: &Op) {
                     !shadow.locks_held.contains(&removed),
                     "removed a chunk still locked by a query"
                 );
-                // A desired chunk may be deleted only as a stale draining
-                // copy making way for its own re-download
                 assert!(
                     !state.desired().contains(&removed)
                         || state.queued_downloads().contains(&removed),
@@ -184,10 +153,7 @@ fn take_download(state: &mut State, shadow: &mut Shadow) {
             shadow.in_flight.push(chunk);
         }
         None => {
-            // Guarantee 2 (accountability): a refusal with work still queued
-            // must be attributable to something a future event clears — a
-            // pending removal, or queued chunks whose stale draining copies
-            // are still held by queries.
+            // Queued work may pause only for removal or a query-held stale copy.
             if state.has_queued_downloads() {
                 assert!(
                     state.has_pending_removals()
@@ -202,9 +168,7 @@ fn take_download(state: &mut State, shadow: &mut Shadow) {
     }
 }
 
-/// Guarantee 2 — liveness. Deliver every pending event (downloads succeed,
-/// queries finish, removals proceed) and require a terminal verdict: either
-/// fully applied or stalled, never a wedge.
+/// Delivers all pending events and requires a terminal state.
 fn drain(state: &mut State, shadow: &mut Shadow) {
     for _ in 0..DRAIN_STEP_LIMIT {
         state.take_removals();
@@ -224,8 +188,6 @@ fn drain(state: &mut State, shadow: &mut Shadow) {
             state.assert_invariants();
             continue;
         }
-        // Quiescent: exactly one terminal verdict must hold, and no undesired
-        // or draining data may remain on disk.
         assert!(
             state.is_fully_applied() ^ state.is_stalled(),
             "quiescent state is neither applied nor stalled (or claims both)"
@@ -243,11 +205,7 @@ fn drain(state: &mut State, shadow: &mut Shadow) {
     panic!("state machine did not reach quiescence within {DRAIN_STEP_LIMIT} steps");
 }
 
-/// Guarantee 1 — deletion before download. Checked at the only moment it can
-/// be violated: when a download is handed out, everything available and in
-/// flight must belong to the current assignment. Draining chunks are the one
-/// deliberate exception — still on disk, but bounded by the query locks held
-/// at the assignment switch and invisible to new queries.
+/// Checks deletion-before-download when a download is handed out.
 fn assert_no_overcommit(state: &State) {
     assert!(
         state.available().is_subset(state.desired()),
@@ -260,7 +218,6 @@ fn assert_no_overcommit(state: &State) {
 }
 
 fn chunk(i: usize) -> ChunkRef {
-    // Two datasets so the per-dataset download scheduling is exercised too
     let dataset = if i < UNIVERSE / 2 { "ds0" } else { "ds1" };
     ChunkRef::new(
         Arc::new(dataset.to_owned()),
@@ -276,9 +233,7 @@ fn chunk_set(indexes: &[usize]) -> ChunkSet {
     indexes.iter().map(|&i| chunk(i)).collect()
 }
 
-/// Guarantee 3 — confirmation correctness: the real check-and-mark critical
-/// section under randomized interleavings of the assignment pipeline with the
-/// state loop's own mark and download-progress steps.
+/// Randomizes assignment confirmation against state-loop progress.
 mod confirmation {
     use parking_lot::Mutex;
 
@@ -304,9 +259,7 @@ mod confirmation {
             for (i, (subset, after)) in scripts.iter().enumerate() {
                 let chunks = chunk_set(subset);
                 pipeline.chunk_sets.push(chunks.clone());
-                // Mirrors `set_assignment`: the desired chunks and the current
-                // id are updated under one critical section w.r.t. the
-                // settled-check, followed by its own mark call.
+                // Match `set_assignment`'s atomic desired-set and ID update.
                 {
                     let mut application = pipeline.application.lock();
                     pipeline.state.lock().set_desired_chunks(chunks);
@@ -320,11 +273,6 @@ mod confirmation {
         }
     }
 
-    /// One assignment: its chunk subset and the ops that run after it is
-    /// registered. Desired chunks and `current_assignment_id` change
-    /// atomically w.r.t. the settled-check, as in `set_assignment`, so no ops
-    /// interleave between them; the mixed-observation hazard is pinned in
-    /// `state_regression.rs`.
     type Script = (Vec<usize>, Vec<MidOp>);
 
     fn arb_scripts() -> impl Strategy<Value = Vec<Script>> {
@@ -339,9 +287,7 @@ mod confirmation {
 
     #[derive(Debug, Clone)]
     enum MidOp {
-        /// The state loop's periodic check runs.
         Mark,
-        /// One download is taken and completed with the given outcome.
         Progress(bool),
     }
 
@@ -356,7 +302,6 @@ mod confirmation {
         state: Mutex<State>,
         application: Mutex<AssignmentApplicationStatus>,
         settled_tx: tokio::sync::watch::Sender<Option<AssignmentSettled>>,
-        /// The chunk set each registered assignment id desires.
         chunk_sets: Vec<ChunkSet>,
     }
 

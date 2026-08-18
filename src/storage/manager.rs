@@ -564,7 +564,6 @@ mod tests {
     use super::{DownloadConfig, StateManager};
     use crate::types::dataset::encode_dataset;
 
-    /// A valid assignment that assigns no chunks to `peer_id`.
     fn empty_assignment_for(peer_id: sqd_contract_client::PeerId) -> sqd_assignments::Assignment {
         let mut builder = sqd_assignments::AssignmentBuilder::new("test-secret");
         builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[]);
@@ -586,11 +585,7 @@ mod tests {
             .unwrap()
     }
 
-    /// The store decides what can be answered, not the assignment: a chunk on disk resolves its
-    /// schema by dataset type whenever nothing names one for it — before the first assignment, and
-    /// under an assignment that doesn't cover it. That cannot reach for the wrong version of a
-    /// type, because only the legacy manifest fills the type registry and a bundle installs by id
-    /// alone (`schema_bundle::tests::restored_bundle_schemas_do_not_mark_legacy_schemas_loaded`).
+    /// Stored chunks without a pinned schema resolve through the legacy type registry.
     #[tokio::test]
     async fn a_chunk_outside_the_assignment_still_resolves_by_type() {
         use std::sync::Arc;
@@ -605,7 +600,6 @@ mod tests {
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
         let manager = Arc::new(test_manager(workdir, worker_id).await);
 
-        // A chunk left on disk, the way a restart finds one.
         let dataset = "s3://test".to_owned();
         let chunk = ChunkRef::new(
             Arc::new(dataset.clone()),
@@ -649,8 +643,7 @@ mod tests {
         );
     }
 
-    /// A restart has only the store to go on, so the version has to be recoverable from where the
-    /// chunk sits — otherwise a rewrite would read back as the copy it replaced.
+    /// A restart recovers chunk versions from their paths.
     #[tokio::test]
     async fn a_restart_recovers_each_chunk_at_the_version_it_is_stored_under() {
         use std::sync::Arc;
@@ -681,8 +674,6 @@ mod tests {
         );
     }
 
-    /// The path is the whole mechanism: two copies of one id must not contend for one directory,
-    /// and the ingested one must land where a store written before versions existed has it.
     #[tokio::test]
     async fn a_rewrite_is_stored_beside_the_ingested_copy_not_over_it() {
         use std::sync::Arc;
@@ -714,10 +705,7 @@ mod tests {
         );
     }
 
-    // WP-2: a document that cannot be applied leaves the previous one in force. The applier
-    // classifies this as `Refused` rather than retrying, since no later attempt at the same pair
-    // can end differently, so recovery waits for a different pair — which since IB-40b's pair
-    // announcement includes a corrected bundle under the same assignment id.
+    /// A refused assignment leaves the previous assignment active (WP-2).
     #[tokio::test]
     async fn a_refused_assignment_leaves_the_worker_on_the_old_one() {
         let keypair = Keypair::generate_ed25519();
@@ -741,7 +729,6 @@ mod tests {
             Some("A")
         );
 
-        // Assignment B doesn't include this worker, so registration fails...
         let other_worker = Keypair::generate_ed25519().public().to_peer_id();
         assert!(manager
             .prepare_assignment(
@@ -752,16 +739,13 @@ mod tests {
             )
             .is_err());
 
-        // ...and the worker keeps reporting A, with no retry path for B
         assert_eq!(
             manager.current_status().await.assignment_id.as_deref(),
             Some("A")
         );
     }
 
-    // Known limitation (not yet fixed): a failed chunk removal panics the state
-    // loop — and with it the whole worker — instead of being retried or surfaced
-    // as an error. Any transient FS hiccup during cleanup is fatal.
+    /// Documents the current fatal response to a chunk-removal failure.
     #[tokio::test]
     #[should_panic(expected = "Couldn't remove chunk")]
     async fn removal_failure_panics_the_state_loop() {
@@ -770,7 +754,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
 
-        // One chunk is on disk at startup, so it is loaded as available
         let chunk_dir = workdir
             .join(encode_dataset("s3://ds"))
             .join("0000000000/0000000000-0000000001-abcdef");
@@ -778,7 +761,6 @@ mod tests {
 
         let manager = test_manager(workdir, worker_id).await;
 
-        // The new assignment holds no chunks, scheduling the local one for removal
         manager.set_prepared_assignment(
             manager
                 .prepare_assignment(
@@ -790,7 +772,6 @@ mod tests {
                 .expect("the document lists this worker"),
         );
 
-        // Sabotage the removal: the chunk dir vanishes behind the manager's back
         std::fs::remove_dir_all(&chunk_dir).unwrap();
 
         manager.run(CancellationToken::new()).await;
@@ -809,9 +790,7 @@ mod tests {
         })
     }
 
-    // One specific interleaving between `set_assignment` and the state loop's
-    // periodic check that must not report a not-yet-applied assignment as
-    // applied. Not an exhaustive test of every interleaving.
+    /// A settled check must not combine a new desired set with the previous assignment ID.
     #[test]
     fn does_not_misattribute_applied_state_to_a_newer_assignment() {
         use std::sync::Arc;
@@ -828,8 +807,6 @@ mod tests {
         let chunk_a = chunk("a");
         let chunk_b = chunk("b");
 
-        // Assignment A only needs `chunk_a`, which is already available, and is
-        // already marked as applied (steady state before the race begins).
         let state = Mutex::new(State::new(
             [chunk_a.clone()].into_iter().collect(),
             DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
@@ -841,26 +818,19 @@ mod tests {
         let (assignment_settled_tx, assignment_settled_rx) =
             tokio::sync::watch::channel(settled("A", AssignmentOutcome::Applied));
 
-        // Step 1: `set_assignment(B)` updates the desired chunks first. B additionally
-        // needs `chunk_b`, which isn't available yet, so state stops being fully applied.
         let desired: ChunkSet = [chunk_a.clone(), chunk_b.clone()].into_iter().collect();
         state.lock().set_desired_chunks(desired);
         assert!(!state.lock().is_fully_applied());
 
-        // Step 2: the state loop's own check races in before `current_assignment_id`
-        // has been updated to B. `current_assignment_id` is still A, which is already
-        // marked applied, so this must be a no-op.
+        // Simulate the state-loop check between desired-set and ID updates.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
             Some("A".to_owned())
         );
 
-        // Step 3: `set_assignment` now points `current_assignment_id` at B.
         assignment_application.lock().current_assignment_id = Some("B".to_owned());
 
-        // Step 4: `set_assignment`'s own post-update check runs. `chunk_b` is
-        // still missing, so B must NOT be marked applied here.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
@@ -872,12 +842,10 @@ mod tests {
             settled("A", AssignmentOutcome::Applied)
         );
 
-        // Step 5: `chunk_b` finishes downloading, so B genuinely becomes fully applied.
         state.lock().take_next_download();
         state.lock().complete_download(&chunk_b, true);
         assert!(state.lock().is_fully_applied());
 
-        // Step 6: only now should B be marked applied.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
@@ -889,11 +857,7 @@ mod tests {
         );
     }
 
-    // A0 applies; A1 stalls, so `last_applied_assignment_id` still names A0 while the channel
-    // holds A1's verdict; then the scheduler goes back to A0. Deciding "already settled" from
-    // `last_applied` concluded A0's verdict was out when the channel no longer named it, so
-    // nothing was published again and `wait_until_assignment_settled` could not return — the
-    // applier stays parked on A0 and drains nothing (LIV-1).
+    /// Re-registering an older assignment must republish its displaced verdict (LIV-1).
     #[test]
     fn a_reregistered_assignment_settles_again_though_it_applied_before() {
         use std::sync::Arc;
@@ -908,7 +872,6 @@ mod tests {
 
         let chunk_a = ChunkRef::new(Arc::new("ds".to_owned()), Arc::from("a"));
 
-        // A0 desires nothing, so it applies as soon as it is registered.
         let state = Mutex::new(State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS));
         let application = Mutex::new(AssignmentApplicationStatus {
             current_assignment_id: Some("A0".to_owned()),
@@ -921,8 +884,6 @@ mod tests {
             settled("A0", AssignmentOutcome::Applied)
         );
 
-        // A1 wants a chunk that exhausts its attempts, so it stalls. `last_applied` still says
-        // A0 — the heartbeat reports the newest assignment that actually applied.
         {
             let mut application = application.lock();
             state
@@ -944,7 +905,6 @@ mod tests {
             Some("A0".to_owned())
         );
 
-        // The scheduler publishes A0 again, and the worker can satisfy it again.
         {
             let mut application = application.lock();
             state.lock().set_desired_chunks(ChunkSet::new());
