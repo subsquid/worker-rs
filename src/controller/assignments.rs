@@ -110,9 +110,7 @@ async fn poll_network_state(
 ) -> anyhow::Result<Option<AssignmentUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
-    let published_bundle = (assignment_source == AssignmentSource::Worker)
-        .then(|| network_state.schema_bundle.take())
-        .flatten();
+    let published_bundle = network_state.schema_bundle.take();
 
     let Some(assignment) = visible_assignment(&network_state, assignment_source) else {
         tracing::warn!(
@@ -522,6 +520,32 @@ mod tests {
             Some(hash(0xaa)),
             "nothing was announced, so the corrected pair is offered whole"
         );
+    }
+
+    /// Pins the order of the checks: with no assignment for this mode there is nothing to pair
+    /// the bundle with, so the state is the same wait as a network that has not migrated — and
+    /// whether the bundle reference is usable must not be able to turn that wait into an error.
+    #[tokio::test]
+    async fn a_state_without_an_assignment_waits_whatever_its_bundle_says() {
+        let state = format!(
+            r#"{{"network":"test","assignment":{{"id":"legacy","fb_url_v1":"http://example.com/l.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{}","url":"http://example.com/bundle.tar.gz"}}}}"#,
+            "aa".repeat(32)
+        )
+        .into_bytes();
+        let url = TestServer::serve_once(state).await;
+        let mut announced = Announced::default();
+
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            AssignmentSource::Worker,
+            &mut announced,
+        )
+        .await
+        .expect("no assignment for the mode is a wait, not an error, however the bundle reads");
+
+        assert!(update.is_none());
+        assert_eq!(announced, Announced::default(), "nothing was announced");
     }
 
     #[tokio::test]

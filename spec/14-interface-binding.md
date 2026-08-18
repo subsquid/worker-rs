@@ -200,8 +200,10 @@ These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are uncha
 both fields are mandatory when the worker consumes `worker_assignment`; a state missing either,
 or naming a bundle hash the worker cannot parse, is not applicable, and is re-read at the poll
 cadence rather than on the fetch-retry ladder — an incomplete state is a legal condition of a
-rolling migration, not a failure to read one (FM-53d). The legacy `assignment` key is ignored and never falls back to. A network
-mid-migration may publish either pointer for workers in the corresponding mode. The two
+rolling migration, not a failure to read one. Only the shape that names an assignment without a
+usable bundle alarms (FM-53d); a bundle published ahead of its assignment is the same wait as a
+network that has not migrated. The legacy `assignment` key is ignored and never falls back to. A
+network mid-migration may publish either pointer for workers in the corresponding mode. The two
 references move independently on the wire — either can change without the other — but the worker
 reads them as one announcement: a change to either half re-announces the **pair**, deduplicated
 against what was last *read*, not against what it applied. A change of *location* — `fb_url_v1`
