@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex},
+    datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex, UnresolvedChunk},
     downloader::{ChunkDownloader, DownloadConfig},
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -121,8 +121,8 @@ impl StateManager {
     /// # Panics
     ///
     /// Panics — taking the whole worker down under the fail-fast subsystem
-    /// tree — if a chunk removal fails on disk or an assigned chunk's file
-    /// URLs cannot be resolved from the current assignment.
+    /// tree — if a chunk removal fails on disk, or if a chunk taken from the
+    /// download queue is absent from the assignment that queued it.
     pub async fn run(&self, cancellation_token: CancellationToken) {
         let mut downloader = ChunkDownloader::new(self.worker_id, self.download_config);
         loop {
@@ -174,17 +174,36 @@ impl StateManager {
                 continue;
             };
             while downloader.download_count() < self.concurrent_downloads {
-                if let Some(chunk_ref) = self.state.lock().take_next_download() {
-                    info!("Downloading chunk {chunk_ref}");
-                    let dst = self.chunk_path(&chunk_ref);
-                    let files = dataset_index
-                        .list_files(&chunk_ref)
-                        .unwrap_or_else(|| panic!("Dataset {} not found", chunk_ref.dataset));
-                    let headers = dataset_index.get_headers().clone();
-                    downloader.start_download(chunk_ref, dst, files, headers);
-                } else {
+                // Bound before the `let`, not taken in its scrutinee: a scrutinee temporary lives
+                // to the end of the block, so the guard would still be held below — and this lock
+                // is not reentrant.
+                let next = self.state.lock().take_next_download();
+                let Some(chunk_ref) = next else {
                     break;
-                }
+                };
+                info!("Downloading chunk {chunk_ref}");
+                let dst = self.chunk_path(&chunk_ref);
+                let files = match dataset_index.list_files(&chunk_ref) {
+                    Ok(files) => files,
+                    // The chunk was queued from the very index being read here — the loop holds
+                    // its lock across both — so a miss is this worker's bug, not the document's.
+                    Err(UnresolvedChunk::NotAssigned) => panic!(
+                        "chunk {chunk_ref} was queued from an assignment that doesn't carry it"
+                    ),
+                    // FM-11: the document is unusable for this chunk and no attempt can change
+                    // that, but the rest of it still applies. Charging an attempt exhausts the
+                    // chunk into `failed_downloads`, which settles the assignment as stalled
+                    // instead of taking the worker down over one row.
+                    Err(e) => {
+                        warn!(chunk = %chunk_ref, error = %e, "Can't address chunk");
+                        metrics::CHUNKS_UNADDRESSABLE.inc();
+                        metrics::CHUNKS_FAILED_DOWNLOAD.inc();
+                        self.state.lock().complete_download(&chunk_ref, false);
+                        continue;
+                    }
+                };
+                let headers = dataset_index.get_headers().clone();
+                downloader.start_download(chunk_ref, dst, files, headers);
             }
             self.mark_current_assignment_settled_if_ready();
         }

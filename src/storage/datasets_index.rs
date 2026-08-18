@@ -40,48 +40,78 @@ pub struct RemoteFile {
     pub name: String,
 }
 
+/// Why the assignment can't say where a chunk's files live.
+///
+/// The two are told apart because they are answers to different questions: one says the caller
+/// asked about a chunk this assignment never mentioned, the other that the document itself is
+/// unusable for a chunk it does mention (FM-11).
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum UnresolvedChunk {
+    /// The ref didn't come from this assignment — the caller holds state this index never
+    /// produced.
+    #[error("chunk is not in this assignment")]
+    NotAssigned,
+    /// The document mentions the chunk but carries no usable address for it: a base url that
+    /// won't parse, a version whose dataset registers no generation, a hash that isn't UTF-8.
+    #[error("{0}")]
+    NoAddress(String),
+}
+
 impl DatasetsIndex {
-    /// Returns the remote files (URL + filename) associated with the given
-    /// chunk, or `None` if the chunk is not in the assignment or any URL
-    /// fails to parse.
-    pub fn list_files(&self, chunk: &ChunkRef) -> Option<Vec<RemoteFile>> {
-        let chunk_ref = self.chunks.get(chunk)?;
+    /// The remote files (URL + filename) that make up `chunk`.
+    ///
+    /// # Errors
+    ///
+    /// If the chunk is not in this assignment, or the assignment carries no address the worker
+    /// can fetch it from.
+    pub fn list_files(&self, chunk: &ChunkRef) -> Result<Vec<RemoteFile>, UnresolvedChunk> {
+        let chunk_ref = self.chunks.get(chunk).ok_or(UnresolvedChunk::NotAssigned)?;
         match &self.assignment {
             AssignmentBlob::Legacy(assignment) => {
-                let chunk = assignment.get_chunk(*chunk_ref)?;
+                let chunk = assignment
+                    .get_chunk(*chunk_ref)
+                    .ok_or(UnresolvedChunk::NotAssigned)?;
                 let base_url = chunk_base_url(chunk.dataset_base_url(), chunk.base_url())?;
                 let mut result = Vec::with_capacity(chunk.files().len());
                 for file in chunk.files() {
                     result.push(RemoteFile {
                         name: file.filename().to_owned(),
-                        url: base_url
-                            .join(file.url())
-                            .inspect_err(|e| {
-                                tracing::warn!("Can't parse file url '{}': {e}", file.url())
-                            })
-                            .ok()?,
+                        url: join_file(&base_url, file.url())?,
                     });
                 }
-                Some(result)
+                Ok(result)
             }
             AssignmentBlob::Worker(assignment) => {
-                let chunk = assignment.get_chunk(*chunk_ref)?;
+                let chunk = assignment
+                    .get_chunk(*chunk_ref)
+                    .ok_or(UnresolvedChunk::NotAssigned)?;
                 // The chunk composes its own url: the dataset's base, the prefix of the
                 // generation its `version` names, then the chunk id.
-                let base_url = directory_url(&chunk.url()?)?;
-                let tables = assignment.chunk_tables(chunk)?;
+                let chunk_url = chunk.url().ok_or_else(|| {
+                    UnresolvedChunk::NoAddress(format!(
+                        "chunk {} of dataset '{}' is at version {}, which the assignment gives no \
+                         address for",
+                        chunk.index(),
+                        chunk.dataset().id(),
+                        chunk.version()
+                    ))
+                })?;
+                let base_url = directory_url(&chunk_url)?;
+                let tables = assignment.chunk_tables(chunk).ok_or_else(|| {
+                    UnresolvedChunk::NoAddress(format!(
+                        "write schema {} has no roster in the assignment",
+                        chunk.write_schema_id()
+                    ))
+                })?;
                 let mut result = Vec::new();
                 for table in tables {
                     let name = format!("{table}.parquet");
                     result.push(RemoteFile {
-                        url: base_url
-                            .join(&name)
-                            .inspect_err(|e| tracing::warn!("Can't parse file url '{name}': {e}"))
-                            .ok()?,
+                        url: join_file(&base_url, &name)?,
                         name,
                     });
                 }
-                Some(result)
+                Ok(result)
             }
         }
     }
@@ -214,21 +244,30 @@ impl DatasetsIndex {
     }
 }
 
-fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Option<Url> {
-    Url::from_str(dataset_base_url)
-        .inspect_err(|e| tracing::warn!("Can't parse dataset base url '{dataset_base_url}': {e}"))
-        .ok()?
-        .join(&format!("{chunk_prefix}/"))
-        .inspect_err(|e| tracing::warn!("Can't parse chunk base url '{chunk_prefix}': {e}"))
-        .ok()
+fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Result<Url, UnresolvedChunk> {
+    let base = Url::from_str(dataset_base_url).map_err(|e| {
+        UnresolvedChunk::NoAddress(format!(
+            "dataset base url '{dataset_base_url}' doesn't parse: {e}"
+        ))
+    })?;
+    base.join(&format!("{chunk_prefix}/")).map_err(|e| {
+        UnresolvedChunk::NoAddress(format!(
+            "chunk base url '{chunk_prefix}' doesn't parse: {e}"
+        ))
+    })
 }
 
 /// Parses a url naming a directory, so joining a file name onto it extends the path instead of
 /// replacing its last segment.
-fn directory_url(url: &str) -> Option<Url> {
+fn directory_url(url: &str) -> Result<Url, UnresolvedChunk> {
     Url::from_str(&format!("{url}/"))
-        .inspect_err(|e| tracing::warn!("Can't parse chunk base url '{url}': {e}"))
-        .ok()
+        .map_err(|e| UnresolvedChunk::NoAddress(format!("chunk url '{url}' doesn't parse: {e}")))
+}
+
+fn join_file(base_url: &Url, file: &str) -> Result<Url, UnresolvedChunk> {
+    base_url
+        .join(file)
+        .map_err(|e| UnresolvedChunk::NoAddress(format!("file url '{file}' doesn't parse: {e}")))
 }
 
 #[derive(Default)]

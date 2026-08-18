@@ -124,7 +124,9 @@ mod worker_assignment {
     use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
     use sqd_network_transport::Keypair;
 
-    use crate::storage::datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex, RemoteFile};
+    use crate::storage::datasets_index::{
+        AssignmentBlob, ChunkSchema, DatasetsIndex, RemoteFile, UnresolvedChunk,
+    };
     use crate::types::schema::SchemaId;
     use crate::types::state::ChunkRef;
 
@@ -339,6 +341,55 @@ mod worker_assignment {
                 .url
                 .as_str(),
             format!("{BASE_URL}/{GENERATION}/{CHUNK_ID}/blocks.parquet"),
+        );
+    }
+
+    /// FM-11: a chunk the document mentions but gives no usable address for fails on its own,
+    /// and says so — the worker used to conflate it with a chunk the assignment never mentioned
+    /// and take the process down over the pair.
+    #[test]
+    fn an_unusable_address_is_told_apart_from_an_unknown_chunk() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+        builder.register_write_schema(7, &["blocks"]).unwrap();
+        let mut dataset = builder.new_dataset(DATASET, "not a url");
+        dataset
+            .new_chunk()
+            .id(CHUNK_ID)
+            .block_range(221000000..=221000649)
+            .size(1000000)
+            .write_schema_id(7)
+            .worker_indexes(&[0])
+            .finish()
+            .unwrap();
+        dataset.finish().unwrap();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        let assignment = WorkerAssignment::from_owned(builder.finish()).unwrap();
+
+        let index = DatasetsIndex::new(
+            AssignmentBlob::Worker(assignment),
+            "test-asgn",
+            &keypair,
+            all_schemas_available,
+        )
+        .expect("an address is only needed to download, so admission takes this");
+
+        let assigned = index.chunks().keys().next().unwrap().clone();
+        let message = match index.list_files(&assigned) {
+            Err(UnresolvedChunk::NoAddress(message)) => message,
+            other => panic!("expected an unusable address, got {other:?}"),
+        };
+        assert!(message.contains("not a url"), "{message}");
+
+        let stranger = ChunkRef::new(
+            std::sync::Arc::new(DATASET.to_owned()),
+            std::sync::Arc::from("nope"),
+        );
+        assert_eq!(
+            index.list_files(&stranger),
+            Err(UnresolvedChunk::NotAssigned),
+            "a chunk from somewhere else is the caller's mistake, not the document's"
         );
     }
 

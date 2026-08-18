@@ -52,6 +52,7 @@ lazy_static::lazy_static! {
     pub static ref CHUNKS_DRAINING: Gauge = Default::default();
     pub static ref CHUNKS_DOWNLOADED: Counter = Default::default();
     pub static ref CHUNKS_FAILED_DOWNLOAD: Counter = Default::default();
+    pub static ref CHUNKS_UNADDRESSABLE: Counter = Default::default();
     pub static ref CHUNKS_REMOVED: Counter = Default::default();
     pub static ref STORED_BYTES: Gauge = Default::default();
 
@@ -135,6 +136,11 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "chunks_failed_download",
         "Number of chunks failed to download",
         CHUNKS_FAILED_DOWNLOAD.clone(),
+    );
+    registry.register(
+        "chunks_unaddressable",
+        "Number of chunks the applied assignment carries no usable address for",
+        CHUNKS_UNADDRESSABLE.clone(),
     );
     registry.register(
         "chunks_removed",
