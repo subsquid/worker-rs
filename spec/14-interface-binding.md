@@ -197,10 +197,10 @@ These replace IB-40/41/44 one-for-one; nothing consumes both. IB-42/43 are uncha
 
 **IB-40b — Network-state document.** Same address as IB-40, but the worker reads
 `worker_assignment: {id, fb_url_v1, effective_from}` and `schema_bundle: {hash, url}`;
-both fields are mandatory when the worker consumes `worker_assignment`; a state missing either
-is not applicable, and is re-read at the poll cadence rather than on the fetch-retry ladder —
-an incomplete state is a legal condition of a rolling migration, not a failure to read one
-(FM-53d). The legacy `assignment` key is ignored and never falls back to. A network
+both fields are mandatory when the worker consumes `worker_assignment`; a state missing either,
+or naming a bundle hash the worker cannot parse, is not applicable, and is re-read at the poll
+cadence rather than on the fetch-retry ladder — an incomplete state is a legal condition of a
+rolling migration, not a failure to read one (FM-53d). The legacy `assignment` key is ignored and never falls back to. A network
 mid-migration may publish either pointer for workers in the corresponding mode. The two
 references move independently on the wire — either can change without the other — but the worker
 reads them as one announcement: a change to either half re-announces the **pair**, deduplicated

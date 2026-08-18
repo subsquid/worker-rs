@@ -112,12 +112,7 @@ async fn poll_network_state(
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
     let published_bundle = (assignment_source == AssignmentSource::Worker)
         .then(|| network_state.schema_bundle.take())
-        .flatten()
-        .map(SchemaBundle::try_from)
-        .transpose()
-        .inspect_err(|_| {
-            metrics::SCHEMA_BUNDLE_FAILURES.inc();
-        })?;
+        .flatten();
 
     let Some(assignment) = visible_assignment(&network_state, assignment_source) else {
         tracing::warn!(
@@ -129,15 +124,33 @@ async fn poll_network_state(
         );
         return Ok(None);
     };
-    // A half-published pair is re-read at the poll cadence, not the error backoff (FM-53d).
-    if assignment_source == AssignmentSource::Worker && published_bundle.is_none() {
-        metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
-        tracing::warn!(
-            assignment_id = %assignment.id,
-            "Network state publishes a worker assignment but no schema bundle; waiting"
-        );
-        return Ok(None);
-    }
+    // A half-published pair — the bundle missing, or its reference unusable — is re-read at the
+    // poll cadence, not the error backoff (FM-53d): the state was read fine, it is the
+    // scheduler's content that is not applicable, and erroring would put the poll on a ladder
+    // that reaches hours between reads.
+    let published_bundle = match (assignment_source, published_bundle) {
+        (AssignmentSource::Legacy, _) => None,
+        (AssignmentSource::Worker, None) => {
+            metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+            tracing::warn!(
+                assignment_id = %assignment.id,
+                "Network state publishes a worker assignment but no schema bundle; waiting"
+            );
+            return Ok(None);
+        }
+        (AssignmentSource::Worker, Some(bundle)) => match SchemaBundle::try_from(bundle) {
+            Ok(bundle) => Some(bundle),
+            Err(e) => {
+                metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+                tracing::warn!(
+                    assignment_id = %assignment.id,
+                    error = %e,
+                    "Network state publishes a worker assignment with an unusable schema bundle reference; waiting"
+                );
+                return Ok(None);
+            }
+        },
+    };
 
     published_update(assignment, published_bundle, announced)
 }
@@ -456,15 +469,58 @@ mod tests {
         .expect("a half-published state is not a failure to read one");
 
         assert!(update.is_none(), "half a pair is not applicable");
-        assert_eq!(
-            metrics::SCHEMA_BUNDLE_MISMATCHES.get(),
-            mismatches_before + 1,
+        // `>`, not `+ 1`: the counter is process-global and other tests in this binary move it.
+        assert!(
+            metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches_before,
             "the scheduler is who resolves it, so it counts with the other pair faults"
         );
         assert_eq!(
             announced.pair.bundle_hash,
             Some(hash(0xaa)),
             "nothing was announced, so the pair is offered whole when the bundle returns"
+        );
+    }
+
+    /// The other way a pair can be half-published: the bundle is there but its reference is one
+    /// the worker cannot use. Same fault class as a missing bundle — the state was read fine and
+    /// it is the scheduler's content that is not applicable — so it takes the same exit: waiting
+    /// at the poll cadence, not the fetch-retry ladder.
+    #[tokio::test]
+    async fn a_state_with_an_unusable_bundle_reference_is_not_applicable_rather_than_an_error() {
+        // A bare hex digest: exactly the kind of near-miss a scheduler could publish by mistake.
+        let state = format!(
+            r#"{{"network":"test","worker_assignment":{{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{}","url":"http://example.com/bundle.tar.gz"}}}}"#,
+            "aa".repeat(32)
+        )
+        .into_bytes();
+        let url = TestServer::serve_once(state).await;
+        let mut announced = Announced {
+            pair: NetworkPair {
+                assignment_id: Some("assignment-1".to_owned()),
+                bundle_hash: Some(hash(0xaa)),
+            },
+            ..Default::default()
+        };
+        let mismatches_before = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
+
+        let update = poll_network_state(
+            &url,
+            &test_client(),
+            AssignmentSource::Worker,
+            &mut announced,
+        )
+        .await
+        .expect("an unusable bundle reference is not a failure to read the state");
+
+        assert!(update.is_none(), "the pair cannot be applied as published");
+        assert!(
+            metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches_before,
+            "counted with the other pair faults, not as a bundle that failed to install"
+        );
+        assert_eq!(
+            announced.pair.bundle_hash,
+            Some(hash(0xaa)),
+            "nothing was announced, so the corrected pair is offered whole"
         );
     }
 
