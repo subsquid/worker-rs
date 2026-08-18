@@ -10,12 +10,23 @@ use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
 
-/// Identifies an (assignment, bundle) pair — ADR-21's unit of intake. The stream remembers
-/// the last pair it announced, and the pending queue dedups on the same identity.
+/// Identifies an (assignment, bundle) pair — ADR-21's unit of intake. What to fetch; the
+/// applier's queue dedups on this, and an id names one document for all time (IB-40b).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NetworkPair {
     pub assignment_id: Option<String>,
     pub bundle_hash: Option<BundleHash>,
+}
+
+/// What the stream last handed over: the pair, and where it said to fetch it from. Locations are
+/// not identity, but a corrected one is the only thing that can rescue a fetch that keeps
+/// failing, so a change of *where* is announced like a change of *what* — and the applier, which
+/// is the only side that knows whether a fetch is still outstanding, decides what it means.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Announced {
+    pair: NetworkPair,
+    fb_url_v1: String,
+    bundle_url: Option<String>,
 }
 
 pub struct AssignmentUpdate {
@@ -26,6 +37,14 @@ pub struct AssignmentUpdate {
 }
 
 impl AssignmentUpdate {
+    fn announced(&self) -> Announced {
+        Announced {
+            pair: self.pair(),
+            fb_url_v1: self.fb_url_v1.clone(),
+            bundle_url: self.schema_bundle.as_ref().map(|bundle| bundle.url.clone()),
+        }
+    }
+
     pub fn pair(&self) -> NetworkPair {
         NetworkPair {
             assignment_id: Some(self.id.clone()),
@@ -60,7 +79,7 @@ pub fn new_assignments_stream(
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let reqwest_client = new_reqwest_client(timeout, peer_id);
-    let mut announced = NetworkPair::default();
+    let mut announced = Announced::default();
 
     stream! {
         loop {
@@ -90,7 +109,7 @@ async fn poll_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
     assignment_source: AssignmentSource,
-    announced: &mut NetworkPair,
+    announced: &mut Announced,
 ) -> anyhow::Result<Option<AssignmentUpdate>> {
     tracing::debug!("Checking network state: {url}");
     let mut network_state = fetch_network_state(url, reqwest_client).await?;
@@ -132,16 +151,8 @@ async fn poll_network_state(
 fn published_update(
     assignment: &sqd_assignments::NetworkAssignment,
     published_bundle: Option<SchemaBundle>,
-    announced: &mut NetworkPair,
+    announced: &mut Announced,
 ) -> anyhow::Result<Option<AssignmentUpdate>> {
-    let current = NetworkPair {
-        assignment_id: Some(assignment.id.clone()),
-        bundle_hash: published_bundle.as_ref().map(|bundle| bundle.hash),
-    };
-    if *announced == current {
-        return Ok(None);
-    }
-
     let update = AssignmentUpdate {
         fb_url_v1: assignment
             .fb_url_v1
@@ -151,8 +162,12 @@ fn published_update(
         _effective_from: assignment.effective_from,
         schema_bundle: published_bundle,
     };
+    let current = update.announced();
+    if *announced == current {
+        return Ok(None);
+    }
     tracing::debug!("Discovered assignment \"{}\"", update.id);
-    *announced = update.pair();
+    *announced = current;
     Ok(Some(update))
 }
 
@@ -305,8 +320,12 @@ mod tests {
     }
 
     fn worker_state_json(id: &str, bundle_hash: BundleHash) -> Vec<u8> {
+        worker_state_json_at(id, bundle_hash, &format!("http://example.com/{id}.fb.gz"))
+    }
+
+    fn worker_state_json_at(id: &str, bundle_hash: BundleHash, document_url: &str) -> Vec<u8> {
         format!(
-            r#"{{"network":"test","worker_assignment":{{"id":"{id}","fb_url_v1":"http://example.com/{id}.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{bundle_hash}","url":"http://example.com/bundle.tar.gz"}}}}"#
+            r#"{{"network":"test","worker_assignment":{{"id":"{id}","fb_url_v1":"{document_url}","effective_from":0}},"schema_bundle":{{"hash":"{bundle_hash}","url":"http://example.com/bundle.tar.gz"}}}}"#
         )
         .into_bytes()
     }
@@ -335,7 +354,7 @@ mod tests {
         .await;
         let client = test_client();
         let source = AssignmentSource::Worker;
-        let mut announced = NetworkPair::default();
+        let mut announced = Announced::default();
 
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
@@ -367,13 +386,48 @@ mod tests {
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xbb));
     }
 
+    /// A location is not identity, so a corrected url leaves the pair unchanged — and the applier
+    /// holds whatever url it was announced with. If the poll stayed quiet about it, an expired or
+    /// mistyped url would be retried forever with no way for a correction to reach the worker.
+    /// Announcing it is safe because only the applier knows whether a fetch is still outstanding.
+    #[tokio::test]
+    async fn a_moved_location_is_announced_under_an_unchanged_pair() {
+        let first = worker_state_json_at("a1", hash(0xaa), "http://example.com/first.fb.gz");
+        let moved = worker_state_json_at("a1", hash(0xaa), "http://example.com/moved.fb.gz");
+        let url = serve_responses(vec![http_ok(&first), http_ok(&moved), http_ok(&moved)]).await;
+        let client = test_client();
+        let source = AssignmentSource::Worker;
+        let mut announced = Announced::default();
+
+        let update = poll_network_state(&url, &client, source, &mut announced)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.fb_url_v1, "http://example.com/first.fb.gz");
+
+        let update = poll_network_state(&url, &client, source, &mut announced)
+            .await
+            .unwrap()
+            .expect("the pair is unchanged, but where to fetch it is not");
+        assert_eq!(update.id, "a1", "the same pair, at a new location");
+        assert_eq!(update.fb_url_v1, "http://example.com/moved.fb.gz");
+
+        assert!(
+            poll_network_state(&url, &client, source, &mut announced)
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing moved this time"
+        );
+    }
+
     #[tokio::test]
     async fn a_pair_already_announced_is_not_offered_again() {
         let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let client = test_client();
         let source = AssignmentSource::Worker;
-        let mut announced = NetworkPair::default();
+        let mut announced = Announced::default();
 
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
@@ -394,9 +448,12 @@ mod tests {
     async fn a_bundle_change_reoffers_the_assignment_as_a_pair() {
         let state = worker_state_json("assignment-1", hash(0xaa));
         let url = serve_responses(vec![http_ok(&state)]).await;
-        let mut announced = NetworkPair {
-            assignment_id: None,
-            bundle_hash: Some(hash(0xaa)),
+        let mut announced = Announced {
+            pair: NetworkPair {
+                assignment_id: None,
+                bundle_hash: Some(hash(0xaa)),
+            },
+            ..Default::default()
         };
 
         let update = poll_network_state(
@@ -420,9 +477,12 @@ mod tests {
     async fn a_state_missing_the_bundle_is_not_applicable_rather_than_an_error() {
         let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#;
         let url = serve_responses(vec![http_ok(state)]).await;
-        let mut announced = NetworkPair {
-            assignment_id: Some("assignment-1".to_owned()),
-            bundle_hash: Some(hash(0xaa)),
+        let mut announced = Announced {
+            pair: NetworkPair {
+                assignment_id: Some("assignment-1".to_owned()),
+                bundle_hash: Some(hash(0xaa)),
+            },
+            ..Default::default()
         };
         let mismatches_before = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
 
@@ -442,7 +502,7 @@ mod tests {
             "the scheduler is who resolves it, so it counts with the other pair faults"
         );
         assert_eq!(
-            announced.bundle_hash,
+            announced.pair.bundle_hash,
             Some(hash(0xaa)),
             "nothing was announced, so the pair is offered whole when the bundle returns"
         );
@@ -457,7 +517,7 @@ mod tests {
         let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
         let client = test_client();
         let source = AssignmentSource::Legacy;
-        let mut announced = NetworkPair::default();
+        let mut announced = Announced::default();
 
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await

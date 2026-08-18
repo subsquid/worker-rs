@@ -204,7 +204,11 @@ an incomplete state is a legal condition of a rolling migration, not a failure t
 mid-migration may publish either pointer for workers in the corresponding mode. The two
 references move independently on the wire — either can change without the other — but the worker
 reads them as one announcement: a change to either half re-announces the **pair**, deduplicated
-against the pair last *read*, not against what it applied. Whether an announced pair applied, and
+against what was last *read*, not against what it applied. A change of *location* — `fb_url_v1`
+or `schema_bundle.url` under an unchanged pair — is announced too, since a corrected url is the
+only thing that can rescue a fetch that keeps failing on the old one. It is not identity: what to
+do with it is decided where a fetch is known to be outstanding, so a location that moves under a
+pair already applied, or already refused, is nothing to do and never re-fetches a document. Whether an announced pair applied, and
 whether another attempt could end differently, is knowable only where it was attempted (WP-1,
 FM-12).
 

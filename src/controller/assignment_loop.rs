@@ -15,7 +15,7 @@ use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Instrument};
 
-use super::assignments::{self, AssignmentUpdate};
+use super::assignments::{self, AssignmentUpdate, NetworkPair};
 use super::schema_bundle::{PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
 use crate::cli::AssignmentSource;
@@ -100,6 +100,11 @@ impl AssignmentApplier {
                 .fuse(),
         );
         let mut pending: VecDeque<AssignmentUpdate> = VecDeque::new();
+        // The last pair refused. A refusal is a property of the document, and an id names one
+        // document for all time (IB-40b), so a new location for it changes nothing. One slot:
+        // a bad pair sits published until someone fixes it, and alternating bad pairs cost one
+        // wasted fetch each, which is not worth a cache to avoid.
+        let mut refused: Option<NetworkPair> = None;
         let mut processing_id: Option<String> = None;
         // The assignment in `processing_id` stalled: some of its chunks exhausted
         // their download attempts, so it will never become fully applied.
@@ -121,12 +126,16 @@ impl AssignmentApplier {
                         }
                         // Nothing to wait for and nothing to redo: the next *different* pair is
                         // the only thing that can move this on.
-                        ApplyOutcome::Refused => backoff = base,
+                        ApplyOutcome::Refused => {
+                            refused = Some(update.pair());
+                            backoff = base;
+                        }
                         ApplyOutcome::Failed => {
                             match self
                                 .wait_before_retry(
                                     backoff,
                                     &mut pending,
+                                    &refused,
                                     &mut updates,
                                     &cancellation_token,
                                 )
@@ -167,7 +176,7 @@ impl AssignmentApplier {
                             let Some(update) = update else {
                                 break;
                             };
-                            push_pending_assignment(&mut pending, update);
+                            self.absorb(update, &mut pending, &refused);
                         }
                         _ = cancellation_token.cancelled() => break,
                     }
@@ -178,7 +187,7 @@ impl AssignmentApplier {
                             let Some(update) = update else {
                                 break;
                             };
-                            if push_pending_assignment(&mut pending, update) {
+                            if self.absorb(update, &mut pending, &refused) {
                                 warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
                                 processing_id = None;
                             }
@@ -203,7 +212,7 @@ impl AssignmentApplier {
                             let Some(update) = update else {
                                 break;
                             };
-                            push_pending_assignment(&mut pending, update);
+                            self.absorb(update, &mut pending, &refused);
                         }
                         _ = cancellation_token.cancelled() => break,
                     }
@@ -326,6 +335,34 @@ impl AssignmentApplier {
         ))
     }
 
+    /// Queues an announced update, unless there is nothing to do with it.
+    ///
+    /// The stream announces a change of location as well as of identity, because a corrected url
+    /// is the only thing that can rescue a fetch that keeps failing. But a location only matters
+    /// while a fetch of that identity is still outstanding: moved under a pair already applied,
+    /// or one already refused, it is not work — and re-applying on it would re-fetch the whole
+    /// document every time the network rotated a url.
+    fn absorb(
+        &self,
+        update: AssignmentUpdate,
+        pending: &mut VecDeque<AssignmentUpdate>,
+        refused: &Option<NetworkPair>,
+    ) -> bool {
+        let pair = update.pair();
+        let applied = NetworkPair {
+            assignment_id: self.worker.registered_assignment_id(),
+            bundle_hash: self.schema_manager.installed_hash(),
+        };
+        if pair == applied || refused.as_ref() == Some(&pair) {
+            tracing::debug!(
+                assignment_id = %update.id,
+                "Nothing outstanding for this pair; its location moved and that is all"
+            );
+            return false;
+        }
+        push_pending_assignment(pending, update)
+    }
+
     /// Backs off before another attempt, still taking in updates. A newer assignment ends the
     /// wait at once and supersedes the one that failed: assignments are absolute, so the newer
     /// one subsumes it, and sitting out the backoff first is head-of-line blocking.
@@ -333,6 +370,7 @@ impl AssignmentApplier {
         &self,
         backoff: Duration,
         pending: &mut VecDeque<AssignmentUpdate>,
+        refused: &Option<NetworkPair>,
         updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
         cancellation_token: &CancellationToken,
     ) -> Wait {
@@ -347,7 +385,7 @@ impl AssignmentApplier {
                     let Some(update) = update else {
                         return Wait::Stop;
                     };
-                    push_pending_assignment(pending, update);
+                    self.absorb(update, pending, refused);
                     if !pending.is_empty() {
                         return Wait::Superseded;
                     }
@@ -364,15 +402,22 @@ fn jitter(delay: Duration) -> Duration {
     rand::rng().random_range((delay / 2)..=delay)
 }
 
+/// Takes an announced update into the queue, and answers whether that overflowed it.
+///
+/// The stream announces a change of *where* as well as of *what* (IB-40b), because a corrected
+/// url is the only thing that can rescue a fetch that keeps failing. Identity still decides what
+/// to do — so an update whose pair is already queued replaces it rather than queueing twice, and
+/// the queued copy is the one carrying the locations the network published most recently.
 fn push_pending_assignment(
     pending: &mut VecDeque<AssignmentUpdate>,
     update: AssignmentUpdate,
 ) -> bool {
-    if pending
-        .back()
-        .is_some_and(|queued| queued.pair() == update.pair())
+    if let Some(queued) = pending
+        .back_mut()
+        .filter(|queued| queued.pair() == update.pair())
     {
-        tracing::debug!(assignment_id = %update.id, "Already queued");
+        tracing::debug!(assignment_id = %update.id, "Already queued; taking the latest locations");
+        *queued = update;
         return false;
     }
     if let Some(skipped) = push_pending_item(pending, update) {
@@ -868,6 +913,68 @@ mod tests {
             f.stub.hits("/a1.fb.gz"),
             2,
             "a bundle change makes a new pair whose assignment must be reconsidered"
+        );
+    }
+
+    /// A location is not identity, so correcting one leaves the pair unchanged — and the applier
+    /// keeps whatever url it was announced with. Without the stream saying the location moved,
+    /// an expired or mistyped url is retried forever and no correction can reach the worker.
+    #[tokio::test]
+    async fn a_corrected_document_url_rescues_a_pair_that_will_not_download() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        // Never served: only a different location can get the loop off it.
+        let broken = f.stub.url("/broken.fb.gz");
+        let corrected = f
+            .stub
+            .serve("/corrected.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+
+        // The same pair twice — same id, same bundle — announced at two locations.
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                update("a1", broken, bundle.clone()),
+                update("a1", corrected, bundle),
+            ],
+        );
+        await_registered(&f.worker, "a1").await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.stub.hits("/corrected.fb.gz"),
+            1,
+            "the pair is unchanged, so only its location could have brought this on"
+        );
+    }
+
+    /// The other half of the same rule: once a pair has applied, nothing is outstanding for it,
+    /// so a rotating url must not re-fetch the document it already holds.
+    #[tokio::test]
+    async fn a_location_that_moves_under_an_applied_pair_is_not_refetched() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        let document = gzip(&worker_assignment(f.peer_id));
+        let first = f.stub.serve("/a1.fb.gz", document.clone(), 0);
+        let rotated = f.stub.serve("/a1-rotated.fb.gz", document, 0);
+
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                update("a1", first, bundle.clone()),
+                update("a1", rotated, bundle),
+            ],
+        );
+        await_registered(&f.worker, "a1").await;
+        // The second announcement is absorbed on the same task, so by the time the first has
+        // registered the loop has already decided what to do with it.
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.stub.hits("/a1-rotated.fb.gz"),
+            0,
+            "the pair applied, so a moved location is nothing to do"
         );
     }
 
