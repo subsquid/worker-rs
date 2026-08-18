@@ -158,6 +158,25 @@ impl State {
     ///
     /// Panics if `chunk` is not currently downloading — completions must
     /// match a prior [`Self::take_next_download`].
+    /// Gives up on a chunk without spending the rest of its attempts, for a failure no retry
+    /// could answer — the assignment gives no address for it. The next assignment resets the
+    /// budget, so a document with a good address still gets its chance.
+    ///
+    /// # Panics
+    ///
+    /// If `chunk` is not currently downloading — it must have come from
+    /// [`Self::take_next_download`], like a completion.
+    pub fn give_up_download(&mut self, chunk: &ChunkRef) {
+        let chunk = self
+            .downloading
+            .take(chunk)
+            .unwrap_or_else(|| panic!("Giving up on a chunk that isn't downloading: {chunk}"));
+        self.download_attempts.remove(&chunk);
+        if self.desired.contains(&chunk) {
+            self.failed_downloads.insert(chunk);
+        }
+    }
+
     pub fn complete_download(&mut self, chunk: &ChunkRef, success: bool) {
         let chunk = self
             .downloading
@@ -554,6 +573,34 @@ mod tests {
         state.set_desired_chunks(ChunkSet::new());
         assert!(!state.unlock_chunk(&a), "one lock is still held");
         assert!(state.unlock_chunk(&a), "the last lock was released");
+    }
+
+    /// A document that gives no address for a chunk will give the same non-answer next time, so
+    /// the chunk is given up on rather than charged a retry budget it cannot spend usefully.
+    #[test]
+    fn a_chunk_given_up_on_is_not_offered_again_until_the_next_assignment() {
+        let ds = Arc::new("ds".to_owned());
+        let a = ChunkRef::new(ds, Arc::from("0000000000/0000000000-0000000001-00000000"));
+
+        let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
+        state.set_desired_chunks([a.clone()].into_iter().collect());
+        assert_eq!(state.take_next_download(), Some(a.clone()));
+
+        state.give_up_download(&a);
+
+        assert_eq!(
+            state.take_next_download(),
+            None,
+            "no further attempt is due"
+        );
+        assert!(
+            state.is_stalled(),
+            "no work left and a desired chunk is missing"
+        );
+
+        // The next assignment resets the budget — its document may carry a usable address.
+        state.set_desired_chunks([a.clone()].into_iter().collect());
+        assert_eq!(state.take_next_download(), Some(a));
     }
 
     // A permanently failing download — e.g. a chunk deleted from the bucket —

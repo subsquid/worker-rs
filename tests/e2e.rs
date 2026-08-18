@@ -201,6 +201,11 @@ async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
     })
     .await;
     assert_eq!(
+        sqd_worker::metrics::CHUNKS_UNADDRESSABLE.get(),
+        before + 1,
+        "counted once for the chunk, not once per attempt it was never going to make"
+    );
+    assert_eq!(
         h.origin.fetch_count(&unusable.id, "blocks.parquet"),
         0,
         "there was no address to fetch from"
