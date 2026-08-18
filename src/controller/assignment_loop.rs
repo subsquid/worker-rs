@@ -230,25 +230,32 @@ impl AssignmentApplier {
         let keypair = self.keypair.clone();
         let id = update.id.clone();
         let prepared_ids = prepared_bundle.as_ref().map(|bundle| bundle.ids());
-        let prepared_assignment = tokio::task::spawn_blocking(move || {
+        let validated = tokio::task::spawn_blocking(move || {
             worker.prepare_assignment(assignment, id, &keypair, |id| {
                 prepared_ids.as_ref().is_none_or(|ids| ids.contains(&id))
             })
         })
         .instrument(tracing::info_span!("validate_assignment", id = %update.id))
-        .await
-        .expect("prepare_assignment shouldn't panic");
-        let prepared_assignment = match prepared_assignment {
-            Ok(assignment) => assignment,
+        .await;
+        let prepared_assignment = match validated {
+            Ok(Ok(assignment)) => assignment,
+            Ok(Err(e)) => {
+                return self.refuse(update, e);
+            }
+            // Reading the document can panic where no verification helps: a roster entry's peer
+            // id is a fixed-size struct, so the flatbuffers verifier only checks its bytes are
+            // in bounds, and the reader panics when they don't decode. `spawn_blocking` has
+            // already contained it, so this is one more unusable document (FM-12) — re-raising
+            // it here would forward the panic to the subsystem tree and take the worker down
+            // over a document the network can republish.
+            Err(e) if e.is_panic() => {
+                return self.refuse(update, "reading it panicked");
+            }
+            // Blocking tasks are not cancelled by dropping the handle, so this is the runtime
+            // going away underneath us — nothing about the pair.
             Err(e) => {
-                if self.worker.registered_assignment_id().is_none() {
-                    metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                }
-                warn!(
-                    assignment_id = %update.id, error = %e,
-                    "Refused assignment; only a different one can be applied now"
-                );
-                return ApplyOutcome::Refused;
+                warn!(assignment_id = %update.id, error = %e, "Validation didn't finish");
+                return ApplyOutcome::Failed;
             }
         };
 
@@ -269,6 +276,21 @@ impl AssignmentApplier {
         .expect("register_assignment shouldn't panic");
 
         ApplyOutcome::Applied
+    }
+
+    /// Refuses the pair, keeping whatever is in force. No later attempt at *this* pair can end
+    /// differently, so the counter is what tells a worker starved of usable documents from one
+    /// that cannot reach the network at all (OB-18).
+    fn refuse(&self, update: &AssignmentUpdate, reason: impl std::fmt::Display) -> ApplyOutcome {
+        if self.worker.registered_assignment_id().is_none() {
+            metrics::set_status(metrics::WorkerStatus::NotRegistered);
+        }
+        metrics::ASSIGNMENTS_REFUSED.inc();
+        warn!(
+            assignment_id = %update.id, reason = %reason,
+            "Refused assignment; only a different one can be applied now"
+        );
+        ApplyOutcome::Refused
     }
 
     /// The returned [`PreparedSchemaUpdate`] holds the schema store's mutation lock until it is
@@ -598,6 +620,35 @@ mod tests {
         builder.finish()
     }
 
+    /// The same document with its roster entry's peer id corrupted. A `WorkerId` is a
+    /// fixed-size struct, so the flatbuffers verifier only checks its bytes are in bounds — the
+    /// document still parses, and the reader panics when it decodes them. Corrupting an input,
+    /// never the encoder: the builder only accepts a typed `PeerId`.
+    fn unreadable_roster(assigned_to: PeerId) -> Vec<u8> {
+        let mut document = worker_assignment(assigned_to);
+        let id_bytes = assigned_to.to_bytes();
+        let occurrences: Vec<usize> = document
+            .windows(id_bytes.len())
+            .enumerate()
+            .filter(|(_, window)| *window == id_bytes.as_slice())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "the roster holds the peer id exactly once"
+        );
+
+        let at = occurrences[0];
+        document[at] = 0xff;
+        document[at + 1] = 0xff;
+        assert!(
+            PeerId::from_bytes(&document[at..at + id_bytes.len()]).is_err(),
+            "the point of the corruption is that these bytes no longer decode"
+        );
+        document
+    }
+
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -677,6 +728,28 @@ mod tests {
             "the schemas are in force by the time the assignment is"
         );
         assert!(f.worker.query_schemas().get_by_id(SchemaId::new(7)).is_ok());
+    }
+
+    /// Reading a document can panic on bytes no verification checks. Contained where it happens,
+    /// it is one more unusable pair (FM-12); re-raised, it forwards to the subsystem tree and the
+    /// worker exits over a document the network can simply republish.
+    #[tokio::test]
+    async fn a_document_whose_roster_cannot_be_read_is_refused() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&unreadable_roster(f.peer_id)), 0);
+        let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
+
+        let outcome = f.applier.apply(&update("a1", document, bundle)).await;
+
+        assert_eq!(outcome, ApplyOutcome::Refused);
+        assert!(f.worker.registered_assignment_id().is_none());
+        assert!(
+            crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
+            "a worker refusing everything must be tellable from one that can't reach the network"
+        );
     }
 
     #[tokio::test]

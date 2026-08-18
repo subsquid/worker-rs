@@ -56,6 +56,8 @@ lazy_static::lazy_static! {
     pub static ref CHUNKS_REMOVED: Counter = Default::default();
     pub static ref STORED_BYTES: Gauge = Default::default();
 
+    pub static ref ASSIGNMENTS_REFUSED: Counter = Default::default();
+
     pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
     pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
     pub static ref SCHEMA_BUNDLE_MISMATCHES: Counter = Default::default();
@@ -152,6 +154,11 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "Total bytes stored in the data directory",
         Unit::Bytes,
         STORED_BYTES.clone(),
+    );
+    registry.register(
+        "assignments_refused",
+        "Number of announced assignments refused as unusable",
+        ASSIGNMENTS_REFUSED.clone(),
     );
     registry.register(
         "schema_bundle_loaded",
