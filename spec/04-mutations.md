@@ -73,8 +73,11 @@ then evicted by a later WP-14 (commit does not consult N).
 *Pre:* `c ∈ D`; the fetch failed, timed out (per-file bound P-DL-FILE-TIMEOUT, stall
 bound P-DL-STALL-TIMEOUT), or was cancelled (no longer desired).
 *Post:* `D′ = D \ {c}`; all partial data of `c` is transient residue (RS-6), never
-visible. If `c ∈ N′`, then `c ∈ P′` — failed fetches retry indefinitely while desired,
-under backoff from P-DL-BACKOFF-BASE capped at P-DL-BACKOFF-MAX. The backoff scope
+visible. If `c ∈ N′`, then `c ∈ P′` — failed fetches retry while desired, under backoff
+from P-DL-BACKOFF-BASE capped at P-DL-BACKOFF-MAX, until the per-assignment attempt limit
+is reached; the next assignment restores the budget. A fetch that failed because the
+document carries no address for `c` (FM-11) is given up on at once instead, since a
+document does not change between attempts. The backoff scope
 SHOULD be per-origin or per-chunk so one failing chunk does not throttle others.
 [Scope is intent, currently violated — the backoff is global: GAP-7.] Abort-path
 noise from transient-name collisions is a registered hazard (HZ-10).

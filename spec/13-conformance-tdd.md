@@ -205,7 +205,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-1 | CT-4/9 | U⊘ | known-violated (GAP-2) |
 | FM-2..3 | CT-4 | U | |
 | FM-10 | CT-4 | U | |
-| FM-11 | CT-4 | P | an unusable address is driven end to end: the worker gives the chunk up, moves OB-17, and converges on the next assignment. The credential half is FM-12's whole-document path, since neither format carries credentials per chunk |
+| FM-11 | CT-4 | P | an unusable address is driven end to end: the worker gives the chunk up at once rather than spending its retry budget on a document that will not change, moves OB-17 once, and converges on the next assignment. The credential half is FM-12's whole-document path, since neither format carries credentials per chunk |
 | FM-12 | CT-4 | P⊘ | a document that cannot be read is refused rather than fatal, asserted at the applier with a corrupted roster; oversize intake is still unbounded (GAP-4) |
 | FM-13 | CT-4 | U⊘ | no floor (GAP-3) |
 | FM-14 | CT-7 | U⊘ | no age signal (GAP-23) |

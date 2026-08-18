@@ -190,15 +190,15 @@ impl StateManager {
                     Err(UnresolvedChunk::NotAssigned) => panic!(
                         "chunk {chunk_ref} was queued from an assignment that doesn't carry it"
                     ),
-                    // FM-11: the document is unusable for this chunk and no attempt can change
-                    // that, but the rest of it still applies. Charging an attempt exhausts the
-                    // chunk into `failed_downloads`, which settles the assignment as stalled
-                    // instead of taking the worker down over one row.
+                    // FM-11: the document is unusable for this chunk, but the rest of it still
+                    // applies. Given up on rather than retried, since a document does not change
+                    // between attempts; that settles the assignment as stalled instead of taking
+                    // the worker down over one row.
                     Err(e) => {
                         warn!(chunk = %chunk_ref, error = %e, "Can't address chunk");
                         metrics::CHUNKS_UNADDRESSABLE.inc();
                         metrics::CHUNKS_FAILED_DOWNLOAD.inc();
-                        self.state.lock().complete_download(&chunk_ref, false);
+                        self.state.lock().give_up_download(&chunk_ref);
                         continue;
                     }
                 };
