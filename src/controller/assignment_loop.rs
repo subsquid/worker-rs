@@ -12,7 +12,7 @@ use tower::retry::backoff::{Backoff, ExponentialBackoff, ExponentialBackoffMaker
 use tracing::{debug, info, warn, Instrument};
 
 use super::assignments::{self, AssignmentUpdate, NetworkPair};
-use super::schema_bundle::{PreparedSchemaUpdate, SchemaManager};
+use super::schema_bundle::{BundleFault, PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
 use crate::cli::AssignmentSource;
 use crate::metrics;
@@ -147,7 +147,7 @@ impl AssignmentApplier {
         debug!(assignment_id = %update.id, "Downloading assignment");
         let (document, bundle) = match self.download(update).await {
             Ok(fetched) => fetched,
-            Err(unfetched) => return unfetched.fail(update),
+            Err(unfetched) => return self.unfetched(update, unfetched),
         };
         debug!(assignment_id = %update.id, "Downloaded assignment");
 
@@ -156,7 +156,7 @@ impl AssignmentApplier {
             Err(outcome) => return outcome,
         };
         if let Some(bundle) = bundle {
-            if let Err(e) = bundle.install() {
+            if let Err(e) = bundle.install().await {
                 metrics::SCHEMA_BUNDLE_FAILURES.inc();
                 warn!(assignment_id = %update.id, error = %chain(&e), "Failed to activate schema bundle");
                 return ApplyOutcome::Failed;
@@ -178,9 +178,11 @@ impl AssignmentApplier {
             AssignmentSource::Legacy => None,
             AssignmentSource::Worker => {
                 let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
-                    Unfetched::Bundle(anyhow::anyhow!(
+                    // The stream already withholds a half-published pair, so this is defensive;
+                    // treat it as the network's to correct rather than the pair's fault.
+                    Unfetched::Bundle(BundleFault::Transient(anyhow::anyhow!(
                         "network state publishes a worker assignment but no schema bundle"
-                    ))
+                    )))
                 })?;
                 Some(
                     self.schema_manager
@@ -238,6 +240,26 @@ impl AssignmentApplier {
             .instrument(tracing::info_span!("set_assignment", id = %update.id))
             .await
             .expect("registering a validated assignment has no panic path of its own");
+    }
+
+    /// A pair half of which could not be fetched. A bundle fault the hash already vouched for is
+    /// a verdict on the pair like a document that will not decode (FM-12), so it is refused
+    /// rather than asked for again; everything else is the network or this worker's disk, and a
+    /// retry — or a corrected location — can still rescue it.
+    fn unfetched(&self, update: &AssignmentUpdate, unfetched: Unfetched) -> ApplyOutcome {
+        match unfetched {
+            Unfetched::Bundle(fault) if fault.is_permanent() => {
+                self.refuse(update, chain(&fault.into_error()))
+            }
+            Unfetched::Bundle(fault) => {
+                warn!(assignment_id = %update.id, error = %chain(&fault.into_error()), "Failed to prepare schema bundle");
+                ApplyOutcome::Failed
+            }
+            Unfetched::Document(e) => {
+                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to download assignment");
+                ApplyOutcome::Failed
+            }
+        }
     }
 
     /// Refuses the pair without replacing the active assignment.
@@ -324,22 +346,8 @@ enum Wait {
 /// Which half of the pair could not be fetched. The bundle is prepared first, so a bundle
 /// failure must not read as a document one.
 enum Unfetched {
-    Bundle(anyhow::Error),
+    Bundle(BundleFault),
     Document(anyhow::Error),
-}
-
-impl Unfetched {
-    fn fail(self, update: &AssignmentUpdate) -> ApplyOutcome {
-        match self {
-            Unfetched::Bundle(e) => {
-                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to prepare schema bundle");
-            }
-            Unfetched::Document(e) => {
-                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to download assignment");
-            }
-        }
-        ApplyOutcome::Failed
-    }
 }
 
 /// The assignment registered last, as the loop relates to it. Legacy mode never leaves `Idle`:
@@ -687,6 +695,88 @@ mod tests {
             f.stub.hits("/garbage.fb.gz"),
             2,
             "one direct attempt above and one in the loop; no retry in between"
+        );
+    }
+
+    /// The bundle half of FM-12. Past the hash check the bytes are the ones the network vouched
+    /// for, so a bundle that carries no schemas cannot come out differently however often it is
+    /// asked for: refused once, like a document that will not decode, rather than re-downloaded
+    /// every retry period for as long as the scheduler keeps publishing it.
+    #[tokio::test]
+    async fn a_bundle_with_nothing_to_load_is_refused_not_retried() {
+        let f = fixture().await;
+        // A well-formed archive, hashed as announced, that simply holds no <id>.yaml entries.
+        let empty = targz(&[("readme.txt", b"no schemas here")]);
+        let unusable = (
+            BundleHash::of(&empty),
+            f.stub.serve("/bundle-empty.tar.gz", empty, 0),
+        );
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        let mine = f
+            .stub
+            .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
+
+        assert_eq!(
+            f.applier
+                .apply(&update("a1", document.clone(), unusable.clone()))
+                .await,
+            ApplyOutcome::Refused
+        );
+        assert!(f.worker.registered_assignment_id().is_none());
+        assert!(
+            crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
+            "a pair the worker cannot use is what OB-18 counts, whichever half is at fault"
+        );
+
+        let (token, running) = run_loop(
+            &f.applier,
+            vec![
+                update("a1", document, unusable),
+                update("a2", mine, bundle(&f.stub)),
+            ],
+        );
+        await_registered(&f.worker, "a2").await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.stub.hits("/bundle-empty.tar.gz"),
+            2,
+            "one direct attempt above and one in the loop; no retry in between"
+        );
+        assert_eq!(
+            f.stub.hits("/a1.fb.gz"),
+            0,
+            "the bundle is prepared first, so a refused one never costs a document fetch"
+        );
+    }
+
+    /// The other side of the line. A hash mismatch says this location served the wrong bytes,
+    /// which is precisely what a corrected url fixes — and a refusal is keyed on the pair, so it
+    /// would drop that correction. It has to stay retryable.
+    #[tokio::test]
+    async fn a_bundle_whose_hash_does_not_match_is_retried_not_refused() {
+        let f = fixture().await;
+        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        let mislabelled = (
+            BundleHash::of(b"not what this url serves"),
+            f.stub.serve("/bundle-mismatch.tar.gz", archive, 0),
+        );
+        let document = f
+            .stub
+            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+
+        let outcome = f.applier.apply(&update("a1", document, mislabelled)).await;
+
+        // The outcome is the whole assertion: `ASSIGNMENTS_REFUSED` is process-global, so a
+        // test cannot watch it stay put while the rest of the binary runs beside it.
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed,
+            "nothing about the pair was refused; only where it was fetched from"
         );
     }
 

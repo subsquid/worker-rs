@@ -27,6 +27,81 @@ pub struct SchemaBundle {
     pub url: String,
 }
 
+/// Whether another attempt at the same pair could end differently.
+///
+/// The hash names the content, so the hash check is the dividing line. Up to it, what was
+/// fetched is a property of the location the network announced, and a corrected url still
+/// rescues the pair (IB-40b) — as does simply retrying a transport failure. Past it, the bytes
+/// are the ones the hash vouched for, so a fault in them is a verdict on the pair itself
+/// (FM-12) and no re-fetch from anywhere can change it. Local disk faults are the network's
+/// fault least of all, so they retry too.
+#[derive(Debug)]
+pub enum BundleFault {
+    /// Transport or local I/O: retry, and let a corrected location rescue the pair.
+    Transient(anyhow::Error),
+    /// A verdict on content the hash already vouched for: refuse and wait for a different pair.
+    Permanent(anyhow::Error),
+}
+
+impl BundleFault {
+    fn transient(error: impl Into<anyhow::Error>) -> Self {
+        Self::Transient(error.into())
+    }
+
+    fn permanent(error: impl Into<anyhow::Error>) -> Self {
+        Self::Permanent(error.into())
+    }
+
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Permanent(_))
+    }
+
+    pub fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Transient(error) | Self::Permanent(error) => error,
+        }
+    }
+
+    fn error(&self) -> &anyhow::Error {
+        match self {
+            Self::Transient(error) | Self::Permanent(error) => error,
+        }
+    }
+
+    /// Adds context without disturbing the verdict.
+    fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
+        match self {
+            Self::Transient(error) => Self::Transient(error.context(context)),
+            Self::Permanent(error) => Self::Permanent(error.context(context)),
+        }
+    }
+}
+
+impl std::fmt::Display for BundleFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.error(), f)
+    }
+}
+
+/// A blocking task's outcome. A panic in one of these comes from bytes the hash already vouched
+/// for, so it is a verdict on the pair like any other parse failure — the applier draws the same
+/// line for a document whose reader panics. A task that was cancelled instead is the runtime
+/// going down, which is nothing to refuse a pair over.
+fn joined<T>(
+    outcome: Result<Result<T, BundleFault>, tokio::task::JoinError>,
+    what: &str,
+) -> Result<T, BundleFault> {
+    match outcome {
+        Ok(result) => result,
+        Err(e) if e.is_panic() => Err(BundleFault::permanent(
+            anyhow::Error::new(e).context(format!("{what} panicked")),
+        )),
+        Err(e) => Err(BundleFault::transient(
+            anyhow::Error::new(e).context(format!("{what} didn't finish")),
+        )),
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedBundle {
     hash: BundleHash,
@@ -50,8 +125,17 @@ impl PreparedSchemaUpdate {
         self.bundle.ids()
     }
 
-    pub fn install(self) -> anyhow::Result<()> {
-        self.registry.activate_bundle(self.bundle)
+    /// Moves the staged schemas into the store and publishes them. The file moves run off the
+    /// runtime like the rest of this store's I/O; the mutation lock is held until they land.
+    pub async fn install(self) -> anyhow::Result<()> {
+        let Self {
+            registry,
+            bundle,
+            _guard,
+        } = self;
+        tokio::task::spawn_blocking(move || registry.activate_bundle(bundle))
+            .await
+            .context("schema bundle activation task panicked")?
     }
 }
 
@@ -180,7 +264,7 @@ impl SchemaManager {
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
-    ) -> anyhow::Result<PreparedSchemaUpdate> {
+    ) -> Result<PreparedSchemaUpdate, BundleFault> {
         let guard = Arc::clone(&self.mutation_lock).lock_owned().await;
         let bundle = self.registry.prepare_bundle(bundle, client).await?;
         Ok(PreparedSchemaUpdate {
@@ -322,7 +406,7 @@ impl SchemaRegistry {
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
-    ) -> anyhow::Result<PreparedBundle> {
+    ) -> Result<PreparedBundle, BundleFault> {
         match self.merge(bundle, client).await {
             Ok(bundle) => Ok(bundle),
             Err(e) => {
@@ -334,7 +418,10 @@ impl SchemaRegistry {
 
     #[cfg(test)]
     async fn ensure(&self, bundle: &SchemaBundle, client: &reqwest::Client) -> anyhow::Result<()> {
-        let prepared = self.prepare_bundle(bundle, client).await?;
+        let prepared = self
+            .prepare_bundle(bundle, client)
+            .await
+            .map_err(BundleFault::into_error)?;
         self.activate_bundle(prepared)
     }
 
@@ -342,7 +429,7 @@ impl SchemaRegistry {
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
-    ) -> anyhow::Result<PreparedBundle> {
+    ) -> Result<PreparedBundle, BundleFault> {
         if self.installed_hash() == Some(bundle.hash) {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
             return Ok(PreparedBundle {
@@ -355,23 +442,29 @@ impl SchemaRegistry {
 
         let bytes = download(&bundle.url, client)
             .await
-            .with_context(|| format!("couldn't download schema bundle from {}", bundle.url))?;
+            .with_context(|| format!("couldn't download schema bundle from {}", bundle.url))
+            .map_err(BundleFault::transient)?;
         let actual = BundleHash::of(&bytes);
         if actual != bundle.hash {
-            bail!(
+            // Transient on purpose: the hash names the content, so a mismatch says this
+            // location served the wrong bytes — which is exactly what a corrected url fixes.
+            // Refusing here would key the refusal on the pair and drop that correction.
+            return Err(BundleFault::transient(anyhow::anyhow!(
                 "schema bundle hash mismatch: expected {}, got {actual}",
                 bundle.hash
-            );
+            )));
         }
         let staged = unpack(bytes, self.dir.clone())
             .await
-            .context("couldn't unpack schema bundle")?;
+            .map_err(|e| e.context("couldn't unpack schema bundle"))?;
         let staged_path = Utf8Path::from_path(staged.path())
-            .context("staging directory path is not UTF-8")?
+            .ok_or_else(|| {
+                BundleFault::transient(anyhow::anyhow!("staging directory path is not UTF-8"))
+            })?
             .to_owned();
         let schemas = load_dir(staged_path.clone())
             .await
-            .context("couldn't load the staged schema bundle")?;
+            .map_err(|e| e.context("couldn't load the staged schema bundle"))?;
 
         let ids = Arc::new(schemas.keys().copied().collect());
         let schemas_to_install = classify_cached(self.dir.clone(), staged_path, &ids).await?;
@@ -521,20 +614,25 @@ async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>
     Ok(buf)
 }
 
-async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> anyhow::Result<TempDir> {
-    tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(&parent)?;
-        let temp = tempfile::Builder::new()
-            .prefix(TEMP_PREFIX)
-            .tempdir_in(&parent)?;
-        let path = Utf8Path::from_path(temp.path())
-            .ok_or_else(|| anyhow::anyhow!("staging directory path is not UTF-8"))?;
+async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> Result<TempDir, BundleFault> {
+    joined(
+        tokio::task::spawn_blocking(move || {
+            // Making somewhere to stage is this worker's business, not the bundle's.
+            std::fs::create_dir_all(&parent).map_err(BundleFault::transient)?;
+            let temp = tempfile::Builder::new()
+                .prefix(TEMP_PREFIX)
+                .tempdir_in(&parent)
+                .map_err(BundleFault::transient)?;
+            let path = Utf8Path::from_path(temp.path()).ok_or_else(|| {
+                BundleFault::transient(anyhow::anyhow!("staging directory path is not UTF-8"))
+            })?;
 
-        extract_schemas(&bytes, path, MAX_BUNDLE_SIZE)?;
-        Ok(temp)
-    })
-    .await
-    .context("unpack task panicked")?
+            extract_schemas(&bytes, path, MAX_BUNDLE_SIZE)?;
+            Ok(temp)
+        })
+        .await,
+        "unpacking the schema bundle",
+    )
 }
 
 /// Limits all decompressed bytes, including ignored tar entries.
@@ -559,7 +657,9 @@ impl<R: std::io::Read> std::io::Read for Bounded<R> {
 }
 
 /// Extracts root-level `<id>.yaml` files and ignores other entries.
-fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> anyhow::Result<()> {
+fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> Result<(), BundleFault> {
+    use std::io::Read;
+
     let mut archive = tar::Archive::new(Bounded {
         inner: flate2::read::GzDecoder::new(bytes),
         limit,
@@ -567,9 +667,11 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> anyhow::Resul
     });
     let mut written = 0usize;
 
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
+    // Walking the archive only ever reads the bytes in hand — the gzip framing, the tar
+    // structure, and the decompressed-size cap are all properties of what the hash vouched for.
+    for entry in archive.entries().map_err(BundleFault::permanent)? {
+        let mut entry = entry.map_err(BundleFault::permanent)?;
+        let path = entry.path().map_err(BundleFault::permanent)?;
         let at_root = path
             .parent()
             .is_none_or(|p| p.as_os_str().is_empty() || p == std::path::Path::new("."));
@@ -584,14 +686,28 @@ fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> anyhow::Resul
         };
         let name = format!("{id}.yaml");
 
-        let mut file = std::fs::File::create(dest.join(&name))?;
-        std::io::copy(&mut entry, &mut file)
-            .with_context(|| format!("couldn't write schema '{name}'"))?;
+        // Read and write as separate steps rather than one `io::copy`: reading is the archive
+        // (and the cap), writing is this worker's disk, and a single call could not say which
+        // of the two failed.
+        let mut yaml = Vec::new();
+        entry.read_to_end(&mut yaml).map_err(|e| {
+            BundleFault::permanent(
+                anyhow::Error::new(e)
+                    .context(format!("couldn't read schema '{name}' out of the bundle")),
+            )
+        })?;
+        std::fs::write(dest.join(&name), &yaml).map_err(|e| {
+            BundleFault::transient(
+                anyhow::Error::new(e).context(format!("couldn't write schema '{name}'")),
+            )
+        })?;
         written += 1;
     }
 
     if written == 0 {
-        bail!("schema bundle contains no <id>.yaml entries");
+        return Err(BundleFault::permanent(anyhow::anyhow!(
+            "schema bundle contains no <id>.yaml entries"
+        )));
     }
     Ok(())
 }
@@ -608,54 +724,77 @@ fn schema_id(file_name: &str) -> Option<SchemaId> {
     stem.parse().ok().map(SchemaId::new)
 }
 
-async fn load_dir(dir: Utf8PathBuf) -> anyhow::Result<HashMap<SchemaId, Arc<DatasetDescription>>> {
-    tokio::task::spawn_blocking(move || {
-        let mut schemas = HashMap::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            let Some(id) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(schema_id)
-            else {
-                continue;
-            };
-            let yaml = std::fs::read_to_string(&path)
-                .with_context(|| format!("couldn't read schema {}", path.display()))?;
-            let description = sqd_query_engine::metadata::parse_dataset_description(&yaml)
-                .map_err(|e| anyhow::anyhow!("couldn't parse schema {}: {e:?}", path.display()))?;
-            schemas.insert(id, Arc::new(description));
-        }
-        if schemas.is_empty() {
-            bail!("no schemas found in {dir}");
-        }
-        Ok(schemas)
-    })
-    .await
-    .context("schema load task panicked")?
+async fn load_dir(
+    dir: Utf8PathBuf,
+) -> Result<HashMap<SchemaId, Arc<DatasetDescription>>, BundleFault> {
+    joined(
+        tokio::task::spawn_blocking(move || {
+            let mut schemas = HashMap::new();
+            // Reading back what was just staged is disk; what the yaml says is the bundle.
+            for entry in std::fs::read_dir(&dir).map_err(BundleFault::transient)? {
+                let path = entry.map_err(BundleFault::transient)?.path();
+                let Some(id) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(schema_id)
+                else {
+                    continue;
+                };
+                let yaml = std::fs::read_to_string(&path)
+                    .with_context(|| format!("couldn't read schema {}", path.display()))
+                    .map_err(BundleFault::transient)?;
+                let description = sqd_query_engine::metadata::parse_dataset_description(&yaml)
+                    .map_err(|e| {
+                        BundleFault::permanent(anyhow::anyhow!(
+                            "couldn't parse schema {}: {e:?}",
+                            path.display()
+                        ))
+                    })?;
+                schemas.insert(id, Arc::new(description));
+            }
+            if schemas.is_empty() {
+                return Err(BundleFault::permanent(anyhow::anyhow!(
+                    "no schemas found in {dir}"
+                )));
+            }
+            Ok(schemas)
+        })
+        .await,
+        "loading the staged schema bundle",
+    )
 }
 
 async fn classify_cached(
     store: Utf8PathBuf,
     staged: Utf8PathBuf,
     ids: &HashSet<SchemaId>,
-) -> anyhow::Result<HashSet<SchemaId>> {
+) -> Result<HashSet<SchemaId>, BundleFault> {
     let ids = ids.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut missing = HashSet::new();
-        for id in ids {
-            let name = format!("{id}{SCHEMA_SUFFIX}");
-            let stored = store.join(&name);
-            if !stored.exists() {
-                missing.insert(id);
-            } else if std::fs::read(&stored)? != std::fs::read(staged.join(&name))? {
-                bail!("schema {id} was republished with different contents");
+    joined(
+        tokio::task::spawn_blocking(move || {
+            let mut missing = HashSet::new();
+            for id in ids {
+                let name = format!("{id}{SCHEMA_SUFFIX}");
+                let stored = store.join(&name);
+                if !stored.exists() {
+                    missing.insert(id);
+                    continue;
+                }
+                let cached = std::fs::read(&stored).map_err(BundleFault::transient)?;
+                let fresh = std::fs::read(staged.join(&name)).map_err(BundleFault::transient)?;
+                if cached != fresh {
+                    // An id names its contents for all time, so no re-fetch of this bundle can
+                    // produce anything but the bytes that already disagree with the store.
+                    return Err(BundleFault::permanent(anyhow::anyhow!(
+                        "schema {id} was republished with different contents"
+                    )));
+                }
             }
-        }
-        Ok(missing)
-    })
-    .await
-    .context("schema cache comparison task panicked")?
+            Ok(missing)
+        })
+        .await,
+        "comparing the staged schemas with the store",
+    )
 }
 
 #[cfg(test)]
@@ -954,6 +1093,99 @@ mod tests {
         assert!(store.installed_hash().is_none());
         assert!(registry.get_by_id(SchemaId::new(7)).is_err());
         assert!(stored(&dir).is_empty());
+    }
+
+    async fn fault(store: &SchemaRegistry, bundle: &SchemaBundle) -> BundleFault {
+        store
+            .prepare_bundle(bundle, &reqwest::Client::new())
+            .await
+            .unwrap_err()
+    }
+
+    /// A url that does not serve is the network's to correct, and the next poll — or a corrected
+    /// location — is what fixes it.
+    #[tokio::test]
+    async fn a_bundle_that_will_not_download_is_transient() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = TestServer::start().await;
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(b"whatever"),
+            url: server.url("/never-served.tar.gz"),
+        };
+
+        let fault = fault(&store(&dir), &bundle).await;
+
+        assert!(!fault.is_permanent(), "{fault:#}");
+    }
+
+    /// The hash names the content, so bytes that do not match it are the signature of a stale or
+    /// wrong url — the one fault a corrected location is guaranteed to fix. A refusal is keyed on
+    /// the pair, which would drop exactly that correction, so this half stays retryable.
+    #[tokio::test]
+    async fn a_hash_mismatch_is_transient_so_a_corrected_url_can_rescue_the_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(b"something else"),
+            url: TestServer::serve_once(targz(&[("7.yaml", SCHEMA.as_bytes())])).await,
+        };
+
+        let fault = fault(&store(&dir), &bundle).await;
+
+        assert!(!fault.is_permanent(), "{fault:#}");
+        assert!(format!("{fault:#}").contains("hash mismatch"), "{fault:#}");
+    }
+
+    /// Past the hash check the bytes are the ones the network vouched for, so no re-fetch can
+    /// produce anything else: asking again only burns the download every retry period.
+    #[tokio::test]
+    async fn a_bundle_with_no_schemas_is_a_permanent_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = served_bundle(targz(&[("readme.txt", b"no schemas here")])).await;
+
+        let fault = fault(&store(&dir), &bundle).await;
+
+        assert!(fault.is_permanent(), "{fault:#}");
+        assert!(
+            format!("{fault:#}").contains("no <id>.yaml entries"),
+            "{fault:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schema_that_will_not_parse_is_a_permanent_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle =
+            served_bundle(targz(&[("7.yaml", b"this is not a dataset description")])).await;
+
+        let fault = fault(&store(&dir), &bundle).await;
+
+        assert!(fault.is_permanent(), "{fault:#}");
+    }
+
+    /// The fault this split was made for: an id whose contents changed can never agree with the
+    /// store, so retrying re-downloaded the bundle every retry period for as long as the
+    /// scheduler kept publishing it.
+    #[tokio::test]
+    async fn a_republished_id_is_a_permanent_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+        store
+            .ensure(&served_bundle(original).await, &reqwest::Client::new())
+            .await
+            .unwrap();
+        let changed = targz(&[(
+            "7.yaml",
+            SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
+        )]);
+
+        let fault = fault(&store, &served_bundle(changed).await).await;
+
+        assert!(fault.is_permanent(), "{fault:#}");
+        assert!(
+            format!("{fault:#}").contains("republished with different contents"),
+            "{fault:#}"
+        );
     }
 
     #[tokio::test]
