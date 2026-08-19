@@ -7471,6 +7471,7 @@ dependencies = [
  "tokio-rusqlite",
  "tokio-stream",
  "tokio-util",
+ "tower 0.5.1",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",

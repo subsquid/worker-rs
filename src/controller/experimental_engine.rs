@@ -6,17 +6,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use rand::Rng;
 use reqwest::Url;
 use sqd_network_transport::PeerId;
 use sqd_query_engine::metadata::DatasetDescription;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
+use tower::retry::backoff::{Backoff, MakeBackoff};
 
 use crate::controller::assignments::new_reqwest_client;
 use crate::controller::schema_bundle::SchemaRegistry;
 use crate::controller::worker::OutputFormat;
 use crate::query::result::{QueryError, QueryOk, QueryResult};
+use crate::util::backoff;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -37,13 +38,14 @@ pub async fn run_schemas_refresh_loop(
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let client = new_reqwest_client(FETCH_TIMEOUT, peer_id);
     let mut last_manifest: Option<String> = None;
+    let mut retry = backoff::exponential(Duration::from_secs(1), refresh_interval);
 
     loop {
         tokio::select! {
             _ = timer.tick() => {}
             _ = cancellation_token.cancelled() => break,
         }
-        let mut current_delay = Duration::from_secs(1);
+        let mut backoff = retry.make_backoff();
         loop {
             match refresh_schemas(&registry, &manifest_url, &client, &mut last_manifest).await {
                 Ok(true) => {
@@ -52,16 +54,11 @@ pub async fn run_schemas_refresh_loop(
                 }
                 Ok(false) => break,
                 Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "Failed to refresh query schemas, retrying in {current_delay:?}"
-                    );
-                    let duration = rand::rng().random_range((current_delay / 2)..current_delay);
+                    tracing::warn!(error = %format!("{e:#}"), "Failed to refresh query schemas; retrying");
                     tokio::select! {
-                        _ = tokio::time::sleep(duration) => {}
+                        _ = backoff.next_backoff() => {}
                         _ = cancellation_token.cancelled() => break,
                     }
-                    current_delay = std::cmp::min(current_delay * 2, refresh_interval);
                 }
             }
         }

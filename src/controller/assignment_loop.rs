@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use rand::Rng;
 use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
+use tower::retry::backoff::{Backoff, ExponentialBackoff, ExponentialBackoffMaker, MakeBackoff};
 use tracing::{debug, info, warn, Instrument};
 
 use super::assignments::{self, AssignmentUpdate, NetworkPair};
@@ -18,6 +18,7 @@ use crate::cli::AssignmentSource;
 use crate::metrics;
 use crate::storage::datasets_index::DatasetsIndex;
 use crate::storage::manager::AssignmentOutcome;
+use crate::util::backoff;
 
 /// The stream re-announces a pair only when its location moves, so retries cannot wait longer
 /// than the poll period without idling past whatever the network last published.
@@ -117,25 +118,22 @@ impl AssignmentApplier {
     ) -> ControlFlow<()> {
         match self.apply(&update).await {
             ApplyOutcome::Applied => {
-                intake.backoff.reset();
+                intake.reset_backoff();
                 if self.assignment_source == AssignmentSource::Worker {
                     intake.in_flight = InFlight::Settling(update.id);
                 }
             }
             ApplyOutcome::Refused => {
                 intake.refused = Some(update.pair());
-                intake.backoff.reset();
+                intake.reset_backoff();
             }
             ApplyOutcome::Failed => {
                 match self
                     .wait_before_retry(intake, updates, cancellation_token)
                     .await
                 {
-                    Wait::Retry => {
-                        intake.backoff.grow();
-                        intake.pending = Some(update);
-                    }
-                    Wait::Superseded => intake.backoff.reset(),
+                    Wait::Retry => intake.pending = Some(update),
+                    Wait::Superseded => intake.reset_backoff(),
                     Wait::Stop => return ControlFlow::Break(()),
                 }
             }
@@ -268,6 +266,7 @@ impl AssignmentApplier {
         if intake.pending.is_some() {
             return Wait::Superseded;
         }
+        let delay = intake.backoff.next_backoff();
         tokio::select! {
             update = updates.next() => {
                 let Some(update) = update else {
@@ -276,7 +275,7 @@ impl AssignmentApplier {
                 intake.absorb(update, &self.applied_pair());
                 Wait::Superseded
             }
-            _ = tokio::time::sleep(jitter(intake.backoff.current())) => Wait::Retry,
+            _ = delay => Wait::Retry,
             _ = cancellation_token.cancelled() => Wait::Stop,
         }
     }
@@ -297,11 +296,6 @@ async fn announcement(
         update = updates.next() => update.map_or(Event::Stop, Event::Announced),
         _ = cancellation_token.cancelled() => Event::Stop,
     }
-}
-
-/// Spreads retries of workers that failed together.
-fn jitter(delay: Duration) -> Duration {
-    rand::rng().random_range((delay / 2)..=delay)
 }
 
 /// The whole cause chain on one line; `Display` alone shows only the outermost context.
@@ -359,35 +353,6 @@ enum InFlight {
     Stalled(String),
 }
 
-struct Backoff {
-    base: Duration,
-    cap: Duration,
-    current: Duration,
-}
-
-impl Backoff {
-    fn new(cap: Duration) -> Self {
-        let base = RETRY_BASE.min(cap);
-        Self {
-            base,
-            cap,
-            current: base,
-        }
-    }
-
-    fn current(&self) -> Duration {
-        self.current
-    }
-
-    fn grow(&mut self) {
-        self.current = (self.current * 2).min(self.cap);
-    }
-
-    fn reset(&mut self) {
-        self.current = self.base;
-    }
-}
-
 /// The loop's bookkeeping: the newest pair waiting, what was refused, what is in flight, how
 /// long the next retry waits.
 struct Intake {
@@ -398,17 +363,25 @@ struct Intake {
     /// bad pairs cost one wasted fetch each.
     refused: Option<NetworkPair>,
     in_flight: InFlight,
-    backoff: Backoff,
+    backoff_maker: ExponentialBackoffMaker,
+    backoff: ExponentialBackoff,
 }
 
 impl Intake {
     fn new(retry_cap: Duration) -> Self {
+        let mut backoff_maker = backoff::exponential(RETRY_BASE, retry_cap);
+        let backoff = backoff_maker.make_backoff();
         Self {
             pending: None,
             refused: None,
             in_flight: InFlight::Idle,
-            backoff: Backoff::new(retry_cap),
+            backoff_maker,
+            backoff,
         }
+    }
+
+    fn reset_backoff(&mut self) {
+        self.backoff = self.backoff_maker.make_backoff();
     }
 
     /// Keeps an update as the one to apply next unless nothing is outstanding for its pair. A

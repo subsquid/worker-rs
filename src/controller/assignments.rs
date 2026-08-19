@@ -2,14 +2,15 @@ use std::{io::ErrorKind, time::Duration};
 
 use async_stream::stream;
 use futures::Stream;
-use rand::Rng;
 use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
+use tower::retry::backoff::{Backoff, MakeBackoff};
 
 use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::cli::AssignmentSource;
 use crate::metrics;
 use crate::storage::datasets_index::AssignmentBlob;
+use crate::util::backoff;
 
 /// Identifies an assignment and schema bundle announcement (ADR-21). Identity, not location: an
 /// id names one document for all time (IB-40b).
@@ -78,12 +79,13 @@ pub fn new_assignments_stream(
 
     let reqwest_client = new_reqwest_client(timeout, peer_id);
     let mut announced = Announced::default();
+    let mut retry = backoff::exponential(Duration::from_secs(1), max_delay);
 
     stream! {
         loop {
             timer.tick().await;
 
-            let mut current_delay = Duration::from_secs(1);
+            let mut backoff = retry.make_backoff();
             loop {
                 match poll_network_state(&url, &reqwest_client, assignment_source, &mut announced).await {
                     Ok(Some(data)) => {
@@ -92,10 +94,8 @@ pub fn new_assignments_stream(
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::warn!(error = %format!("{e:#}"), "Failed to update assignment, retrying in {:?}", current_delay);
-                        let duration = rand::rng().random_range((current_delay / 2)..current_delay);
-                        tokio::time::sleep(duration).await;
-                        current_delay = std::cmp::min(current_delay * 2, max_delay);
+                        tracing::warn!(error = %format!("{e:#}"), "Failed to update assignment; retrying");
+                        backoff.next_backoff().await;
                     }
                 }
             }
