@@ -184,7 +184,10 @@ impl StateManager {
                     Err(UnresolvedChunk::NotAssigned) => panic!(
                         "chunk {chunk_ref} was queued from an assignment that doesn't carry it"
                     ),
-                    // The document cannot change between attempts; fail only this chunk (FM-11).
+                    // Admission refuses a document whose dataset-level addresses are unusable
+                    // (FM-12), so only a per-file address that won't build reaches here, one
+                    // chunk at a time. The document cannot change between attempts: fail the
+                    // chunk at once rather than over its budget (FM-11).
                     Err(e) => {
                         warn!(chunk = %chunk_ref, error = %e, "Can't address chunk");
                         metrics::CHUNKS_UNADDRESSABLE.inc();
@@ -574,11 +577,24 @@ mod tests {
         workdir: PathBuf,
         worker_id: sqd_contract_client::PeerId,
     ) -> StateManager {
+        test_manager_with_attempts(
+            workdir,
+            worker_id,
+            crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        )
+        .await
+    }
+
+    async fn test_manager_with_attempts(
+        workdir: PathBuf,
+        worker_id: sqd_contract_client::PeerId,
+        max_download_attempts: u8,
+    ) -> StateManager {
         let config = DownloadConfig {
             s3_timeout: Duration::from_secs(1),
             s3_read_timeout: Duration::from_secs(1),
             downloads_max_delay: Duration::from_secs(1),
-            max_download_attempts: crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+            max_download_attempts,
         };
         StateManager::new(workdir, 1, worker_id, config)
             .await
@@ -745,9 +761,10 @@ mod tests {
         );
     }
 
-    /// One chunk this worker holds, at a dataset address that doesn't parse (FM-11).
-    fn unaddressable_assignment_for(
+    /// One chunk this worker holds, at an origin that answers 404: addressable, never fetchable.
+    fn unfetchable_assignment_for(
         peer_id: sqd_contract_client::PeerId,
+        origin: &str,
     ) -> sqd_assignments::Assignment {
         let mut builder =
             sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
@@ -755,7 +772,7 @@ mod tests {
             .new_chunk()
             .id("0000000000/0000000000-0000000010-aaaaaaaa")
             .dataset_id("s3://test")
-            .dataset_base_url("not a url")
+            .dataset_base_url(origin)
             .block_range(0..=10)
             .size(1)
             .worker_indexes(&[0])
@@ -769,18 +786,22 @@ mod tests {
 
     /// A successor that changes nothing about the slice still restores the budget of chunks
     /// given up on (WP-13), and only the reconciler can spend it: registering it must wake the
-    /// loop, or the chunk is never retried and the assignment never settles.
+    /// loop, or the chunk is never retried and the assignment never settles. The chunk is
+    /// addressable but its origin answers 404, and the budget is one attempt, so each
+    /// assignment stalls after one fetch.
     #[tokio::test]
     async fn a_same_slice_successor_wakes_the_reconciler() {
         use std::sync::Arc;
 
         use super::AssignmentOutcome;
+        use crate::controller::test_support::TestServer;
 
         let keypair = Keypair::generate_ed25519();
         let worker_id = keypair.public().to_peer_id();
         let dir = tempfile::tempdir().unwrap();
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
-        let manager = Arc::new(test_manager(workdir, worker_id).await);
+        let origin = TestServer::start().await;
+        let manager = Arc::new(test_manager_with_attempts(workdir, worker_id, 1).await);
         let token = CancellationToken::new();
         let running = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -792,7 +813,10 @@ mod tests {
             manager.set_prepared_assignment(
                 manager
                     .prepare_assignment(
-                        AssignmentBlob::Legacy(unaddressable_assignment_for(worker_id)),
+                        AssignmentBlob::Legacy(unfetchable_assignment_for(
+                            worker_id,
+                            &origin.url("/"),
+                        )),
                         id,
                         &keypair,
                         no_schemas_needed,
@@ -810,9 +834,14 @@ mod tests {
             assert_eq!(
                 verdict,
                 Some(AssignmentOutcome::Stalled),
-                "the chunk has no address, so {id} stalls — but it is judged"
+                "the chunk cannot be fetched, so {id} stalls — but it is judged"
             );
         }
+        assert_eq!(
+            origin.hits("/0000000000/0000000000-0000000010-aaaaaaaa/blocks.parquet"),
+            2,
+            "one attempt per assignment: the successor restored the budget and spent it"
+        );
 
         token.cancel();
         running.await.unwrap();

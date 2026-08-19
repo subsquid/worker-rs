@@ -66,7 +66,8 @@ diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12
 a level-readable witness. Scalar signals only (OB-14).
 
 **OB-18 — Refused assignments.** [MUST] A counter of announced pairs rejected as
-unusable (FM-12) — no entry for this worker, a write schema with no roster, a bundle that
+unusable (FM-12) — no entry for this worker, a write schema with no roster, a dataset
+whose base url will not parse or a version with no generation entry, a bundle that
 doesn't cover the document, a document that cannot be read at all, a network-state pointer
 that will not decode or names no document to fetch (counted per poll while it persists,
 like FM-53d). A refusal keeps the
@@ -76,8 +77,9 @@ has gone quiet. This is the signal that separates them; which refusal it was sta
 log. Scalar signal only (OB-14). Bound in IB-31.
 
 **OB-17 — Unaddressable chunks.** [MUST] A counter of chunks the applied assignment
-carries no usable address for: a base url that will not parse, or a version whose dataset
-registers no generation (FM-11). It must be distinguishable from an ordinary download
+carries no usable address for — a file address that will not build for that one chunk
+(FM-11); a dataset-level fault refuses the document instead and counts under OB-18. It
+must be distinguishable from an ordinary download
 failure — both leave the chunk missing and both move `chunks_failed_download`, but one is
 an origin that may come back and the other is a document that will still be unusable after
 every retry, so without the distinction a scheduler publishing bad addresses reads exactly

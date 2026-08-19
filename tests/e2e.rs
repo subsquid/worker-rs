@@ -200,51 +200,85 @@ async fn worker_format_serves_the_version_the_query_names() {
     );
 }
 
-/// An unaddressable chunk stalls its assignment without stopping reconciliation (FM-11).
+/// A document whose dataset address cannot be used contradicts itself, so it is refused whole
+/// (FM-12): the previous assignment stays in force, nothing is fetched, and only a different
+/// document moves things.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chunk_with_an_unusable_address_does_not_stop_the_worker() {
+async fn a_document_with_an_unusable_address_is_refused() {
     use harness::scheduler::AssignmentFault;
 
     let mut h = Harness::start().await;
 
-    let unusable = corpus::chunk(7_000, 7_009, 1);
-    let before = sqd_worker::metrics::CHUNKS_UNADDRESSABLE.get();
+    let chunk = corpus::chunk(7_000, 7_009, 1);
+    let refused_before = sqd_worker::metrics::ASSIGNMENTS_REFUSED.get();
     h.publish(
         "assignment-1",
-        &[h.host_chunk(&unusable)],
+        &[h.host_chunk(&chunk)],
         AssignmentFault::UnparseableFileUrl,
     );
     assert!(
-        h.poll_and_apply().await,
-        "the document is well-formed; only one chunk's address isn't"
+        !h.poll_and_apply().await,
+        "the document names a dataset address the worker cannot use, so it is inapplicable"
     );
-    h.await_condition("the unusable chunk is given up on", || async {
-        sqd_worker::metrics::CHUNKS_UNADDRESSABLE.get() > before
-    })
-    .await;
-    assert_eq!(
-        sqd_worker::metrics::CHUNKS_UNADDRESSABLE.get(),
-        before + 1,
-        "counted once for the chunk, not once per attempt it was never going to make"
+    assert!(
+        sqd_worker::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
+        "OB-18: a refused document is what separates a starved worker from a quiet network"
+    );
+    assert!(
+        h.status().await.assignment_id.is_empty(),
+        "nothing was applied, so no assignment id is reported"
     );
     assert_eq!(
-        h.origin.fetch_count(&unusable.id, "blocks.parquet"),
+        h.origin.fetch_count(&chunk.id, "blocks.parquet"),
         0,
-        "there was no address to fetch from"
+        "no chunk is fetched for a document that never applied"
     );
 
-    // The recovery WP-13 promises: the scheduler corrects the address, which changes nothing
-    // about the slice — same chunk, same version — and the next assignment restores the budget
-    // the chunk was given up under. Only the reconciler can spend it, so registration must wake
-    // it even though the desired set is unchanged.
-    h.publish_and_apply("assignment-2", &[h.host_chunk(&unusable)])
+    h.publish_and_apply("assignment-2", &[h.host_chunk(&chunk)])
         .await;
     h.await_all_chunks_available().await;
+}
+
+/// A chunk whose origin will not serve it exhausts its download budget and stalls the
+/// assignment; the next assignment restores the budget — including one naming the same slice,
+/// since registering an assignment always wakes reconciliation (WP-13).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunk_the_origin_will_not_serve_is_retried_by_the_next_assignment() {
+    use harness::stub::Fault;
+    use sqd_worker::storage::manager::AssignmentOutcome;
+
+    let mut h = Harness::start().await;
+
+    let chunk = corpus::chunk(7_000, 7_009, 1);
+    let placement = h.host_chunk(&chunk);
+    h.origin
+        .inject(&chunk.id, "blocks.parquet", Fault::Status(404));
+    h.publish_and_apply("assignment-1", std::slice::from_ref(&placement))
+        .await;
+    let settled = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        h.worker.wait_until_assignment_settled(
+            "assignment-1",
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("the assignment settles once the budget is spent");
     assert_eq!(
-        h.origin.fetch_count(&unusable.id, "blocks.parquet"),
-        1,
-        "the corrected document is fetched from, once"
+        settled,
+        Some(AssignmentOutcome::Stalled),
+        "the origin never served the chunk, so the assignment stalls"
     );
+    let attempts = h.origin.fetch_count(&chunk.id, "blocks.parquet");
+    assert!(
+        attempts > 1,
+        "a fetch failure is retried within the budget: {attempts}"
+    );
+
+    // The origin comes back; the scheduler republishes the same slice under a new id.
+    h.origin.clear_faults();
+    h.publish_and_apply("assignment-2", &[placement]).await;
+    h.await_all_chunks_available().await;
 }
 
 /// Worker assignments derive files and query schemas from the write-schema roster.

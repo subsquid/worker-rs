@@ -336,9 +336,11 @@ mod worker_assignment {
         );
     }
 
-    /// Distinguishes an unaddressable assigned chunk from an unassigned chunk (FM-11).
+    /// A dataset whose base url will not parse leaves every chunk of it without an address: the
+    /// document contradicts itself, so it is inapplicable whole (FM-12) rather than applied and
+    /// given up on chunk by chunk.
     #[test]
-    fn an_unusable_address_is_told_apart_from_an_unknown_chunk() {
+    fn a_dataset_whose_base_url_will_not_parse_makes_the_document_inapplicable() {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
@@ -357,20 +359,69 @@ mod worker_assignment {
         builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
         let assignment = WorkerAssignment::from_owned(builder.finish()).unwrap();
 
+        let message = expect_rejected(assignment, &keypair);
+        assert!(message.contains("not a url"), "{message}");
+        assert!(message.contains(DATASET), "names the dataset: {message}");
+    }
+
+    /// The same for a version the dataset registers no generation for: the address of every
+    /// chunk at that version depends on an entry the document does not carry. The builder
+    /// refuses to emit such a document, so the input is corrupted after the fact: the one
+    /// chunk's `versions` column entry is moved from the registered 3 to an unregistered 4.
+    #[test]
+    fn a_version_without_a_generation_makes_the_document_inapplicable() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+        builder.register_write_schema(7, &["blocks"]).unwrap();
+        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
+        dataset
+            .register_generation(3, "_bf/01HQZK3M7X8P2NVWTC4RYFGDS9")
+            .unwrap();
+        dataset
+            .new_chunk()
+            .id(CHUNK_ID)
+            .block_range(221000000..=221000649)
+            .size(1000000)
+            .version(3)
+            .write_schema_id(7)
+            .worker_indexes(&[0])
+            .finish()
+            .unwrap();
+        dataset.finish().unwrap();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        let mut document = builder.finish();
+
+        // A one-entry `[uint32]` vector holding 3: length 1 then the value, little-endian.
+        let column: [u8; 8] = [1, 0, 0, 0, 3, 0, 0, 0];
+        let at: Vec<usize> = document
+            .windows(column.len())
+            .enumerate()
+            .filter(|(_, window)| *window == column)
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(at.len(), 1, "the versions column is the one such vector");
+        document[at[0] + 4] = 4;
+        let assignment =
+            WorkerAssignment::from_owned(document).expect("still a well-formed document");
+
+        let message = expect_rejected(assignment, &keypair);
+        assert!(message.contains("version 4"), "{message}");
+        assert!(message.contains("no generation"), "{message}");
+    }
+
+    /// A chunk from somewhere else is the caller's mistake, not the document's.
+    #[test]
+    fn an_unknown_chunk_is_not_an_address_fault() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
         let index = DatasetsIndex::new(
-            AssignmentBlob::Worker(assignment),
+            AssignmentBlob::Worker(assignment(peer_id, 7, None)),
             "test-asgn",
             &keypair,
             all_schemas_available,
         )
-        .expect("an address is only needed to download, so admission takes this");
-
-        let assigned = index.chunks().keys().next().unwrap().clone();
-        let message = match index.list_files(&assigned) {
-            Err(UnresolvedChunk::NoAddress(message)) => message,
-            other => panic!("expected an unusable address, got {other:?}"),
-        };
-        assert!(message.contains("not a url"), "{message}");
+        .expect("assignment is well-formed");
 
         let stranger = ChunkRef::new(
             std::sync::Arc::new(DATASET.to_owned()),
@@ -378,8 +429,7 @@ mod worker_assignment {
         );
         assert_eq!(
             index.list_files(&stranger),
-            Err(UnresolvedChunk::NotAssigned),
-            "a chunk from somewhere else is the caller's mistake, not the document's"
+            Err(UnresolvedChunk::NotAssigned)
         );
     }
 
@@ -432,6 +482,40 @@ mod worker_assignment {
             message.contains("write schema 7") && message.contains("schema bundle"),
             "{message}"
         );
+    }
+
+    /// The legacy format shares one base url across a dataset too, so the same rule applies.
+    #[test]
+    fn a_legacy_dataset_whose_base_url_will_not_parse_makes_the_document_inapplicable() {
+        use sqd_assignments::AssignmentBuilder;
+
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut builder = AssignmentBuilder::new("test-secret").check_continuity(false);
+        builder
+            .new_chunk()
+            .id(CHUNK_ID)
+            .dataset_id(DATASET)
+            .dataset_base_url("not a url")
+            .block_range(0..=1000)
+            .size(1)
+            .worker_indexes(&[0])
+            .files(&["blocks.parquet".to_owned()])
+            .finish()
+            .unwrap();
+        builder.finish_dataset();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0]);
+        let assignment = sqd_assignments::Assignment::from_owned(builder.finish()).unwrap();
+
+        let error = DatasetsIndex::new(
+            AssignmentBlob::Legacy(assignment),
+            "test-asgn",
+            &keypair,
+            |_| unreachable!("a legacy assignment references no write schemas"),
+        )
+        .err()
+        .expect("the document is inapplicable");
+        assert!(format!("{error:#}").contains("not a url"), "{error:#}");
     }
 
     #[test]

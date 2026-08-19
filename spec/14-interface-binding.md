@@ -248,9 +248,12 @@ for version 0 — the ingested copy — and a version the worker does not hold a
 which routing clients treat as a reroute rather than a fault. A chunk carries neither its id nor its dataset: both are
 rebuilt from the columns holding them, so an id that will not assemble is a malformed
 document. A chunk whose `write_schema_id` has no roster, or whose schema the bundle
-published with the document doesn't carry,
-makes the whole document inapplicable (WP-2) — a partially applied assignment would
-leave the worker silently short of data it is believed to hold.
+published with the document doesn't carry, a dataset whose `base_url` will not parse, or a
+chunk whose `version` names a generation the dataset does not register — each is the
+document contradicting itself and
+makes the whole document inapplicable (WP-2, FM-12) — a partially applied assignment would
+leave the worker silently short of data it is believed to hold, and a document wrong at
+dataset level is judged once per dataset at admission, not once per chunk in the reconciler.
 
 `write_schema_id` also selects the schema a query is executed against: it is read out
 of the index in the same critical section that locks the chunk, so a schema id and

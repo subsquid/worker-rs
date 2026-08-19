@@ -46,7 +46,9 @@ pub struct RemoteFile {
 pub enum UnresolvedChunk {
     #[error("chunk is not in this assignment")]
     NotAssigned,
-    /// The assigned chunk has no usable address.
+    /// The assigned chunk has no usable address. Dataset-level causes — a base url that won't
+    /// parse, a version with no generation — are refused at admission, so this is a per-chunk
+    /// remainder: a file address that will not build.
     #[error("{0}")]
     NoAddress(String),
 }
@@ -65,7 +67,11 @@ impl DatasetsIndex {
                 let chunk = assignment
                     .get_chunk(*chunk_ref)
                     .ok_or(UnresolvedChunk::NotAssigned)?;
-                let base_url = chunk_base_url(chunk.dataset_base_url(), chunk.base_url())?;
+                let base_url = chunk_base_url(
+                    chunk.dataset_id(),
+                    chunk.dataset_base_url(),
+                    chunk.base_url(),
+                )?;
                 let mut result = Vec::with_capacity(chunk.files().len());
                 for file in chunk.files() {
                     result.push(RemoteFile {
@@ -126,17 +132,22 @@ impl DatasetsIndex {
                 let Some(worker) = assignment.get_worker(&peer_id) else {
                     anyhow::bail!("no assignment for this worker");
                 };
-                let chunks = worker
-                    .iter_chunks_with_ref()
-                    .map(|(chunk_ref, chunk)| {
-                        (
-                            // Legacy assignments have no versions: every chunk is the ingested
-                            // copy, stored where it has always been.
-                            pool.chunk_ref(chunk.dataset_id(), chunk.id(), 0),
-                            chunk_ref,
-                        )
-                    })
-                    .collect();
+                let mut chunks = HashMap::new();
+                let mut addressed = HashSet::new();
+                for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
+                    // Once per dataset: the base url is shared by every chunk of it, so one
+                    // that won't parse leaves the whole dataset without an address — the
+                    // document contradicting itself, which makes it inapplicable (FM-12).
+                    if addressed.insert(chunk.dataset_id()) {
+                        dataset_base(chunk.dataset_id(), chunk.dataset_base_url())?;
+                    }
+                    chunks.insert(
+                        // Legacy assignments have no versions: every chunk is the ingested
+                        // copy, stored where it has always been.
+                        pool.chunk_ref(chunk.dataset_id(), chunk.id(), 0),
+                        chunk_ref,
+                    );
+                }
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
             }
             AssignmentBlob::Worker(assignment) => {
@@ -144,17 +155,36 @@ impl DatasetsIndex {
                     anyhow::bail!("no assignment for this worker");
                 };
                 let mut chunks = HashMap::new();
+                let mut addressed = HashSet::new();
+                let mut generations = HashSet::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
+                    let dataset = chunk.dataset();
                     let Some(id) = chunk.id() else {
                         anyhow::bail!(
                             "chunk {} of dataset '{}' has a hash that isn't UTF-8",
                             chunk.index(),
-                            chunk.dataset().id()
+                            dataset.id()
                         );
                     };
-                    // Whole-document, unlike an unusable address (FM-11): a chunk naming a
-                    // schema the document's own roster table doesn't define is the document
-                    // disagreeing with itself.
+                    // A document that contradicts itself is inapplicable whole (FM-12), and
+                    // each of these is checked once per dataset, not per chunk: a base url that
+                    // won't parse, or a version the dataset registers no generation for, leaves
+                    // every chunk sharing it without an address.
+                    if addressed.insert(dataset.id()) {
+                        dataset_base(dataset.id(), dataset.base_url())?;
+                    }
+                    if chunk.version() != 0
+                        && generations.insert((dataset.id(), chunk.version()))
+                        && dataset.get_generation(chunk.version()).is_none()
+                    {
+                        anyhow::bail!(
+                            "chunk '{id}' of dataset '{}' is at version {}, which the dataset registers no generation for",
+                            dataset.id(),
+                            chunk.version()
+                        );
+                    }
+                    // A chunk naming a schema the document's own roster table doesn't define
+                    // is the document disagreeing with itself in the same way.
                     if assignment.chunk_tables(chunk).is_none() {
                         anyhow::bail!(
                             "chunk '{id}' references write schema {} which has no roster in the assignment",
@@ -252,12 +282,21 @@ fn is_file_name(name: &str) -> bool {
         && components.next().is_none()
 }
 
-fn chunk_base_url(dataset_base_url: &str, chunk_prefix: &str) -> Result<Url, UnresolvedChunk> {
-    let base = Url::from_str(dataset_base_url).map_err(|e| {
-        UnresolvedChunk::NoAddress(format!(
-            "dataset base url '{dataset_base_url}' doesn't parse: {e}"
-        ))
-    })?;
+/// A dataset's base url, as admission and [`DatasetsIndex::list_files`] both read it, so the
+/// two cannot disagree about what is addressable.
+fn dataset_base(dataset: &str, base_url: &str) -> anyhow::Result<Url> {
+    Url::from_str(base_url).map_err(|e| {
+        anyhow::anyhow!("dataset '{dataset}' base url '{base_url}' doesn't parse: {e}")
+    })
+}
+
+fn chunk_base_url(
+    dataset: &str,
+    dataset_base_url: &str,
+    chunk_prefix: &str,
+) -> Result<Url, UnresolvedChunk> {
+    let base = dataset_base(dataset, dataset_base_url)
+        .map_err(|e| UnresolvedChunk::NoAddress(e.to_string()))?;
     base.join(&format!("{chunk_prefix}/")).map_err(|e| {
         UnresolvedChunk::NoAddress(format!(
             "chunk base url '{chunk_prefix}' doesn't parse: {e}"

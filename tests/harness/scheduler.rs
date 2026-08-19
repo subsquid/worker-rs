@@ -35,7 +35,8 @@ pub enum Format {
 pub enum AssignmentFault {
     #[default]
     None,
-    /// A chunk whose dataset base address doesn't parse — GAP-2's reconciler panic.
+    /// A dataset base address that doesn't parse — a document that contradicts itself, refused
+    /// whole at admission (FM-12; once GAP-2's reconciler panic).
     UnparseableFileUrl,
     /// The worker is in the roster but holds no chunks — GAP-3's deletion floor.
     NoChunksForWorker,
