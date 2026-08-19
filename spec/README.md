@@ -91,7 +91,7 @@ retention/space lifecycle (10).
 | [ADR-19](decisions/ADR-19-ratify-provisional-targets.md) | Ratify provisional SLO targets and gate thresholds | Proposed |
 | [ADR-20](decisions/ADR-20-freshness-rejection-attribution.md) | Freshness rejections are worker-fault outcomes | Proposed |
 | [ADR-21](decisions/ADR-21-assignment-and-bundle-apply-as-one-snapshot.md) | Validate a worker assignment against its schema bundle | Accepted |
-| [ADR-22](decisions/ADR-22-chunk-versions-identity-and-store-layout.md) | Chunk versions: identity and store layout | Accepted |
+| [ADR-22](decisions/ADR-22-on-disk-layout-chunk-versions-and-schema-store.md) | On-disk layout: chunk versions and the schema store | Accepted |
 
 ## How to use this suite
 
