@@ -26,9 +26,38 @@ would sort a rewrite after every other chunk of its dataset and silently misalig
 at both ends, exactly when generations are in use.
 
 **Layout.** Version 0 stays at `<dataset>/<top>/<chunk id>`. Version n > 0 is stored at
-`<dataset>/_v<n>/<top>/<chunk id>`: one subtree per version, under the dataset (DEF-6). The
-`_v` prefix cannot collide with a top directory (ten decimal digits), and `_v<n>` with `n` a
-canonical positive decimal is the only spelling adopted — `_v0`, `_v01`, `_v+1` name no
+`<dataset>/_v<n>/<top>/<chunk id>`: one subtree per version, under the dataset (DEF-6). One
+dataset holding chunk `0000001000/0000001000-0000001999-abcdef12` at both its ingested
+version and a rewrite at version 3, beside an untouched neighbour, looks like this:
+
+```
+<data-dir>/worker/
+└── <base64url(dataset id)>/
+    ├── 0000001000/                                 ← top dir, ten digits: version 0 lives here
+    │   ├── 0000001000-0000001999-abcdef12/         ← the ingested copy, where a legacy chunk is
+    │   │   ├── blocks.parquet
+    │   │   └── logs.parquet
+    │   └── 0000002000-0000002999-bbbbbbbb/         ← a neighbour never rewritten
+    │       └── …
+    └── _v3/                                        ← this dataset's chunks at version 3
+        └── 0000001000/
+            └── 0000001000-0000001999-abcdef12/     ← the same id, rewritten; both copies coexist
+                ├── blocks.parquet
+                └── logs.parquet
+```
+
+| chunk ref ⟨dataset, chunk id, version⟩ | path under the dataset directory |
+|---|---|
+| ⟨D, `0000001000/0000001000-0000001999-abcdef12`, 0⟩ | `0000001000/0000001000-0000001999-abcdef12` |
+| ⟨D, `0000001000/0000001000-0000001999-abcdef12`, 3⟩ | `_v3/0000001000/0000001000-0000001999-abcdef12` |
+| ⟨D, `0000001000/0000002000-0000002999-bbbbbbbb`, 0⟩ | `0000001000/0000002000-0000002999-bbbbbbbb` |
+
+In chunk-ref order these three rows are exactly the order listed — ⟨…abcdef12, 0⟩, then its
+rewrite ⟨…abcdef12, 3⟩, then the next id — which is the DEF-13 bit order, and the order a
+reader holding only the ids would compute.
+
+The `_v` prefix cannot collide with a top directory (ten decimal digits), and `_v<n>` with `n`
+a canonical positive decimal is the only spelling adopted — `_v0`, `_v01`, `_v+1` name no
 version and their contents are invisible rather than adopted at a guessed version. Rejected:
 writing a rewrite over the copy it replaces (a restart could not tell which it holds, and
 deletion-before-download would have nothing to gate on); a suffix on the chunk directory
