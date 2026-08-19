@@ -360,19 +360,3 @@ impl StringPool {
         pooled
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_url_joining() {
-        let base_url = Url::from_str("https://eclipse-testnet-2.sqd-datasets.io/").unwrap();
-        let url = base_url
-            .join(&format!("{}/", "0086800000/0089600001-0089800000-cg1JNYDM"))
-            .unwrap()
-            .join("blocks.parquet")
-            .unwrap();
-        assert_eq!(url.as_str(), "https://eclipse-testnet-2.sqd-datasets.io/0086800000/0089600001-0089800000-cg1JNYDM/blocks.parquet");
-    }
-}

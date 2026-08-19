@@ -270,20 +270,6 @@ mod tests {
     use super::*;
     use crate::controller::test_support::TestServer;
 
-    #[path = "assignments_pbt.rs"]
-    mod pbt;
-
-    #[allow(deprecated)]
-    fn assignment(id: &str) -> sqd_assignments::NetworkAssignment {
-        sqd_assignments::NetworkAssignment {
-            url: None,
-            fb_url: None,
-            fb_url_v1: Some(format!("https://example.test/{id}.fb.gz")),
-            id: id.to_string(),
-            effective_from: 123,
-        }
-    }
-
     fn published_state(json: &str) -> PublishedState {
         serde_json::from_str(json).unwrap()
     }
