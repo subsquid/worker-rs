@@ -27,6 +27,7 @@ const MAX_PENDING_ASSIGNMENTS: usize = 5;
 const RETRY_BASE: Duration = Duration::from_secs(1);
 
 /// What one attempt at an announced pair came to.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyOutcome {
     Applied,
@@ -36,6 +37,7 @@ pub enum ApplyOutcome {
     Failed,
 }
 
+/// Applies announced pairs in order, retries what failed, and refuses what cannot apply.
 pub struct AssignmentApplier {
     worker: Arc<Worker>,
     schema_manager: Arc<SchemaManager>,
@@ -77,7 +79,7 @@ impl AssignmentApplier {
         let mut intake = Intake::new(self.retry_cap);
 
         loop {
-            let event = match intake.in_flight.clone() {
+            let event = match &intake.in_flight {
                 InFlight::Idle => match intake.pending.pop_front() {
                     Some(update) => Event::Apply(update),
                     None => announcement(&mut updates, &cancellation_token).await,
@@ -86,7 +88,7 @@ impl AssignmentApplier {
                 InFlight::Stalled(_) => announcement(&mut updates, &cancellation_token).await,
                 InFlight::Settling(id) => tokio::select! {
                     update = updates.next() => update.map_or(Event::Stop, Event::Announced),
-                    settled = self.worker.wait_until_assignment_settled(&id, cancellation_token.clone()) => {
+                    settled = self.worker.wait_until_assignment_settled(id, cancellation_token.clone()) => {
                         settled.map_or(Event::Stop, Event::Settled)
                     }
                 },
@@ -151,12 +153,12 @@ impl AssignmentApplier {
     /// Downloads the pair, validates the assignment against the bundle, installs the schemas,
     /// and registers the assignment — in that order (ADR-21).
     pub async fn apply(&self, update: &AssignmentUpdate) -> ApplyOutcome {
-        debug!("Downloading assignment \"{}\"", update.id);
+        debug!(assignment_id = %update.id, "Downloading assignment");
         let (document, bundle) = match self.download(update).await {
             Ok(fetched) => fetched,
             Err(unfetched) => return unfetched.fail(update),
         };
-        debug!("Downloaded assignment \"{}\"", update.id);
+        debug!(assignment_id = %update.id, "Downloaded assignment");
 
         let index = match self.validate(update, document, bundle.as_ref()).await {
             Ok(index) => index,
@@ -245,7 +247,7 @@ impl AssignmentApplier {
         tokio::task::spawn_blocking(move || worker.register_prepared_assignment(index))
             .instrument(tracing::info_span!("set_assignment", id = %update.id))
             .await
-            .expect("register_assignment shouldn't panic");
+            .expect("registering a validated assignment has no panic path of its own");
     }
 
     /// Refuses the pair without replacing the active assignment.
@@ -356,7 +358,7 @@ impl Unfetched {
 
 /// The assignment registered last, as the loop relates to it. Legacy mode never leaves `Idle`:
 /// it applies each update as it arrives.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum InFlight {
     Idle,
     /// Registered; the next update waits for its verdict (strictly in-order application).
@@ -461,15 +463,18 @@ impl Intake {
             return Absorbed::Queued;
         }
         let skipped = self.keep_latest();
-        warn!("Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
+        warn!(
+            skipped,
+            cap = MAX_PENDING_ASSIGNMENTS,
+            "Skipping pending assignments; the queue exceeded its cap"
+        );
         Absorbed::Overflowed
     }
 
     fn keep_latest(&mut self) -> usize {
-        let latest = self
-            .pending
-            .pop_back()
-            .expect("pending queue was just checked as non-empty");
+        let Some(latest) = self.pending.pop_back() else {
+            return 0;
+        };
         let skipped = self.pending.len();
         self.pending.clear();
         self.pending.push_back(latest);
@@ -500,7 +505,11 @@ impl Intake {
 
     fn abandon_settling(&mut self) {
         if let InFlight::Settling(id) = &self.in_flight {
-            warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
+            warn!(
+                assignment_id = %id,
+                cap = MAX_PENDING_ASSIGNMENTS,
+                "Skipping current assignment; the queue exceeded its cap"
+            );
             self.in_flight = InFlight::Idle;
         }
     }
