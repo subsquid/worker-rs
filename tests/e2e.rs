@@ -161,9 +161,9 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
-/// A chunk published only as a rewrite resolves through its generation prefix and is stored
-/// under its version, never where the ingested copy goes (IB-41b); a query names the copy it
-/// wants, and zero — the ingested copy, never assigned here — is not found (IB-13).
+/// A chunk published only as a rewrite is fetched from its generation prefix and stored under its
+/// version (IB-41b); a query names the copy it wants, and version 0 — never assigned — is not
+/// found (IB-13).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_fresh_rewrite_is_fetched_from_its_generation_and_served_by_version() {
     use harness::scheduler::Scheduler;
@@ -304,9 +304,8 @@ async fn a_chunk_the_origin_will_not_serve_is_retried_by_the_next_assignment() {
     h.await_all_chunks_available().await;
 }
 
-/// Worker assignments derive files and query schemas from the write-schema roster: the ingested
-/// copy is fetched, reported and queried; republishing the chunk at a new version fetches the
-/// new copy under its version and reconciliation removes the superseded one.
+/// The ingested copy is fetched from the roster, reported and queried; a rewrite is then fetched
+/// under its version and the superseded copy removed.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_v0_chunk_is_served_then_superseded_by_a_rewrite() {
     use harness::scheduler::Scheduler;

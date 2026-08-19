@@ -183,8 +183,7 @@ mod worker_assignment {
         }
     }
 
-    /// A worker document with one chunk on write schema 7, whose roster is `tables`, at
-    /// `generation`'s version if one is registered.
+    /// One chunk on write schema 7 with roster `tables`, at `generation`'s version if any.
     fn document(
         peer_id: sqd_network_transport::PeerId,
         base_url: &str,
@@ -360,20 +359,22 @@ mod worker_assignment {
     }
 
     /// A document that contradicts itself, or the store it is written to, is inapplicable whole
-    /// (FM-12) rather than applied and given up on chunk by chunk: each row is one such fault and
-    /// the fragments its refusal must name. The version row is corrupted after the fact — the
-    /// builder refuses to emit a version with no generation — by moving the one chunk's
-    /// `versions` column entry from the registered 3 to an unregistered 4.
+    /// (FM-12). The version row is corrupted after the fact — the builder refuses to emit a
+    /// version with no generation — by moving the chunk's `versions` entry from 3 to 4.
     #[test]
     fn a_document_that_contradicts_itself_is_refused_whole() {
+        fn none_available(_: SchemaId) -> bool {
+            false
+        }
+        fn not_consulted(_: SchemaId) -> bool {
+            unreachable!("a legacy assignment references no write schemas")
+        }
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let stranger = Keypair::generate_ed25519().public().to_peer_id();
         let long = "b".repeat(250);
         let worker = |bytes: Vec<u8>| {
-            AssignmentBlob::Worker(
-                WorkerAssignment::from_owned(bytes).expect("still a well-formed document"),
-            )
+            AssignmentBlob::Worker(WorkerAssignment::from_owned(bytes).expect("well-formed"))
         };
         let mut unregistered_version = document(
             peer_id,
@@ -391,12 +392,6 @@ mod worker_assignment {
             .collect();
         assert_eq!(at.len(), 1, "the versions column is the one such vector");
         unregistered_version[at[0] + 4] = 4;
-        fn none_available(_: SchemaId) -> bool {
-            false
-        }
-        fn not_consulted(_: SchemaId) -> bool {
-            unreachable!("a legacy assignment references no write schemas")
-        }
 
         let faults: Vec<(&str, AssignmentBlob, fn(SchemaId) -> bool, Vec<&str>)> = vec![
             (
@@ -419,7 +414,6 @@ mod worker_assignment {
             ),
             (
                 "roster table that is not a file name",
-                // Sorted, as the builder requires: '.' precedes 'b'.
                 worker(document(peer_id, BASE_URL, &["../escape", "blocks"], None)),
                 all_schemas_available,
                 vec!["../escape", "not a file name"],

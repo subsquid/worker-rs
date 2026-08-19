@@ -652,15 +652,12 @@ mod tests {
         assert!(f.worker.query_schemas().get_by_id(SchemaId::new(7)).is_ok());
     }
 
-    /// An unusable pair is a verdict on its bytes, not on the network (FM-12): a document that
-    /// fails verification, a roster the reader panics on (contained where it happens rather than
-    /// forwarded to the subsystem tree), a roster that does not list us (FM-54's steady state), or
-    /// — past the hash check, the bundle half of the same rule — a bundle with nothing to load. Each
-    /// is refused once, counted (OB-18) and left alone until a different pair is announced, rather
-    /// than fetched again every retry period: no attempt at the same pair can end differently.
+    /// An unusable pair is a verdict on its bytes (FM-12) — refused once, counted (OB-18), and
+    /// left alone until a different pair is announced.
     #[tokio::test]
     async fn an_unusable_pair_is_refused_once_and_only_a_different_pair_moves_things() {
         type Document = fn(PeerId) -> Vec<u8>;
+        let empty_bundle = || Some(targz(&[("readme.txt", b"no schemas here")]));
         let cases: [(&str, Document, Option<Vec<u8>>); 4] = [
             (
                 "document that will not decode",
@@ -684,7 +681,7 @@ mod tests {
             (
                 "bundle with nothing to load",
                 |peer| gzip(&worker_assignment(peer)),
-                Some(targz(&[("readme.txt", b"no schemas here")])),
+                empty_bundle(),
             ),
         ];
 
@@ -701,10 +698,15 @@ mod tests {
             let mine = f
                 .stub
                 .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+            let faulty = if bad_bundle.is_some() {
+                "/bundle-bad.tar.gz"
+            } else {
+                "/bad.fb.gz"
+            };
             let bad = update(
                 "a1",
                 bad_document,
-                bad_bundle.clone().unwrap_or_else(|| good_bundle.clone()),
+                bad_bundle.unwrap_or_else(|| good_bundle.clone()),
             );
             let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
 
@@ -712,7 +714,7 @@ mod tests {
             assert!(f.worker.registered_assignment_id().is_none(), "{case}");
             assert!(
                 crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
-                "{case}: a pair the worker cannot use is what OB-18 counts, whichever half is at fault"
+                "{case}"
             );
 
             let (token, running) = run_loop(&f.applier, vec![bad, update("a2", mine, good_bundle)]);
@@ -720,21 +722,16 @@ mod tests {
             token.cancel();
             running.await.unwrap();
 
-            let faulty = if bad_bundle.is_some() {
-                "/bundle-bad.tar.gz"
-            } else {
-                "/bad.fb.gz"
-            };
             assert_eq!(
                 f.stub.hits(faulty),
                 2,
-                "{case}: one direct attempt above and one in the loop; no retry in between"
+                "{case}: once directly, once in the loop, no retry"
             );
-            if bad_bundle.is_some() {
+            if faulty != "/bad.fb.gz" {
                 assert_eq!(
                     f.stub.hits("/bad.fb.gz"),
                     0,
-                    "{case}: the bundle is prepared first, so a refused one never costs a document fetch"
+                    "{case}: the bundle is prepared first"
                 );
             }
         }
@@ -766,77 +763,61 @@ mod tests {
         );
     }
 
-    /// The network failing is not the pair's fault: a document or bundle that does not download,
-    /// or a bundle whose activation fails, is backed off and asked for again — and nothing of the
-    /// failed attempt is left behind: no assignment registered, no bundle installed.
+    /// The network failing is not the pair's fault: it is backed off and asked again, and nothing
+    /// of the failed attempt is left behind.
     #[tokio::test]
     async fn a_transient_failure_leaves_no_partial_state_and_is_retried() {
-        // document fails once
-        {
-            let f = fixture().await;
-            let bundle = bundle(&f.stub);
-            let document = f
-                .stub
-                .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 1);
-            let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
-            await_registered(&f.worker, "a1").await;
-            token.cancel();
-            running.await.unwrap();
-            assert_eq!(
-                f.stub.hits("/a1.fb.gz"),
-                2,
-                "document: back off and ask again"
-            );
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Fails {
+            Document,
+            Bundle,
+            Activation,
         }
-        // bundle fails once
-        {
+
+        for fails in [Fails::Document, Fails::Bundle, Fails::Activation] {
             let f = fixture().await;
             let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
             let bundle = (
                 BundleHash::of(&archive),
-                f.stub.serve("/bundle-retry.tar.gz", archive, 1),
+                f.stub
+                    .serve("/bundle.tar.gz", archive, (fails == Fails::Bundle) as usize),
             );
-            let document = f
-                .stub
-                .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-            let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
-            await_registered(&f.worker, "a1").await;
-            token.cancel();
-            running.await.unwrap();
-            assert_eq!(
-                f.stub.hits("/bundle-retry.tar.gz"),
-                2,
-                "bundle: observing a bundle hash must not consume a transiently failed pair"
+            let document = f.stub.serve(
+                "/a1.fb.gz",
+                gzip(&worker_assignment(f.peer_id)),
+                (fails == Fails::Document) as usize,
             );
-        }
-        // bundle activation fails once
-        {
-            let f = fixture().await;
-            let bundle = bundle(&f.stub);
-            let document = f
-                .stub
-                .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-            f.schema_manager.fail_next_install();
             let update = update("a1", document, bundle);
-
-            assert_eq!(f.applier.apply(&update).await, ApplyOutcome::Failed);
-            assert!(f.worker.registered_assignment_id().is_none());
-            assert!(f.schema_manager.installed_hash().is_none());
+            if fails == Fails::Activation {
+                f.schema_manager.fail_next_install();
+                assert_eq!(f.applier.apply(&update).await, ApplyOutcome::Failed);
+                assert!(f.worker.registered_assignment_id().is_none());
+                assert!(f.schema_manager.installed_hash().is_none());
+            }
 
             let (token, running) = run_loop(&f.applier, vec![update]);
             await_registered(&f.worker, "a1").await;
             token.cancel();
             running.await.unwrap();
-            assert_eq!(f.stub.hits("/a1.fb.gz"), 2);
-            assert_eq!(f.stub.hits("/bundle.tar.gz"), 2);
+
+            let retried: &[&str] = match fails {
+                Fails::Document => &["/a1.fb.gz"],
+                Fails::Bundle => &["/bundle.tar.gz"],
+                Fails::Activation => &["/a1.fb.gz", "/bundle.tar.gz"],
+            };
+            for path in retried {
+                assert_eq!(
+                    f.stub.hits(path),
+                    2,
+                    "{fails:?}: back off and ask again for {path}"
+                );
+            }
         }
     }
 
-    /// A pair that will not download is left behind by the next announcement rather than retried
-    /// behind its backoff: a usable copy of the same pair at another location, a corrected url
-    /// (a location is not identity, so the pair is unchanged — and without the stream saying the
-    /// location moved, an expired or mistyped url would be retried forever), or a newer
-    /// assignment, which is absolute.
+    /// A pair that will not download is left behind by the next announcement — a usable copy at
+    /// another location, a corrected url, or a newer assignment — rather than retried behind its
+    /// backoff.
     #[tokio::test]
     async fn a_failing_pair_is_superseded_by_the_next_announcement() {
         struct Case {
@@ -995,10 +976,9 @@ mod tests {
             .map(|u| (u.id.as_str(), u.fb_url_v1.as_str()))
     }
 
-    /// The queue holds one announcement: the newest (the pairs the network moved past are never
-    /// started), at its latest location. An announcement of a pair with nothing outstanding — the
-    /// pair in force, or the refused one — is the network's latest word too: whatever was waiting
-    /// behind it is no longer published, so it goes, and nothing is fetched for any of it.
+    /// The queue holds one announcement — the newest, at its latest location — and an announcement
+    /// of a pair with nothing outstanding (in force, or refused) empties it: whatever waited behind
+    /// that pair is no longer published.
     #[tokio::test]
     async fn the_queue_holds_the_newest_outstanding_announcement() {
         let f = fixture().await;
@@ -1010,16 +990,11 @@ mod tests {
         for n in 1..=3 {
             intake.absorb(at(&n.to_string(), &format!("/{n}.fb.gz")), &nothing_applied);
         }
-        assert_eq!(
-            waiting(&intake).map(|(id, _)| id),
-            Some("3"),
-            "the pairs the network moved past are never started"
-        );
+        assert_eq!(waiting(&intake).map(|(id, _)| id), Some("3"));
         intake.absorb(at("3", "/3-moved.fb.gz"), &nothing_applied);
         assert_eq!(
             waiting(&intake),
-            Some(("3", f.stub.url("/3-moved.fb.gz").as_str())),
-            "a waiting pair announced again takes the latest location"
+            Some(("3", f.stub.url("/3-moved.fb.gz").as_str()))
         );
 
         let x = f
@@ -1033,10 +1008,7 @@ mod tests {
         let mut intake = Intake::new(Duration::from_secs(1));
         intake.pending = Some(at("y", "/y.fb.gz"));
         intake.absorb(at("x", "/x-moved.fb.gz"), &applied);
-        assert!(
-            intake.pending.is_none(),
-            "y was waiting behind x; the network is back on x"
-        );
+        assert!(intake.pending.is_none(), "the network is back on x");
 
         intake.refused = Some(NetworkPair {
             assignment_id: Some("r".to_owned()),
@@ -1046,13 +1018,9 @@ mod tests {
         intake.absorb(at("r", "/r-moved.fb.gz"), &applied);
         assert!(
             intake.pending.is_none(),
-            "y was waiting behind the refused r; the network is back on r"
+            "the network is back on the refused r"
         );
-        assert_eq!(
-            f.stub.hits("/x-moved.fb.gz"),
-            0,
-            "nothing was fetched for any of it"
-        );
+        assert_eq!(f.stub.hits("/x-moved.fb.gz"), 0, "nothing was fetched");
     }
 
     /// Strict in-order application: a pair that is settling is never interrupted by what the

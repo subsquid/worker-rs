@@ -389,11 +389,8 @@ mod tests {
         }
     }
 
-    /// One id at two versions, which only the subtree tells apart — in one tree they could not
-    /// coexist at all, since they would be the same directory. A directory whose name does not
-    /// spell a version one way is not a subtree the worker reads, so its chunks stay invisible
-    /// rather than being adopted at a guessed version; `_v0` too, since version 0 lives at the
-    /// root. A top dir is ten digits, which the `_` rules out however the version is written.
+    /// Each version subtree is read with its version; a subtree whose name does not spell a version
+    /// one way (`_v0` too — version 0 is the root) holds nothing the worker adopts.
     #[tokio::test]
     async fn only_a_version_dir_spelled_one_way_is_read_with_its_version() {
         let dir = tempfile::tempdir().unwrap();
@@ -414,7 +411,7 @@ mod tests {
                 .map(|(version, chunk)| (*version, chunk.id.as_str()))
                 .collect::<Vec<_>>(),
             [(0, id), (3, id)],
-            "the version comes from the subtree, the id from the chunk dir; misspelt subtrees hold nothing"
+            "the version comes from the subtree, the id from the chunk dir"
         );
     }
 

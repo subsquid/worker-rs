@@ -965,125 +965,105 @@ mod tests {
         assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
     }
 
-    /// Which staging faults another attempt could end differently, and which could not. The hash
-    /// names the content, so the hash check is the dividing line: up to it — a url that does not
-    /// serve, bytes that do not match the hash (the signature of a stale or wrong url, the one
-    /// fault a corrected location is guaranteed to fix; a refusal is keyed on the pair and would
-    /// drop exactly that correction) — the fault is transient. Past it the bytes are the ones the
-    /// network vouched for: no `<id>.yaml` entry, a schema that will not parse, or an id
-    /// republished with different contents than the store holds — whether it was installed by a
-    /// bundle or adopted from disk — are verdicts on the pair, and asking again would only burn
-    /// the download every retry period. Whatever the fault, nothing is installed, the store is
-    /// as it was, and no staging directory survives the attempt that made it.
+    /// The hash check divides staging faults: before it another attempt, or a corrected location,
+    /// can end differently; past it the bytes are the ones the network vouched for, so the fault is
+    /// a verdict on the pair. Either way nothing is installed, the store is as it was, and no
+    /// staging directory survives the attempt.
     #[tokio::test]
     async fn staging_faults_split_into_transient_and_permanent() {
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, Debug)]
         enum Seed {
             Nothing,
             Installed,
             OnDisk,
         }
+        #[derive(Clone, Copy, Debug)]
+        enum Fault {
+            Unreachable,
+            HashMismatch,
+            NoEntries,
+            Unparseable,
+            Republished,
+        }
+        use {Fault::*, Seed::*};
+
         let client = reqwest::Client::new();
-        let changed = || {
-            targz(&[(
-                "7.yaml",
-                SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
-            )])
-        };
-        let cases: [(&str, Seed, bool, &str); 6] = [
+        let cases = [
+            (Unreachable, Nothing, false, "couldn't download"),
+            (HashMismatch, Nothing, false, "hash mismatch"),
+            (NoEntries, Nothing, true, "no <id>.yaml entries"),
+            (Unparseable, Nothing, true, "couldn't load"),
             (
-                "url that does not serve",
-                Seed::Nothing,
-                false,
-                "couldn't download",
-            ),
-            (
-                "bytes that do not match the hash",
-                Seed::Nothing,
-                false,
-                "hash mismatch",
-            ),
-            (
-                "no <id>.yaml entries",
-                Seed::Nothing,
-                true,
-                "no <id>.yaml entries",
-            ),
-            (
-                "schema that will not parse",
-                Seed::Nothing,
-                true,
-                "couldn't load",
-            ),
-            (
-                "id republished against an installed schema",
-                Seed::Installed,
+                Republished,
+                Installed,
                 true,
                 "republished with different contents",
             ),
             (
-                "id republished against a schema adopted from disk",
-                Seed::OnDisk,
+                Republished,
+                OnDisk,
                 true,
                 "republished with different contents",
             ),
         ];
 
-        for (case, seed, permanent, fragment) in cases {
+        for (fault, seed, permanent, fragment) in cases {
             let dir = tempfile::tempdir().unwrap();
-            if let Seed::OnDisk = seed {
+            if let OnDisk = seed {
                 std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
             }
             let store = store(&dir);
-            let mut installed = None;
-            if let Seed::Installed = seed {
-                let original = served_bundle(targz(&[("7.yaml", SCHEMA.as_bytes())])).await;
-                store.ensure(&original, &client).await.unwrap();
-                installed = Some(original.hash);
-            }
-            let bundle = match case {
-                "url that does not serve" => SchemaBundle {
+            let installed = match seed {
+                Installed => {
+                    let original = served_bundle(targz(&[("7.yaml", SCHEMA.as_bytes())])).await;
+                    store.ensure(&original, &client).await.unwrap();
+                    Some(original.hash)
+                }
+                Nothing | OnDisk => None,
+            };
+            let bundle = match fault {
+                Unreachable => SchemaBundle {
                     hash: BundleHash::of(b"whatever"),
                     url: TestServer::start().await.url("/never-served.tar.gz"),
                 },
-                "bytes that do not match the hash" => SchemaBundle {
+                HashMismatch => SchemaBundle {
                     hash: BundleHash::of(b"something else"),
                     url: TestServer::serve_once(targz(&[("7.yaml", SCHEMA.as_bytes())])).await,
                 },
-                "no <id>.yaml entries" => {
-                    served_bundle(targz(&[("readme.txt", b"no schemas here")])).await
-                }
-                "schema that will not parse" => {
+                NoEntries => served_bundle(targz(&[("readme.txt", b"no schemas here")])).await,
+                Unparseable => {
                     served_bundle(targz(&[("7.yaml", b"this is not a dataset description")])).await
                 }
-                _ => served_bundle(changed()).await,
+                Republished => {
+                    let changed = SCHEMA.replace("name: evm", "name: evm2");
+                    served_bundle(targz(&[("7.yaml", changed.as_bytes())])).await
+                }
             };
 
-            let fault = store.prepare_bundle(&bundle, &client).await.unwrap_err();
+            let verdict = store.prepare_bundle(&bundle, &client).await.unwrap_err();
 
-            assert_eq!(fault.is_permanent(), permanent, "{case}: {fault:#}");
-            assert!(format!("{fault:#}").contains(fragment), "{case}: {fault:#}");
-            assert_eq!(
-                store.installed_hash(),
-                installed,
-                "{case}: nothing was installed"
+            assert_eq!(verdict.is_permanent(), permanent, "{fault:?}: {verdict:#}");
+            assert!(
+                format!("{verdict:#}").contains(fragment),
+                "{fault:?}: {verdict:#}"
             );
+            assert_eq!(store.installed_hash(), installed, "{fault:?}/{seed:?}");
             match seed {
-                Seed::Nothing => {
-                    assert!(store.get_by_id(SchemaId::new(7)).is_err(), "{case}");
-                    assert!(stored(&dir).is_empty(), "{case}: {:?}", stored(&dir));
+                Nothing => {
+                    assert!(store.get_by_id(SchemaId::new(7)).is_err(), "{fault:?}");
+                    assert!(stored(&dir).is_empty(), "{fault:?}: {:?}", stored(&dir));
                 }
-                Seed::Installed | Seed::OnDisk => {
+                Installed | OnDisk => {
                     assert_eq!(
                         store.get_by_id(SchemaId::new(7)).unwrap().name,
                         "evm",
-                        "{case}"
+                        "{seed:?}"
                     );
-                    assert_eq!(stored(&dir), vec!["7.yaml"], "{case}");
+                    assert_eq!(stored(&dir), vec!["7.yaml"], "{seed:?}");
                     assert_eq!(
                         std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
                         SCHEMA,
-                        "{case}: the store is as it was"
+                        "{seed:?}: the store is as it was"
                     );
                 }
             }
@@ -1091,7 +1071,7 @@ mod tests {
                 stored_all(&dir)
                     .iter()
                     .all(|name| !name.starts_with(TEMP_PREFIX)),
-                "{case}: a staged bundle must not survive the attempt that made it: {:?}",
+                "{fault:?}: staging left behind: {:?}",
                 stored_all(&dir)
             );
         }
@@ -1127,8 +1107,7 @@ mod tests {
         assert_eq!(stored(&dir), vec!["7.yaml"]);
     }
 
-    /// Adopted schemas answer queries but belong to no bundle this process merged, so they admit
-    /// no assignment on their own (ADR-21) and say nothing about the legacy type registry.
+    /// Adopted schemas answer queries but belong to no bundle this process merged (ADR-21).
     #[tokio::test]
     async fn a_restart_adopts_stored_schemas_without_a_bundle_or_legacy_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1144,24 +1123,16 @@ mod tests {
         let store = store(&dir);
 
         assert_eq!(store.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
-        assert_eq!(
-            store.installed_hash(),
-            None,
-            "adopted schemas belong to no bundle this process merged"
-        );
-        assert!(
-            store.bundle_ids().is_empty(),
-            "so they cannot admit an assignment on their own (ADR-21)"
-        );
+        assert_eq!(store.installed_hash(), None);
+        assert!(store.bundle_ids().is_empty(), "so they admit no assignment");
         assert!(
             matches!(store.get_by_type("evm"), Err(QueryError::Other(_))),
-            "and they fill no type index"
+            "and fill no type index"
         );
     }
 
-    /// A stored file that will not read is removed at startup rather than skipped: in place it
-    /// would read as a republished id and refuse every bundle carrying it, so its id could never
-    /// be reinstalled. Its readable neighbours are adopted regardless.
+    /// A stored file that will not read is removed at startup — in place it would read as a
+    /// republished id and refuse every bundle carrying it — and its readable neighbours are adopted.
     #[tokio::test]
     async fn a_bundle_reinstalls_a_schema_the_store_could_not_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -1169,26 +1140,18 @@ mod tests {
         std::fs::write(dir.path().join("12.yaml"), SCHEMA).unwrap();
         let store = store(&dir);
 
-        assert!(
-            store.get_by_id(SchemaId::new(12)).is_ok(),
-            "the readable neighbour is adopted"
-        );
+        assert!(store.get_by_id(SchemaId::new(12)).is_ok());
         assert!(store.get_by_id(SchemaId::new(7)).is_err());
         assert_eq!(stored(&dir), vec!["12.yaml"], "the unreadable one is gone");
 
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
-        let bundle = served_bundle(archive).await;
         store
-            .ensure(&bundle, &reqwest::Client::new())
+            .ensure(&served_bundle(archive).await, &reqwest::Client::new())
             .await
             .unwrap();
 
         assert_eq!(store.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
-        assert_eq!(
-            store.get_by_id(SchemaId::new(9)).unwrap().name,
-            "evm",
-            "and the rest of the bundle no longer goes down with it"
-        );
+        assert_eq!(store.get_by_id(SchemaId::new(9)).unwrap().name, "evm");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
             SCHEMA

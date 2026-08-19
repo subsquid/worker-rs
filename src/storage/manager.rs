@@ -653,8 +653,7 @@ mod tests {
         );
     }
 
-    /// A rewrite lands beside the ingested copy, not over it, and a restart recovers each copy
-    /// at the version its path spells: the paths the manager writes are the paths it reads back.
+    /// A rewrite lands beside the ingested copy, and a restart reads back what the manager writes.
     #[tokio::test]
     async fn a_restart_recovers_each_chunk_at_the_version_it_is_stored_under() {
         use std::sync::Arc;

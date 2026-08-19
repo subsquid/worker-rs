@@ -281,8 +281,7 @@ mod tests {
     const BOTH_POINTERS: &str = r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123},"worker_assignment":{"id":"worker","fb_url_v1":"https://example.test/worker.fb.gz","effective_from":123}}"#;
     const LEGACY_ONLY: &str = r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123}}"#;
     const WORKER_ONLY: &str = r#"{"network":"testnet","worker_assignment":{"id":"worker","fb_url_v1":"https://example.test/worker.fb.gz","effective_from":123}}"#;
-    /// The pointers a mode does not read may take any shape — the state is still readable, and
-    /// the mode's own pointer is judged on its own (IB-40, IB-40b).
+    /// The pointers a mode does not read may take any shape (IB-40, IB-40b).
     const ODD_SHAPES_BESIDE_LEGACY: &str = r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123},"worker_assignment":"not an object","schema_bundle":{"url":"no hash here"},"portal_assignment":42}"#;
 
     #[test]
@@ -342,11 +341,20 @@ mod tests {
     }
 
     /// Either half moving re-announces the pair, and so does a change of location under an
-    /// unchanged pair: a location is not identity, but a corrected url is the only thing that can
-    /// rescue a fetch that keeps failing, and only the applier knows whether one is outstanding.
-    /// An unchanged poll announces nothing — whether the pair applied is the consumer's business.
+    /// unchanged pair — only the applier knows whether a fetch is still outstanding for it. An
+    /// unchanged poll announces nothing.
     #[tokio::test]
     async fn poll_announces_each_change_of_pair_or_location_once() {
+        async fn poll(
+            url: &str,
+            client: &reqwest::Client,
+            announced: &mut Option<AssignmentUpdate>,
+        ) -> Option<AssignmentUpdate> {
+            poll_network_state(url, client, AssignmentSource::Worker, announced)
+                .await
+                .unwrap()
+        }
+
         let a1b1 = worker_state_json("assignment-1", hash(0xaa));
         let a2b1 = worker_state_json("assignment-2", hash(0xaa));
         let a2b2 = worker_state_json("assignment-2", hash(0xbb));
@@ -362,74 +370,52 @@ mod tests {
         ])
         .await;
         let client = test_client();
-        let source = AssignmentSource::Worker;
-        let mut announced: Option<AssignmentUpdate> = None;
+        let mut announced = None;
 
-        let update = poll_network_state(&url, &client, source, &mut announced)
-            .await
-            .unwrap()
-            .expect("the first pair");
+        let update = poll(&url, &client, &mut announced).await.unwrap();
         assert_eq!(update.id, "assignment-1");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
-        let update = poll_network_state(&url, &client, source, &mut announced)
-            .await
-            .unwrap()
-            .expect("the assignment moved");
-        assert_eq!(update.id, "assignment-2");
+        let update = poll(&url, &client, &mut announced).await.unwrap();
+        assert_eq!(update.id, "assignment-2", "the assignment moved");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
         assert!(
-            poll_network_state(&url, &client, source, &mut announced)
-                .await
-                .unwrap()
-                .is_none(),
+            poll(&url, &client, &mut announced).await.is_none(),
             "neither half moved"
         );
 
-        let update = poll_network_state(&url, &client, source, &mut announced)
-            .await
-            .unwrap()
-            .expect("the bundle moved");
+        let update = poll(&url, &client, &mut announced).await.unwrap();
         assert_eq!(
             update.id, "assignment-2",
             "a bundle change re-offers its assignment"
         );
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xbb));
 
-        let update = poll_network_state(&url, &client, source, &mut announced)
-            .await
-            .unwrap()
-            .expect("the pair is unchanged, but where to fetch it is not");
-        assert_eq!(update.id, "assignment-2");
-        assert_eq!(update.fb_url_v1, "http://example.com/moved.fb.gz");
+        let update = poll(&url, &client, &mut announced).await.unwrap();
+        assert_eq!(
+            update.fb_url_v1, "http://example.com/moved.fb.gz",
+            "the same pair, moved"
+        );
 
         assert!(
-            poll_network_state(&url, &client, source, &mut announced)
-                .await
-                .unwrap()
-                .is_none(),
+            poll(&url, &client, &mut announced).await.is_none(),
             "nothing moved this time"
         );
     }
 
-    #[derive(Clone, Copy)]
-    enum Counted {
-        Nothing,
-        Mismatch,
-        Refused,
-    }
-
-    /// A state that reads but is not applicable — half a pair, a pointer or bundle reference the
-    /// worker cannot use, no assignment for the mode — is a non-event: it waits at the poll
-    /// cadence rather than erroring onto the fetch-retry ladder (which doubles to
-    /// `assignment_fetch_max_delay` — hours of not noticing a scheduler that has already fixed
-    /// the state), counts the fault if it is the scheduler's to resolve, and leaves `announced`
-    /// untouched so a corrected pair is offered whole. Only a body that is not a JSON object is a
-    /// failure to read the state. Check order is pinned by the third row: no assignment for the
-    /// mode is a wait whatever the bundle says.
+    /// A state that reads but is not applicable waits at the poll cadence rather than erroring
+    /// onto the fetch-retry ladder, counts the fault if it is the scheduler's to resolve, and
+    /// leaves `announced` untouched so a corrected pair is offered whole. Only a body that is not a
+    /// JSON object is a failure to read the state.
     #[tokio::test]
     async fn a_state_that_is_not_applicable_waits_without_touching_announced() {
+        #[derive(Clone, Copy)]
+        enum Counted {
+            Nothing,
+            Mismatch,
+            Refused,
+        }
         let remembered = || Some(announced_update("assignment-1", hash(0xaa)));
         let bare_hex = "aa".repeat(32);
         let cases: Vec<(&str, Vec<u8>, AssignmentSource, Option<AssignmentUpdate>, Counted)> = vec![
@@ -485,26 +471,25 @@ mod tests {
 
             let update = poll_network_state(&url, &test_client(), mode, &mut announced)
                 .await
-                .unwrap_or_else(|e| panic!("{case}: not applicable is not a read failure: {e:#}"));
+                .unwrap_or_else(|e| panic!("{case}: not a read failure: {e:#}"));
 
-            assert!(update.is_none(), "{case}: nothing to apply");
-            // `>`, not `+ 1`: the counters are process-global and other tests in this binary move them.
+            assert!(update.is_none(), "{case}");
+            // `>`, not `+ 1`: the counters are process-global.
             match counted {
-                Counted::Mismatch => assert!(
-                    metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches,
-                    "{case}: the scheduler is who resolves it, so it counts with the other pair faults"
-                ),
-                Counted::Refused => assert!(
-                    metrics::ASSIGNMENTS_REFUSED.get() > refused,
-                    "{case}: an assignment the worker cannot use is what OB-18 counts"
-                ),
+                Counted::Mismatch => {
+                    assert!(
+                        metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches,
+                        "{case}"
+                    )
+                }
+                Counted::Refused => assert!(metrics::ASSIGNMENTS_REFUSED.get() > refused, "{case}"),
                 Counted::Nothing => {}
             }
             assert_eq!(announced, before, "{case}: nothing was announced");
         }
 
         let url = TestServer::serve_once(b"[]".to_vec()).await;
-        let mut announced: Option<AssignmentUpdate> = None;
+        let mut announced = None;
         let outcome = poll_network_state(
             &url,
             &test_client(),
@@ -512,10 +497,7 @@ mod tests {
             &mut announced,
         )
         .await;
-        assert!(
-            outcome.is_err(),
-            "a body that is not a JSON object is not a network state at all"
-        );
+        assert!(outcome.is_err(), "not a network state at all");
         assert_eq!(announced, None);
     }
 
