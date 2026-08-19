@@ -54,9 +54,7 @@ jobs:
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
       # Unit tier only — building the conformance binaries here too would double the
-      # heaviest link work for no extra coverage. `state_pbt`/`state_regression` are unit
-      # tier in everything but the file they live in (no harness, no I/O), and until now
-      # no job ran them at all.
+      # heaviest link work for no extra coverage.
       - name: Run tests
         run: cargo test --all-features --lib --bins --test state_pbt --test state_regression
 
@@ -71,10 +69,7 @@ jobs:
       fail-fast: false
       matrix:
         # The image ships default features (Dockerfile), so that is the configuration under
-        # test. The second config is a standing guard rather than a claim about today:
-        # `--all-features` currently only raises a dependency's tracing level and runs the
-        # same code. Keeping the row means the next feature is covered the day it lands,
-        # instead of depending on whoever adds it remembering this file.
+        # test.
         include:
           - config: default
             features: ""
