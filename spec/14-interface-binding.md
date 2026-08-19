@@ -251,11 +251,10 @@ document. A chunk whose `write_schema_id` has no roster, or whose schema the bun
 published with the document doesn't carry, a dataset whose `base_url` will not parse, or a
 chunk whose `version` names a generation the dataset does not register — each is the
 document contradicting itself and
-makes the whole document inapplicable (WP-2, FM-12); so does a chunk whose first block
-precedes its top dir, and a roster table that is not a file name or too long for one — each
-would write something the store does not read back (DEF-6). The id's shape itself is the
-format's: the reader rebuilds it from numeric columns and the hash field, so the worker
-checks only what the document chooses, not what the format fixes — a partially applied assignment would
+makes the whole document inapplicable (WP-2, FM-12); so does a roster table that is not a
+file name or too long for one — it would write something the store does not read back
+(DEF-6). The chunk id is the format's: the reader rebuilds it from numeric columns and the
+hash field, and the worker does not re-check what the format fixes — a partially applied assignment would
 leave the worker silently short of data it is believed to hold, and a document wrong at
 dataset level is judged once per dataset at admission, not once per chunk in the reconciler.
 

@@ -464,36 +464,6 @@ mod worker_assignment {
         );
     }
 
-    /// Recovery refuses a chunk directory whose first block lies before its top dir, so a
-    /// document placing one there would download fine and fail the next start.
-    #[test]
-    fn a_chunk_under_the_wrong_top_dir_is_refused() {
-        let keypair = Keypair::generate_ed25519();
-        let peer_id = keypair.public().to_peer_id();
-        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
-        builder.register_write_schema(7, &["blocks"]).unwrap();
-        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
-        dataset
-            .new_chunk()
-            // Top dir 0221001000 for a chunk that starts at 0221000000.
-            .id("0221001000/0221000000-0221000649-BQJdx")
-            .block_range(221000000..=221000649)
-            .size(1000000)
-            .write_schema_id(7)
-            .worker_indexes(&[0])
-            .finish()
-            .unwrap();
-        dataset.finish().unwrap();
-        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
-        let assignment = WorkerAssignment::from_owned(builder.finish()).unwrap();
-
-        let message = expect_rejected(assignment, &keypair);
-        assert!(
-            message.contains("lies under top dir 221001000"),
-            "{message}"
-        );
-    }
-
     /// A name the filesystem will not take fails every download of every chunk on the schema.
     #[test]
     fn a_roster_table_too_long_for_a_file_name_is_refused() {

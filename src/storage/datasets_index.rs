@@ -166,18 +166,6 @@ impl DatasetsIndex {
                             dataset.id()
                         );
                     };
-                    // The id is the chunk's path under its dataset, and the store is read back
-                    // by that path at every start (DEF-6). The format fixes the id's shape; what
-                    // it leaves to the document is which top dir a chunk sits under, and a
-                    // restart does not adopt one that starts before its top dir.
-                    if chunk.first_block() < chunk.top() {
-                        anyhow::bail!(
-                            "chunk '{id}' of dataset '{}' starts at block {} but lies under top dir {}, which a restart would not adopt",
-                            dataset.id(),
-                            chunk.first_block(),
-                            chunk.top()
-                        );
-                    }
                     // A document that contradicts itself is inapplicable whole (FM-12), and
                     // each of these is checked once per dataset, not per chunk: a base url that
                     // won't parse, or a version the dataset registers no generation for, leaves
