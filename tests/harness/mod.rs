@@ -53,7 +53,8 @@ use stub::HttpStub;
 pub const UNCOVERED: &[&str] = &[
     "libp2p transport: IB-1/2 message limits, stream timeouts, the P-EVENT-QUEUE drop path",
     "P2PController intake: P-Q-QUEUE capacity (RP-1 step 4), reject fan-out (ADR-9); the \
-     assignment loop's retry and supersede decisions are unit-tested, not driven from here",
+     assignment loop's retry, coalescing and settle-wait decisions are unit-tested, not driven \
+     from here",
     "HC-4 reference model, HC-6 metric scraper, HC-7 kill/restart, HC-9/10 load and benchmarks",
 ];
 

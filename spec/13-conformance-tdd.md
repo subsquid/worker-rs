@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-18**
-(baseline commit `f86047c`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-19**
+(baseline commit `7b588ee`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -121,7 +121,7 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-08-18)
+## Traceability matrix (as of 2026-08-19)
 
 Statuses reflect the actual test inventory: inline unit tests, all built unconditionally;
 `state_pbt` / `state_regression` over the chunk state machine and assignment
@@ -204,7 +204,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | LIV-14 | CT-7 | U⊘ | log-store reclamation broken (GAP-10) |
 | FM-1 | CT-4/9 | U⊘ | known-violated (GAP-2) |
 | FM-2..3 | CT-4 | U | |
-| FM-10 | CT-4 | P | the retry itself is unmeasured, but a corrected fetch location under an unchanged pair reaching a stalled retry is asserted at both ends — the poll announces the move, the applier replaces the queued copy — a location moving under an applied pair re-fetches nothing, and the network going back to the pair in force retracts a failing or queued pair, which is neither retried nor applied later (asserted mid-retry in legacy mode, where nothing waits on a settle, and at the queue directly) |
+| FM-10 | CT-4 | P | the retry itself is unmeasured, but a corrected fetch location under an unchanged pair reaching a stalled retry is asserted at both ends — the poll announces the move, the applier replaces the waiting copy — a location moving under an applied pair re-fetches nothing, the network going back to the pair in force retracts a failing or waiting pair, which is neither retried nor applied later (asserted mid-retry in legacy mode, where nothing waits on a settle, and at the queue directly), and only the newest arrival waits while a pair settles, which it does not interrupt (WP-4, unit-tested against a settle that never ends) |
 | FM-11 | CT-4 | P | the per-chunk give-up exists in the reconciler but no corpus input reaches it: every dataset-level address fault is refused at admission (FM-12), and a per-file address that will not build is not something the builder can emit. What is driven end to end is the retriable neighbour — a chunk the origin will not serve exhausts its budget, the assignment stalls, and the next assignment naming the same slice restores the budget and fetches it (WP-13); a unit test pins that registering an unchanged slice wakes the reconciler. The credential half is FM-12's whole-document path, since neither format carries credentials per chunk |
 | FM-12 | CT-4 | P⊘ | a document that cannot be read is refused rather than fatal, asserted at the applier with a corrupted roster, and one that fails verification is refused rather than retried — fetched once, then only a different pair moves things; a dataset base url that will not parse is refused whole, end to end in both formats and at the seam (legacy too), and a version with no generation entry at the seam (the builder cannot emit it; the column is corrupted after the fact); a roster naming a table that is not a file name is refused too, so a document cannot write a chunk's data outside its directory and still commit the chunk; unit-tested at the poll: a pointer that will not decode or names no fetch url is refused and waits at the poll cadence, a pointer the mode does not read may take any shape, and only a body that is not a JSON object is a read failure; oversize intake is still unbounded (GAP-4) |
 | FM-13 | CT-4 | U⊘ | no floor (GAP-3) |
@@ -233,7 +233,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-08-18)
+## Gap register (as of 2026-08-19)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.

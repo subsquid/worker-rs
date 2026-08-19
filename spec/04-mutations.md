@@ -53,8 +53,10 @@ completes ahead of a bulk backfill. Within a dataset, order is unspecified (02
 §explicitly-unspecified).
 
 **WP-4 — Single applier.** [MUST] At most one assignment application executes at a time;
-an application in progress is never interrupted by a newer arrival (ADR-16). Arrivals
-queue; the queue MAY coalesce to the newest.
+an application in progress is never interrupted by a newer arrival (ADR-16), however many
+arrive: under `--assignment-source worker` it runs to its verdict — applied or stalled —
+first. Arrivals coalesce to the newest, so a pair the network has moved past is never
+started; a stalled application yields to the newest at once.
 
 ## Transition catalog
 

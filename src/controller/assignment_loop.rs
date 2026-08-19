@@ -1,6 +1,5 @@
 //! Applies assignments announced by [`super::assignments`].
 
-use std::collections::VecDeque;
 use std::mem;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -19,8 +18,6 @@ use crate::cli::AssignmentSource;
 use crate::metrics;
 use crate::storage::datasets_index::DatasetsIndex;
 use crate::storage::manager::AssignmentOutcome;
-
-const MAX_PENDING_ASSIGNMENTS: usize = 5;
 
 /// The stream re-announces a pair only when its location moves, so retries cannot wait longer
 /// than the poll period without idling past whatever the network last published.
@@ -80,11 +77,11 @@ impl AssignmentApplier {
 
         loop {
             let event = match &intake.in_flight {
-                InFlight::Idle => match intake.pending.pop_front() {
+                InFlight::Idle => match intake.pending.take() {
                     Some(update) => Event::Apply(update),
                     None => announcement(&mut updates, &cancellation_token).await,
                 },
-                InFlight::Stalled(_) if !intake.pending.is_empty() => Event::SkipStalled,
+                InFlight::Stalled(_) if intake.pending.is_some() => Event::SkipStalled,
                 InFlight::Stalled(_) => announcement(&mut updates, &cancellation_token).await,
                 InFlight::Settling(id) => tokio::select! {
                     update = updates.next() => update.map_or(Event::Stop, Event::Announced),
@@ -103,11 +100,7 @@ impl AssignmentApplier {
                         break;
                     }
                 }
-                Event::Announced(update) => {
-                    if intake.absorb(update, &self.applied_pair()) == Absorbed::Overflowed {
-                        intake.abandon_settling();
-                    }
-                }
+                Event::Announced(update) => intake.absorb(update, &self.applied_pair()),
                 Event::Settled(outcome) => intake.settle(outcome),
                 Event::SkipStalled => intake.skip_stalled(),
             }
@@ -140,7 +133,7 @@ impl AssignmentApplier {
                 {
                     Wait::Retry => {
                         intake.backoff.grow();
-                        intake.pending.push_front(update);
+                        intake.pending = Some(update);
                     }
                     Wait::Superseded => intake.backoff.reset(),
                     Wait::Stop => return ControlFlow::Break(()),
@@ -273,7 +266,7 @@ impl AssignmentApplier {
         updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
         cancellation_token: &CancellationToken,
     ) -> Wait {
-        if !intake.pending.is_empty() {
+        if intake.pending.is_some() {
             return Wait::Superseded;
         }
         tokio::select! {
@@ -367,14 +360,6 @@ enum InFlight {
     Stalled(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Absorbed {
-    Queued,
-    /// The pair has nothing outstanding — applied or refused — so only its location moved.
-    NothingOutstanding,
-    Overflowed,
-}
-
 struct Backoff {
     base: Duration,
     cap: Duration,
@@ -404,10 +389,12 @@ impl Backoff {
     }
 }
 
-/// The loop's bookkeeping: what is queued, what was refused, what is in flight, how long the
-/// next retry waits.
+/// The loop's bookkeeping: the newest pair waiting, what was refused, what is in flight, how
+/// long the next retry waits.
 struct Intake {
-    pending: VecDeque<AssignmentUpdate>,
+    /// Only the newest announcement waits: a pair the network has moved past is never started,
+    /// and the one settling is never interrupted for it (WP-4).
+    pending: Option<AssignmentUpdate>,
     /// The last pair refused; a new location for it changes nothing. One slot, so alternating
     /// bad pairs cost one wasted fetch each.
     refused: Option<NetworkPair>,
@@ -418,67 +405,41 @@ struct Intake {
 impl Intake {
     fn new(retry_cap: Duration) -> Self {
         Self {
-            pending: VecDeque::new(),
+            pending: None,
             refused: None,
             in_flight: InFlight::Idle,
             backoff: Backoff::new(retry_cap),
         }
     }
 
-    /// Queues an update unless nothing is outstanding for its pair. A location only matters
-    /// while a fetch of that identity can still be rescued by it; under a pair already applied
-    /// or refused, acting on one would re-fetch the document on every url rotation. Such an
-    /// announcement is still the network's latest word, though: whatever was queued behind it
-    /// is no longer published, so it is dropped rather than applied later. A pair already queued
-    /// is replaced rather than queued twice, so the queued copy carries the latest locations.
-    fn absorb(&mut self, update: AssignmentUpdate, applied: &NetworkPair) -> Absorbed {
+    /// Keeps an update as the one to apply next unless nothing is outstanding for its pair. A
+    /// location only matters while a fetch of that identity can still be rescued by it; under a
+    /// pair already applied or refused, acting on one would re-fetch the document on every url
+    /// rotation. Such an announcement is still the network's latest word, though: whatever was
+    /// waiting behind it is no longer published, so it is dropped rather than applied later.
+    fn absorb(&mut self, update: AssignmentUpdate, applied: &NetworkPair) {
         let pair = update.pair();
         if pair == *applied || self.refused.as_ref() == Some(&pair) {
-            if self.pending.is_empty() {
+            if let Some(retracted) = self.pending.take() {
+                info!(
+                    assignment_id = %update.id,
+                    retracted = %retracted.id,
+                    "Network is back on a pair with nothing outstanding; dropping what was waiting"
+                );
+            } else {
                 debug!(
                     assignment_id = %update.id,
                     "Nothing outstanding for this pair; its location moved and that is all"
                 );
-            } else {
-                info!(
-                    assignment_id = %update.id,
-                    retracted = self.pending.len(),
-                    "Network is back on a pair with nothing outstanding; dropping what was queued"
-                );
-                self.pending.clear();
             }
-            return Absorbed::NothingOutstanding;
+            return;
         }
-        if let Some(queued) = self
-            .pending
-            .back_mut()
-            .filter(|queued| queued.pair() == pair)
-        {
-            debug!(assignment_id = %update.id, "Already queued; taking the latest locations");
-            *queued = update;
-            return Absorbed::Queued;
+        if let Some(superseded) = self.pending.replace(update) {
+            debug!(
+                assignment_id = %superseded.id,
+                "A newer announcement takes its place in the queue"
+            );
         }
-        self.pending.push_back(update);
-        if self.pending.len() <= MAX_PENDING_ASSIGNMENTS {
-            return Absorbed::Queued;
-        }
-        let skipped = self.keep_latest();
-        warn!(
-            skipped,
-            cap = MAX_PENDING_ASSIGNMENTS,
-            "Skipping pending assignments; the queue exceeded its cap"
-        );
-        Absorbed::Overflowed
-    }
-
-    fn keep_latest(&mut self) -> usize {
-        let Some(latest) = self.pending.pop_back() else {
-            return 0;
-        };
-        let skipped = self.pending.len();
-        self.pending.clear();
-        self.pending.push_back(latest);
-        skipped
     }
 
     fn settle(&mut self, outcome: AssignmentOutcome) {
@@ -495,23 +456,10 @@ impl Intake {
         let InFlight::Stalled(id) = mem::replace(&mut self.in_flight, InFlight::Idle) else {
             return;
         };
-        let skipped = self.keep_latest();
         warn!(
             assignment_id = %id,
-            skipped,
-            "Skipping stalled assignment in favor of the most recent one"
+            "Skipping stalled assignment in favor of the newer one"
         );
-    }
-
-    fn abandon_settling(&mut self) {
-        if let InFlight::Settling(id) = &self.in_flight {
-            warn!(
-                assignment_id = %id,
-                cap = MAX_PENDING_ASSIGNMENTS,
-                "Skipping current assignment; the queue exceeded its cap"
-            );
-            self.in_flight = InFlight::Idle;
-        }
     }
 }
 
@@ -1107,35 +1055,28 @@ mod tests {
         );
 
         let mut intake = Intake::new(Duration::from_millis(40));
-        intake
-            .pending
-            .push_back(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
-        assert_eq!(
-            intake.absorb(
-                update("x", x_moved.clone(), bundle.clone()),
-                &f.applier.applied_pair()
-            ),
-            Absorbed::NothingOutstanding
+        intake.pending = Some(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
+        intake.absorb(
+            update("x", x_moved.clone(), bundle.clone()),
+            &f.applier.applied_pair(),
         );
         assert!(
-            intake.pending.is_empty(),
-            "y was queued behind x; the network is back on x"
+            intake.pending.is_none(),
+            "y was waiting behind x; the network is back on x"
         );
 
         intake.refused = Some(NetworkPair {
             assignment_id: Some("r".to_owned()),
             bundle_hash: Some(bundle.0),
         });
-        intake
-            .pending
-            .push_back(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
+        intake.pending = Some(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
         intake.absorb(
             update("r", f.stub.url("/r-moved.fb.gz"), bundle),
             &f.applier.applied_pair(),
         );
         assert!(
-            intake.pending.is_empty(),
-            "y was queued behind the refused r; the network is back on r"
+            intake.pending.is_none(),
+            "y was waiting behind the refused r; the network is back on r"
         );
         assert_eq!(
             f.stub.hits("/x-moved.fb.gz"),
@@ -1148,59 +1089,83 @@ mod tests {
         legacy_update(id, format!("http://example.test/{id}.fb.gz"))
     }
 
-    fn queued_ids(intake: &Intake) -> Vec<&str> {
-        intake.pending.iter().map(|u| u.id.as_str()).collect()
+    fn waiting(intake: &Intake) -> Option<(&str, &str)> {
+        intake
+            .pending
+            .as_ref()
+            .map(|u| (u.id.as_str(), u.fb_url_v1.as_str()))
     }
 
     #[test]
-    fn pending_assignments_below_threshold_keep_fifo_order() {
+    fn only_the_newest_announcement_waits() {
         let mut intake = Intake::new(Duration::from_secs(1));
         let nothing_applied = NetworkPair::default();
 
-        for n in 1..=MAX_PENDING_ASSIGNMENTS {
-            assert_eq!(
-                intake.absorb(queued(&n.to_string()), &nothing_applied),
-                Absorbed::Queued
-            );
-        }
-
-        assert_eq!(queued_ids(&intake), ["1", "2", "3", "4", "5"]);
-    }
-
-    #[test]
-    fn one_pair_past_the_threshold_keeps_only_the_latest() {
-        let mut intake = Intake::new(Duration::from_secs(1));
-        let nothing_applied = NetworkPair::default();
-        for n in 1..=MAX_PENDING_ASSIGNMENTS {
+        for n in 1..=3 {
             intake.absorb(queued(&n.to_string()), &nothing_applied);
         }
 
         assert_eq!(
-            intake.absorb(queued("6"), &nothing_applied),
-            Absorbed::Overflowed
+            waiting(&intake),
+            Some(("3", "http://example.test/3.fb.gz")),
+            "the pairs the network moved past are never started"
         );
-        assert_eq!(queued_ids(&intake), ["6"]);
     }
 
     #[test]
-    fn a_queued_pair_announced_again_takes_the_latest_locations_in_place() {
+    fn a_waiting_pair_announced_again_takes_the_latest_location() {
         let mut intake = Intake::new(Duration::from_secs(1));
         let nothing_applied = NetworkPair::default();
         intake.absorb(queued("1"), &nothing_applied);
-        intake.absorb(queued("2"), &nothing_applied);
 
-        assert_eq!(
-            intake.absorb(
-                legacy_update("2", "http://example.test/2-moved.fb.gz".to_owned()),
-                &nothing_applied
-            ),
-            Absorbed::Queued
+        intake.absorb(
+            legacy_update("1", "http://example.test/1-moved.fb.gz".to_owned()),
+            &nothing_applied,
         );
 
-        assert_eq!(queued_ids(&intake), ["1", "2"]);
         assert_eq!(
-            intake.pending.back().unwrap().fb_url_v1,
-            "http://example.test/2-moved.fb.gz"
+            waiting(&intake),
+            Some(("1", "http://example.test/1-moved.fb.gz"))
         );
+    }
+
+    /// Strict in-order application: a pair that is settling is never interrupted by what the
+    /// network announces meanwhile, however much of it there is (WP-4). The fixture never settles
+    /// anything, so the applier is known to be waiting for the whole test.
+    #[tokio::test]
+    async fn announcements_piling_up_while_a_pair_settles_do_not_interrupt_it() {
+        let f = fixture().await;
+        let bundle = bundle(&f.stub);
+        let document = gzip(&worker_assignment(f.peer_id));
+        let x = f.stub.serve("/x.fb.gz", document.clone(), 0);
+        let newer: Vec<String> = (1..=7)
+            .map(|n| f.stub.serve(&format!("/y{n}.fb.gz"), document.clone(), 0))
+            .collect();
+
+        let mut updates = vec![update("x", x, bundle.clone())];
+        updates.extend(
+            newer
+                .iter()
+                .enumerate()
+                .map(|(n, url)| update(&format!("y{}", n + 1), url.clone(), bundle.clone())),
+        );
+        let (token, running) = run_loop(&f.applier, updates);
+        await_registered(&f.worker, "x").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        token.cancel();
+        running.await.unwrap();
+
+        assert_eq!(
+            f.worker.registered_assignment_id().as_deref(),
+            Some("x"),
+            "x is still settling; nothing announced since was applied"
+        );
+        for n in 1..=7 {
+            assert_eq!(
+                f.stub.hits(&format!("/y{n}.fb.gz")),
+                0,
+                "y{n} was not fetched"
+            );
+        }
     }
 }

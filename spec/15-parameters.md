@@ -1,6 +1,6 @@
 # 15 — Parameter registry
 
-**Mutable doc #2.** As of: 2026-08-18, baseline `f86047c`. Every `P-*` symbol used
+**Mutable doc #2.** As of: 2026-08-19, baseline `7b588ee`. Every `P-*` symbol used
 anywhere in the suite has a row. **Observed** = what the implementation does today
 (configuration default where operator-settable). **Target** = the intended bound; ⚠ =
 proposed, unratified — ratification lands via the ADR named in the row (ADR-19 for the
