@@ -279,58 +279,33 @@ mod tests {
     }
 
     const BOTH_POINTERS: &str = r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123},"worker_assignment":{"id":"worker","fb_url_v1":"https://example.test/worker.fb.gz","effective_from":123}}"#;
-
-    #[test]
-    fn visible_assignment_uses_legacy_assignment_by_default() {
-        let mut state = published_state(BOTH_POINTERS);
-
-        assert_eq!(
-            pointer_id(state.take_pointer(AssignmentSource::Legacy).0).as_deref(),
-            Some("legacy")
-        );
-    }
-
-    #[test]
-    fn visible_assignment_uses_worker_assignment_when_enabled() {
-        let mut state = published_state(BOTH_POINTERS);
-
-        assert_eq!(
-            pointer_id(state.take_pointer(AssignmentSource::Worker).0).as_deref(),
-            Some("worker")
-        );
-    }
-
-    #[test]
-    fn visible_assignment_never_falls_back_to_the_other_pointer() {
-        let mut legacy_only = published_state(
-            r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123}}"#,
-        );
-        assert!(legacy_only
-            .take_pointer(AssignmentSource::Worker)
-            .0
-            .is_none());
-
-        let mut worker_only = published_state(
-            r#"{"network":"testnet","worker_assignment":{"id":"worker","fb_url_v1":"https://example.test/worker.fb.gz","effective_from":123}}"#,
-        );
-        assert!(worker_only
-            .take_pointer(AssignmentSource::Legacy)
-            .0
-            .is_none());
-    }
-
+    const LEGACY_ONLY: &str = r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123}}"#;
+    const WORKER_ONLY: &str = r#"{"network":"testnet","worker_assignment":{"id":"worker","fb_url_v1":"https://example.test/worker.fb.gz","effective_from":123}}"#;
     /// The pointers a mode does not read may take any shape — the state is still readable, and
     /// the mode's own pointer is judged on its own (IB-40, IB-40b).
-    #[test]
-    fn a_pointer_the_mode_does_not_read_can_have_any_shape() {
-        let mut state = published_state(
-            r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123},"worker_assignment":"not an object","schema_bundle":{"url":"no hash here"},"portal_assignment":42}"#,
-        );
+    const ODD_SHAPES_BESIDE_LEGACY: &str = r#"{"network":"testnet","assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123},"worker_assignment":"not an object","schema_bundle":{"url":"no hash here"},"portal_assignment":42}"#;
 
-        assert_eq!(
-            pointer_id(state.take_pointer(AssignmentSource::Legacy).0).as_deref(),
-            Some("legacy")
-        );
+    #[test]
+    fn take_pointer_reads_only_the_modes_own_pointer() {
+        let cases = [
+            (BOTH_POINTERS, AssignmentSource::Legacy, Some("legacy")),
+            (BOTH_POINTERS, AssignmentSource::Worker, Some("worker")),
+            (LEGACY_ONLY, AssignmentSource::Worker, None),
+            (WORKER_ONLY, AssignmentSource::Legacy, None),
+            (
+                ODD_SHAPES_BESIDE_LEGACY,
+                AssignmentSource::Legacy,
+                Some("legacy"),
+            ),
+        ];
+        for (state, mode, expected) in cases {
+            let mut state = published_state(state);
+            assert_eq!(
+                pointer_id(state.take_pointer(mode).0).as_deref(),
+                expected,
+                "{mode:?} reading {state:?}"
+            );
+        }
     }
 
     fn worker_state_json(id: &str, bundle_hash: BundleHash) -> Vec<u8> {
@@ -366,12 +341,26 @@ mod tests {
         new_reqwest_client(Duration::from_secs(5), PeerId::random())
     }
 
+    /// Either half moving re-announces the pair, and so does a change of location under an
+    /// unchanged pair: a location is not identity, but a corrected url is the only thing that can
+    /// rescue a fetch that keeps failing, and only the applier knows whether one is outstanding.
+    /// An unchanged poll announces nothing — whether the pair applied is the consumer's business.
     #[tokio::test]
-    async fn either_half_moving_yields_an_update() {
+    async fn poll_announces_each_change_of_pair_or_location_once() {
         let a1b1 = worker_state_json("assignment-1", hash(0xaa));
         let a2b1 = worker_state_json("assignment-2", hash(0xaa));
         let a2b2 = worker_state_json("assignment-2", hash(0xbb));
-        let url = TestServer::serve_sequence(vec![a1b1, a2b1.clone(), a2b1, a2b2]).await;
+        let a2b2_moved =
+            worker_state_json_at("assignment-2", hash(0xbb), "http://example.com/moved.fb.gz");
+        let url = TestServer::serve_sequence(vec![
+            a1b1,
+            a2b1.clone(),
+            a2b1,
+            a2b2,
+            a2b2_moved.clone(),
+            a2b2_moved,
+        ])
+        .await;
         let client = test_client();
         let source = AssignmentSource::Worker;
         let mut announced: Option<AssignmentUpdate> = None;
@@ -379,14 +368,14 @@ mod tests {
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap()
-            .unwrap();
+            .expect("the first pair");
         assert_eq!(update.id, "assignment-1");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap()
-            .unwrap();
+            .expect("the assignment moved");
         assert_eq!(update.id, "assignment-2");
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
 
@@ -401,35 +390,18 @@ mod tests {
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(update.id, "assignment-2");
+            .expect("the bundle moved");
+        assert_eq!(
+            update.id, "assignment-2",
+            "a bundle change re-offers its assignment"
+        );
         assert_eq!(update.schema_bundle.unwrap().hash, hash(0xbb));
-    }
-
-    /// A location is not identity, so a corrected url leaves the pair unchanged — and the applier
-    /// holds whatever url it was announced with. If the poll stayed quiet about it, an expired or
-    /// mistyped url would be retried forever with no way for a correction to reach the worker.
-    /// Announcing it is safe because only the applier knows whether a fetch is still outstanding.
-    #[tokio::test]
-    async fn a_moved_location_is_announced_under_an_unchanged_pair() {
-        let first = worker_state_json_at("a1", hash(0xaa), "http://example.com/first.fb.gz");
-        let moved = worker_state_json_at("a1", hash(0xaa), "http://example.com/moved.fb.gz");
-        let url = TestServer::serve_sequence(vec![first, moved.clone(), moved]).await;
-        let client = test_client();
-        let source = AssignmentSource::Worker;
-        let mut announced: Option<AssignmentUpdate> = None;
-
-        let update = poll_network_state(&url, &client, source, &mut announced)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(update.fb_url_v1, "http://example.com/first.fb.gz");
 
         let update = poll_network_state(&url, &client, source, &mut announced)
             .await
             .unwrap()
             .expect("the pair is unchanged, but where to fetch it is not");
-        assert_eq!(update.id, "a1", "the same pair, at a new location");
+        assert_eq!(update.id, "assignment-2");
         assert_eq!(update.fb_url_v1, "http://example.com/moved.fb.gz");
 
         assert!(
@@ -441,227 +413,98 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
+    enum Counted {
+        Nothing,
+        Mismatch,
+        Refused,
+    }
+
+    /// A state that reads but is not applicable — half a pair, a pointer or bundle reference the
+    /// worker cannot use, no assignment for the mode — is a non-event: it waits at the poll
+    /// cadence rather than erroring onto the fetch-retry ladder (which doubles to
+    /// `assignment_fetch_max_delay` — hours of not noticing a scheduler that has already fixed
+    /// the state), counts the fault if it is the scheduler's to resolve, and leaves `announced`
+    /// untouched so a corrected pair is offered whole. Only a body that is not a JSON object is a
+    /// failure to read the state. Check order is pinned by the third row: no assignment for the
+    /// mode is a wait whatever the bundle says.
     #[tokio::test]
-    async fn a_pair_already_announced_is_not_offered_again() {
-        let state = worker_state_json("assignment-1", hash(0xaa));
-        let url = TestServer::serve_sequence(vec![state.clone(), state]).await;
-        let client = test_client();
-        let source = AssignmentSource::Worker;
-        let mut announced: Option<AssignmentUpdate> = None;
+    async fn a_state_that_is_not_applicable_waits_without_touching_announced() {
+        let remembered = || Some(announced_update("assignment-1", hash(0xaa)));
+        let bare_hex = "aa".repeat(32);
+        let cases: Vec<(&str, Vec<u8>, AssignmentSource, Option<AssignmentUpdate>, Counted)> = vec![
+            (
+                "worker assignment without its bundle",
+                br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#.to_vec(),
+                AssignmentSource::Worker,
+                remembered(),
+                Counted::Mismatch,
+            ),
+            (
+                "bundle reference that is not sha256:<hex>",
+                format!(r#"{{"network":"test","worker_assignment":{{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{bare_hex}","url":"http://example.com/bundle.tar.gz"}}}}"#).into_bytes(),
+                AssignmentSource::Worker,
+                remembered(),
+                Counted::Mismatch,
+            ),
+            (
+                "no assignment for the mode, whatever the bundle says",
+                format!(r#"{{"network":"test","assignment":{{"id":"legacy","fb_url_v1":"http://example.com/l.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{bare_hex}","url":"http://example.com/bundle.tar.gz"}}}}"#).into_bytes(),
+                AssignmentSource::Worker,
+                None,
+                Counted::Nothing,
+            ),
+            (
+                "pointer without a fetch url",
+                br#"{"network":"test","assignment":{"id":"a1","effective_from":0}}"#.to_vec(),
+                AssignmentSource::Legacy,
+                None,
+                Counted::Refused,
+            ),
+            (
+                "pointer that will not decode",
+                br#"{"network":"test","worker_assignment":{"id":7,"fb_url_v1":"http://example.com/a.fb.gz"},"schema_bundle":{"hash":"sha256:aa","url":"http://example.com/b.tar.gz"}}"#.to_vec(),
+                AssignmentSource::Worker,
+                None,
+                Counted::Refused,
+            ),
+            (
+                "bundle object that will not decode",
+                br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0},"schema_bundle":{"url":"http://example.com/bundle.tar.gz"}}"#.to_vec(),
+                AssignmentSource::Worker,
+                remembered(),
+                Counted::Mismatch,
+            ),
+        ];
 
-        let update = poll_network_state(&url, &client, source, &mut announced)
-            .await
-            .unwrap();
-        assert_eq!(update.unwrap().id, "assignment-1");
+        for (case, state, mode, before, counted) in cases {
+            let url = TestServer::serve_once(state).await;
+            let mut announced = before.clone();
+            let mismatches = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
+            let refused = metrics::ASSIGNMENTS_REFUSED.get();
 
-        assert!(
-            poll_network_state(&url, &client, source, &mut announced)
+            let update = poll_network_state(&url, &test_client(), mode, &mut announced)
                 .await
-                .unwrap()
-                .is_none(),
-            "whether the pair applied is the consumer's business, not the stream's: \
-             another attempt is for it to ask for"
-        );
-    }
+                .unwrap_or_else(|e| panic!("{case}: not applicable is not a read failure: {e:#}"));
 
-    #[tokio::test]
-    async fn a_bundle_change_reoffers_the_assignment_as_a_pair() {
-        let state = worker_state_json("assignment-1", hash(0xaa));
-        let url = TestServer::serve_once(state).await;
-        let mut announced = Some(announced_update("assignment-1", hash(0xbb)));
+            assert!(update.is_none(), "{case}: nothing to apply");
+            // `>`, not `+ 1`: the counters are process-global and other tests in this binary move them.
+            match counted {
+                Counted::Mismatch => assert!(
+                    metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches,
+                    "{case}: the scheduler is who resolves it, so it counts with the other pair faults"
+                ),
+                Counted::Refused => assert!(
+                    metrics::ASSIGNMENTS_REFUSED.get() > refused,
+                    "{case}: an assignment the worker cannot use is what OB-18 counts"
+                ),
+                Counted::Nothing => {}
+            }
+            assert_eq!(announced, before, "{case}: nothing was announced");
+        }
 
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Worker,
-            &mut announced,
-        )
-        .await
-        .unwrap();
-        let update = update.unwrap();
-        assert_eq!(update.id, "assignment-1");
-        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
-    }
-
-    /// Erroring here would take the poll off its tick and onto the fetch-retry ladder, which
-    /// doubles to `assignment_fetch_max_delay` — hours of not noticing a scheduler that has
-    /// already fixed the state. A half-published state is a legal condition of a rolling
-    /// migration, so it is a non-event like any other unchanged poll.
-    #[tokio::test]
-    async fn a_state_missing_the_bundle_is_not_applicable_rather_than_an_error() {
-        let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}}"#;
-        let url = TestServer::serve_once(state.to_vec()).await;
-        let mut announced = Some(announced_update("assignment-1", hash(0xaa)));
-        let mismatches_before = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
-
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Worker,
-            &mut announced,
-        )
-        .await
-        .expect("a half-published state is not a failure to read one");
-
-        assert!(update.is_none(), "half a pair is not applicable");
-        // `>`, not `+ 1`: the counter is process-global and other tests in this binary move it.
-        assert!(
-            metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches_before,
-            "the scheduler is who resolves it, so it counts with the other pair faults"
-        );
-        assert_eq!(
-            announced,
-            Some(announced_update("assignment-1", hash(0xaa))),
-            "nothing was announced, so the pair is offered whole when the bundle returns"
-        );
-    }
-
-    /// The other way a pair can be half-published: the bundle is there but its reference is one
-    /// the worker cannot use. Same fault class as a missing bundle — the state was read fine and
-    /// it is the scheduler's content that is not applicable — so it takes the same exit: waiting
-    /// at the poll cadence, not the fetch-retry ladder.
-    #[tokio::test]
-    async fn a_state_with_an_unusable_bundle_reference_is_not_applicable_rather_than_an_error() {
-        // A bare hex digest: exactly the kind of near-miss a scheduler could publish by mistake.
-        let state = format!(
-            r#"{{"network":"test","worker_assignment":{{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{}","url":"http://example.com/bundle.tar.gz"}}}}"#,
-            "aa".repeat(32)
-        )
-        .into_bytes();
-        let url = TestServer::serve_once(state).await;
-        let mut announced = Some(announced_update("assignment-1", hash(0xaa)));
-        let mismatches_before = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
-
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Worker,
-            &mut announced,
-        )
-        .await
-        .expect("an unusable bundle reference is not a failure to read the state");
-
-        assert!(update.is_none(), "the pair cannot be applied as published");
-        assert!(
-            metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches_before,
-            "counted with the other pair faults, not as a bundle that failed to install"
-        );
-        assert_eq!(
-            announced,
-            Some(announced_update("assignment-1", hash(0xaa))),
-            "nothing was announced, so the corrected pair is offered whole"
-        );
-    }
-
-    /// Pins the order of the checks: with no assignment for this mode there is nothing to pair
-    /// the bundle with, so the state is the same wait as a network that has not migrated — and
-    /// whether the bundle reference is usable must not be able to turn that wait into an error.
-    #[tokio::test]
-    async fn a_state_without_an_assignment_waits_whatever_its_bundle_says() {
-        let state = format!(
-            r#"{{"network":"test","assignment":{{"id":"legacy","fb_url_v1":"http://example.com/l.fb.gz","effective_from":0}},"schema_bundle":{{"hash":"{}","url":"http://example.com/bundle.tar.gz"}}}}"#,
-            "aa".repeat(32)
-        )
-        .into_bytes();
-        let url = TestServer::serve_once(state).await;
-        let mut announced: Option<AssignmentUpdate> = None;
-
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Worker,
-            &mut announced,
-        )
-        .await
-        .expect("no assignment for the mode is a wait, not an error, however the bundle reads");
-
-        assert!(update.is_none());
-        assert_eq!(announced, None, "nothing was announced");
-    }
-
-    /// The assignment half of the same rule, in the mode that has no bundle at all: a pointer
-    /// that names no document to fetch is unusable content, not a failure to read the state.
-    #[tokio::test]
-    async fn a_pointer_without_a_fetch_url_waits_rather_than_erroring() {
-        let state = br#"{"network":"test","assignment":{"id":"a1","effective_from":0}}"#;
-        let url = TestServer::serve_once(state.to_vec()).await;
-        let mut announced: Option<AssignmentUpdate> = None;
-        let refused_before = metrics::ASSIGNMENTS_REFUSED.get();
-
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Legacy,
-            &mut announced,
-        )
-        .await
-        .expect("a pointer with no fb_url_v1 is not a failure to read the state");
-
-        assert!(update.is_none(), "there is nothing to fetch");
-        assert!(
-            metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
-            "an assignment the worker cannot use is what OB-18 counts"
-        );
-        assert_eq!(announced, None, "nothing was announced");
-    }
-
-    #[tokio::test]
-    async fn a_pointer_that_will_not_decode_waits_rather_than_erroring() {
-        // An id that is not a string and no effective_from: the object is there, but it is not
-        // an assignment pointer.
-        let state = br#"{"network":"test","worker_assignment":{"id":7,"fb_url_v1":"http://example.com/a.fb.gz"},"schema_bundle":{"hash":"sha256:aa","url":"http://example.com/b.tar.gz"}}"#;
-        let url = TestServer::serve_once(state.to_vec()).await;
-        let mut announced: Option<AssignmentUpdate> = None;
-        let refused_before = metrics::ASSIGNMENTS_REFUSED.get();
-
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Worker,
-            &mut announced,
-        )
-        .await
-        .expect("a pointer that will not decode is not a failure to read the state");
-
-        assert!(update.is_none());
-        assert!(metrics::ASSIGNMENTS_REFUSED.get() > refused_before);
-        assert_eq!(announced, None, "nothing was announced");
-    }
-
-    /// A bundle object missing a field is as unusable a reference as a hash that will not parse,
-    /// and must not be told apart from it by which parser happens to reject it.
-    #[tokio::test]
-    async fn a_bundle_object_that_will_not_decode_is_not_applicable_rather_than_an_error() {
-        let state = br#"{"network":"test","worker_assignment":{"id":"assignment-1","fb_url_v1":"http://example.com/a.fb.gz","effective_from":0},"schema_bundle":{"url":"http://example.com/bundle.tar.gz"}}"#;
-        let url = TestServer::serve_once(state.to_vec()).await;
-        let mut announced = Some(announced_update("assignment-1", hash(0xaa)));
-        let mismatches_before = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
-
-        let update = poll_network_state(
-            &url,
-            &test_client(),
-            AssignmentSource::Worker,
-            &mut announced,
-        )
-        .await
-        .expect("a bundle object that will not decode is not a failure to read the state");
-
-        assert!(update.is_none(), "the pair cannot be applied as published");
-        assert!(metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches_before);
-        assert_eq!(
-            announced,
-            Some(announced_update("assignment-1", hash(0xaa))),
-            "nothing was announced, so the corrected pair is offered whole"
-        );
-    }
-
-    /// The boundary of the rule: a body that is not a JSON object is a state the worker cannot
-    /// read, and that is what the fetch-retry ladder is for.
-    #[tokio::test]
-    async fn a_body_that_is_not_a_json_object_is_a_read_failure() {
         let url = TestServer::serve_once(b"[]".to_vec()).await;
         let mut announced: Option<AssignmentUpdate> = None;
-
         let outcome = poll_network_state(
             &url,
             &test_client(),
@@ -669,8 +512,10 @@ mod tests {
             &mut announced,
         )
         .await;
-
-        assert!(outcome.is_err(), "not a network state at all");
+        assert!(
+            outcome.is_err(),
+            "a body that is not a JSON object is not a network state at all"
+        );
         assert_eq!(announced, None);
     }
 

@@ -653,105 +653,42 @@ mod tests {
         );
     }
 
-    /// A restart recovers chunk versions from their paths.
+    /// A rewrite lands beside the ingested copy, not over it, and a restart recovers each copy
+    /// at the version its path spells: the paths the manager writes are the paths it reads back.
     #[tokio::test]
     async fn a_restart_recovers_each_chunk_at_the_version_it_is_stored_under() {
         use std::sync::Arc;
 
         use crate::types::state::ChunkRef;
 
-        let dataset = "s3://test".to_owned();
+        let dataset = Arc::new("s3://test".to_owned());
         let id = "0000000000/0000000000-0000000010-aaaaaaaa";
         let dir = tempfile::tempdir().unwrap();
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
         let dataset_dir = workdir.join(encode_dataset(&dataset));
-        std::fs::create_dir_all(dataset_dir.join(id)).unwrap();
-        std::fs::create_dir_all(dataset_dir.join("_v4").join(id)).unwrap();
-
-        let manager =
-            test_manager(workdir, Keypair::generate_ed25519().public().to_peer_id()).await;
-
-        let available = manager.state.lock().status().available;
         let versioned = |version| ChunkRef {
-            dataset: Arc::new(dataset.clone()),
+            dataset: Arc::clone(&dataset),
             chunk: Arc::from(id),
             version,
         };
+        let worker_id = Keypair::generate_ed25519().public().to_peer_id();
+
+        let manager = test_manager(workdir.clone(), worker_id).await;
+        let ingested = manager.chunk_path(&versioned(0));
+        let rewritten = manager.chunk_path(&versioned(4));
+        assert_eq!(ingested, dataset_dir.join(id), "where a legacy chunk is");
+        assert_eq!(rewritten, dataset_dir.join("_v4").join(id));
+        drop(manager);
+        std::fs::create_dir_all(&ingested).unwrap();
+        std::fs::create_dir_all(&rewritten).unwrap();
+
+        let manager = test_manager(workdir, worker_id).await;
+
+        let available = manager.state.lock().status().available;
         assert_eq!(
             available.into_iter().collect::<Vec<_>>(),
             [versioned(0), versioned(4)],
             "one id, two copies — distinct chunks the worker holds independently"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_rewrite_is_stored_beside_the_ingested_copy_not_over_it() {
-        use std::sync::Arc;
-
-        use crate::types::state::ChunkRef;
-
-        let dir = tempfile::tempdir().unwrap();
-        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
-        let manager = test_manager(
-            workdir.clone(),
-            Keypair::generate_ed25519().public().to_peer_id(),
-        )
-        .await;
-        let dataset = Arc::new("s3://test".to_owned());
-        let id = "0000000000/0000000000-0000000010-aaaaaaaa";
-        let dataset_dir = workdir.join(encode_dataset(&dataset));
-
-        assert_eq!(
-            manager.chunk_path(&ChunkRef::new(dataset.clone(), Arc::from(id))),
-            dataset_dir.join(id)
-        );
-        assert_eq!(
-            manager.chunk_path(&ChunkRef {
-                dataset,
-                chunk: Arc::from(id),
-                version: 1,
-            }),
-            dataset_dir.join("_v1").join(id)
-        );
-    }
-
-    /// A refused assignment leaves the previous assignment active (WP-2).
-    #[tokio::test]
-    async fn a_refused_assignment_leaves_the_worker_on_the_old_one() {
-        let keypair = Keypair::generate_ed25519();
-        let worker_id = keypair.public().to_peer_id();
-        let dir = tempfile::tempdir().unwrap();
-        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
-        let manager = test_manager(workdir, worker_id).await;
-
-        manager.set_prepared_assignment(
-            manager
-                .prepare_assignment(
-                    AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
-                    "A",
-                    &keypair,
-                    no_schemas_needed,
-                )
-                .expect("the document lists this worker"),
-        );
-        assert_eq!(
-            manager.current_status().await.assignment_id.as_deref(),
-            Some("A")
-        );
-
-        let other_worker = Keypair::generate_ed25519().public().to_peer_id();
-        assert!(manager
-            .prepare_assignment(
-                AssignmentBlob::Legacy(empty_assignment_for(other_worker)),
-                "B",
-                &keypair,
-                no_schemas_needed,
-            )
-            .is_err());
-
-        assert_eq!(
-            manager.current_status().await.assignment_id.as_deref(),
-            Some("A")
         );
     }
 

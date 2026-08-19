@@ -652,106 +652,92 @@ mod tests {
         assert!(f.worker.query_schemas().get_by_id(SchemaId::new(7)).is_ok());
     }
 
-    /// A document that fails verification is a verdict on the bytes, not on the network (FM-12):
-    /// refused once and left alone, rather than fetched again — bundle and all — every retry
-    /// period until the network publishes something else.
+    /// An unusable pair is a verdict on its bytes, not on the network (FM-12): a document that
+    /// fails verification, a roster the reader panics on (contained where it happens rather than
+    /// forwarded to the subsystem tree), a roster that does not list us (FM-54's steady state), or
+    /// — past the hash check, the bundle half of the same rule — a bundle with nothing to load. Each
+    /// is refused once, counted (OB-18) and left alone until a different pair is announced, rather
+    /// than fetched again every retry period: no attempt at the same pair can end differently.
     #[tokio::test]
-    async fn a_document_that_will_not_decode_is_refused_not_retried() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        // A complete gzip whose payload is no worker assignment at all.
-        let document = f
-            .stub
-            .serve("/garbage.fb.gz", gzip(b"not a worker assignment"), 0);
-        let mine = f
-            .stub
-            .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-        let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
+    async fn an_unusable_pair_is_refused_once_and_only_a_different_pair_moves_things() {
+        type Document = fn(PeerId) -> Vec<u8>;
+        let cases: [(&str, Document, Option<Vec<u8>>); 4] = [
+            (
+                "document that will not decode",
+                |_| gzip(b"not a worker assignment"),
+                None,
+            ),
+            (
+                "roster the reader panics on",
+                |peer| gzip(&unreadable_roster(peer)),
+                None,
+            ),
+            (
+                "roster that does not list us",
+                |_| {
+                    gzip(&worker_assignment(
+                        Keypair::generate_ed25519().public().to_peer_id(),
+                    ))
+                },
+                None,
+            ),
+            (
+                "bundle with nothing to load",
+                |peer| gzip(&worker_assignment(peer)),
+                Some(targz(&[("readme.txt", b"no schemas here")])),
+            ),
+        ];
 
-        assert_eq!(
-            f.applier
-                .apply(&update("a1", document.clone(), bundle.clone()))
-                .await,
-            ApplyOutcome::Refused
-        );
-        assert!(f.worker.registered_assignment_id().is_none());
-        assert!(
-            crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
-            "an unusable document is what OB-18 counts"
-        );
+        for (case, document, unusable_bundle) in cases {
+            let f = fixture().await;
+            let good_bundle = bundle(&f.stub);
+            let bad_bundle = unusable_bundle.map(|archive| {
+                (
+                    BundleHash::of(&archive),
+                    f.stub.serve("/bundle-bad.tar.gz", archive, 0),
+                )
+            });
+            let bad_document = f.stub.serve("/bad.fb.gz", document(f.peer_id), 0);
+            let mine = f
+                .stub
+                .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+            let bad = update(
+                "a1",
+                bad_document,
+                bad_bundle.clone().unwrap_or_else(|| good_bundle.clone()),
+            );
+            let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
 
-        // In the loop: asked once, then only a different pair moves things.
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", document, bundle.clone()),
-                update("a2", mine, bundle),
-            ],
-        );
-        await_registered(&f.worker, "a2").await;
-        token.cancel();
-        running.await.unwrap();
-        assert_eq!(
-            f.stub.hits("/garbage.fb.gz"),
-            2,
-            "one direct attempt above and one in the loop; no retry in between"
-        );
-    }
+            assert_eq!(f.applier.apply(&bad).await, ApplyOutcome::Refused, "{case}");
+            assert!(f.worker.registered_assignment_id().is_none(), "{case}");
+            assert!(
+                crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
+                "{case}: a pair the worker cannot use is what OB-18 counts, whichever half is at fault"
+            );
 
-    /// The bundle half of FM-12. Past the hash check the bytes are the ones the network vouched
-    /// for, so a bundle that carries no schemas cannot come out differently however often it is
-    /// asked for: refused once, like a document that will not decode, rather than re-downloaded
-    /// every retry period for as long as the scheduler keeps publishing it.
-    #[tokio::test]
-    async fn a_bundle_with_nothing_to_load_is_refused_not_retried() {
-        let f = fixture().await;
-        // A well-formed archive, hashed as announced, that simply holds no <id>.yaml entries.
-        let empty = targz(&[("readme.txt", b"no schemas here")]);
-        let unusable = (
-            BundleHash::of(&empty),
-            f.stub.serve("/bundle-empty.tar.gz", empty, 0),
-        );
-        let document = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-        let mine = f
-            .stub
-            .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-        let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
+            let (token, running) = run_loop(&f.applier, vec![bad, update("a2", mine, good_bundle)]);
+            await_registered(&f.worker, "a2").await;
+            token.cancel();
+            running.await.unwrap();
 
-        assert_eq!(
-            f.applier
-                .apply(&update("a1", document.clone(), unusable.clone()))
-                .await,
-            ApplyOutcome::Refused
-        );
-        assert!(f.worker.registered_assignment_id().is_none());
-        assert!(
-            crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
-            "a pair the worker cannot use is what OB-18 counts, whichever half is at fault"
-        );
-
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", document, unusable),
-                update("a2", mine, bundle(&f.stub)),
-            ],
-        );
-        await_registered(&f.worker, "a2").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(
-            f.stub.hits("/bundle-empty.tar.gz"),
-            2,
-            "one direct attempt above and one in the loop; no retry in between"
-        );
-        assert_eq!(
-            f.stub.hits("/a1.fb.gz"),
-            0,
-            "the bundle is prepared first, so a refused one never costs a document fetch"
-        );
+            let faulty = if bad_bundle.is_some() {
+                "/bundle-bad.tar.gz"
+            } else {
+                "/bad.fb.gz"
+            };
+            assert_eq!(
+                f.stub.hits(faulty),
+                2,
+                "{case}: one direct attempt above and one in the loop; no retry in between"
+            );
+            if bad_bundle.is_some() {
+                assert_eq!(
+                    f.stub.hits("/bad.fb.gz"),
+                    0,
+                    "{case}: the bundle is prepared first, so a refused one never costs a document fetch"
+                );
+            }
+        }
     }
 
     /// The other side of the line. A hash mismatch says this location served the wrong bytes,
@@ -780,153 +766,144 @@ mod tests {
         );
     }
 
-    /// Reading a document can panic on bytes no verification checks. Contained where it happens,
-    /// it is one more unusable pair (FM-12); re-raised, it forwards to the subsystem tree and the
-    /// worker exits over a document the network can simply republish.
+    /// The network failing is not the pair's fault: a document or bundle that does not download,
+    /// or a bundle whose activation fails, is backed off and asked for again — and nothing of the
+    /// failed attempt is left behind: no assignment registered, no bundle installed.
     #[tokio::test]
-    async fn a_document_whose_roster_cannot_be_read_is_refused() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        let document = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&unreadable_roster(f.peer_id)), 0);
-        let refused_before = crate::metrics::ASSIGNMENTS_REFUSED.get();
+    async fn a_transient_failure_leaves_no_partial_state_and_is_retried() {
+        // document fails once
+        {
+            let f = fixture().await;
+            let bundle = bundle(&f.stub);
+            let document = f
+                .stub
+                .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 1);
+            let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
+            await_registered(&f.worker, "a1").await;
+            token.cancel();
+            running.await.unwrap();
+            assert_eq!(
+                f.stub.hits("/a1.fb.gz"),
+                2,
+                "document: back off and ask again"
+            );
+        }
+        // bundle fails once
+        {
+            let f = fixture().await;
+            let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
+            let bundle = (
+                BundleHash::of(&archive),
+                f.stub.serve("/bundle-retry.tar.gz", archive, 1),
+            );
+            let document = f
+                .stub
+                .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+            let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
+            await_registered(&f.worker, "a1").await;
+            token.cancel();
+            running.await.unwrap();
+            assert_eq!(
+                f.stub.hits("/bundle-retry.tar.gz"),
+                2,
+                "bundle: observing a bundle hash must not consume a transiently failed pair"
+            );
+        }
+        // bundle activation fails once
+        {
+            let f = fixture().await;
+            let bundle = bundle(&f.stub);
+            let document = f
+                .stub
+                .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+            f.schema_manager.fail_next_install();
+            let update = update("a1", document, bundle);
 
-        let outcome = f.applier.apply(&update("a1", document, bundle)).await;
+            assert_eq!(f.applier.apply(&update).await, ApplyOutcome::Failed);
+            assert!(f.worker.registered_assignment_id().is_none());
+            assert!(f.schema_manager.installed_hash().is_none());
 
-        assert_eq!(outcome, ApplyOutcome::Refused);
-        assert!(f.worker.registered_assignment_id().is_none());
-        assert!(
-            crate::metrics::ASSIGNMENTS_REFUSED.get() > refused_before,
-            "a worker refusing everything must be tellable from one that can't reach the network"
-        );
+            let (token, running) = run_loop(&f.applier, vec![update]);
+            await_registered(&f.worker, "a1").await;
+            token.cancel();
+            running.await.unwrap();
+            assert_eq!(f.stub.hits("/a1.fb.gz"), 2);
+            assert_eq!(f.stub.hits("/bundle.tar.gz"), 2);
+        }
     }
 
+    /// A pair that will not download is left behind by the next announcement rather than retried
+    /// behind its backoff: a usable copy of the same pair at another location, a corrected url
+    /// (a location is not identity, so the pair is unchanged — and without the stream saying the
+    /// location moved, an expired or mistyped url would be retried forever), or a newer
+    /// assignment, which is absolute.
     #[tokio::test]
-    async fn a_refused_pair_is_never_fetched_again() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        let stranger = Keypair::generate_ed25519().public().to_peer_id();
-        // FM-54's steady state: the roster this document was built from doesn't list us.
-        let refused = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&worker_assignment(stranger)), 0);
-        let mine = f
-            .stub
-            .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+    async fn a_failing_pair_is_superseded_by_the_next_announcement() {
+        struct Case {
+            case: &'static str,
+            failing: (&'static str, &'static str, Option<Vec<u8>>),
+            rescue: (&'static str, &'static str),
+            hits: &'static [(&'static str, usize)],
+        }
+        let cases = [
+            Case {
+                case: "truncated document, then a usable copy of the same pair",
+                failing: (
+                    "a1",
+                    "/truncated.fb.gz",
+                    Some(b"not a complete gzip stream".to_vec()),
+                ),
+                rescue: ("a1", "/a1.fb.gz"),
+                hits: &[("/truncated.fb.gz", 1), ("/a1.fb.gz", 1)],
+            },
+            Case {
+                case: "url never served, then the same pair at a corrected url",
+                failing: ("a1", "/broken.fb.gz", None),
+                rescue: ("a1", "/corrected.fb.gz"),
+                hits: &[("/corrected.fb.gz", 1)],
+            },
+            Case {
+                case: "url never served, then a newer assignment",
+                failing: ("a1", "/a1.fb.gz", None),
+                rescue: ("a2", "/a2.fb.gz"),
+                hits: &[("/a1.fb.gz", 1)],
+            },
+        ];
 
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", refused, bundle.clone()),
-                update("a2", mine, bundle),
-            ],
-        );
-        await_registered(&f.worker, "a2").await;
-        token.cancel();
-        running.await.unwrap();
+        for Case {
+            case,
+            failing,
+            rescue,
+            hits,
+        } in cases
+        {
+            let f = fixture().await;
+            let bundle = bundle(&f.stub);
+            let (failing_id, failing_path, failing_body) = failing;
+            let failing_url = match failing_body {
+                Some(body) => f.stub.serve(failing_path, body, 0),
+                None => f.stub.url(failing_path),
+            };
+            let (rescue_id, rescue_path) = rescue;
+            let rescue_url = f
+                .stub
+                .serve(rescue_path, gzip(&worker_assignment(f.peer_id)), 0);
 
-        assert_eq!(
-            f.stub.hits("/a1.fb.gz"),
-            1,
-            "no attempt at the same pair can end differently, so the loop asks once and waits \
-             for a different one"
-        );
-    }
+            let (token, running) = run_loop(
+                &f.applier,
+                vec![
+                    update(failing_id, failing_url, bundle.clone()),
+                    update(rescue_id, rescue_url, bundle),
+                ],
+            );
+            await_registered(&f.worker, rescue_id).await;
+            token.cancel();
+            running.await.unwrap();
 
-    #[tokio::test]
-    async fn a_document_that_fails_to_download_is_tried_again() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        let document = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 1);
-
-        let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
-        await_registered(&f.worker, "a1").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(
-            f.stub.hits("/a1.fb.gz"),
-            2,
-            "the network failing is not the pair's fault: back off and ask again"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_bundle_that_fails_to_download_is_tried_again() {
-        let f = fixture().await;
-        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = (
-            BundleHash::of(&archive),
-            f.stub.serve("/bundle-retry.tar.gz", archive, 1),
-        );
-        let document = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-
-        let (token, running) = run_loop(&f.applier, vec![update("a1", document, bundle)]);
-        await_registered(&f.worker, "a1").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(
-            f.stub.hits("/bundle-retry.tar.gz"),
-            2,
-            "observing a bundle hash must not consume a transiently failed pair"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_truncated_assignment_download_is_superseded_by_a_usable_copy() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        let document = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-        f.stub.serve(
-            "/truncated.fb.gz",
-            b"not a complete gzip stream".to_vec(),
-            0,
-        );
-
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", f.stub.url("/truncated.fb.gz"), bundle.clone()),
-                update("a1", document, bundle),
-            ],
-        );
-        await_registered(&f.worker, "a1").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(f.stub.hits("/truncated.fb.gz"), 1);
-        assert_eq!(f.stub.hits("/a1.fb.gz"), 1);
-    }
-
-    #[tokio::test]
-    async fn a_bundle_activation_failure_is_tried_again_without_partial_state() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        let document = f
-            .stub
-            .serve("/a1.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-        f.schema_manager.fail_next_install();
-        let update = update("a1", document, bundle);
-
-        assert_eq!(f.applier.apply(&update).await, ApplyOutcome::Failed);
-        assert!(f.worker.registered_assignment_id().is_none());
-        assert!(f.schema_manager.installed_hash().is_none());
-
-        let (token, running) = run_loop(&f.applier, vec![update]);
-        await_registered(&f.worker, "a1").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(f.stub.hits("/a1.fb.gz"), 2);
-        assert_eq!(f.stub.hits("/bundle.tar.gz"), 2);
+            for (path, expected) in hits {
+                assert_eq!(f.stub.hits(path), *expected, "{case}: hits on {path}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -957,97 +934,6 @@ mod tests {
             f.stub.hits("/a1.fb.gz"),
             2,
             "a bundle change makes a new pair whose assignment must be reconsidered"
-        );
-    }
-
-    /// A location is not identity, so correcting one leaves the pair unchanged — and the applier
-    /// keeps whatever url it was announced with. Without the stream saying the location moved,
-    /// an expired or mistyped url is retried forever and no correction can reach the worker.
-    #[tokio::test]
-    async fn a_corrected_document_url_rescues_a_pair_that_will_not_download() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        // Never served: only a different location can get the loop off it.
-        let broken = f.stub.url("/broken.fb.gz");
-        let corrected = f
-            .stub
-            .serve("/corrected.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-
-        // The same pair twice — same id, same bundle — announced at two locations.
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", broken, bundle.clone()),
-                update("a1", corrected, bundle),
-            ],
-        );
-        await_registered(&f.worker, "a1").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(
-            f.stub.hits("/corrected.fb.gz"),
-            1,
-            "the pair is unchanged, so only its location could have brought this on"
-        );
-    }
-
-    /// The other half of the same rule: once a pair has applied, nothing is outstanding for it,
-    /// so a rotating url must not re-fetch the document it already holds.
-    #[tokio::test]
-    async fn a_location_that_moves_under_an_applied_pair_is_not_refetched() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        let document = gzip(&worker_assignment(f.peer_id));
-        let first = f.stub.serve("/a1.fb.gz", document.clone(), 0);
-        let rotated = f.stub.serve("/a1-rotated.fb.gz", document, 0);
-
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", first, bundle.clone()),
-                update("a1", rotated, bundle),
-            ],
-        );
-        await_registered(&f.worker, "a1").await;
-        // The second announcement is absorbed on the same task, so by the time the first has
-        // registered the loop has already decided what to do with it.
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(
-            f.stub.hits("/a1-rotated.fb.gz"),
-            0,
-            "the pair applied, so a moved location is nothing to do"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_newer_assignment_supersedes_one_that_will_not_download() {
-        let f = fixture().await;
-        let bundle = bundle(&f.stub);
-        // Never served: nothing but a newer assignment can get the loop off it.
-        let unreachable = f.stub.url("/a1.fb.gz");
-        let mine = f
-            .stub
-            .serve("/a2.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-
-        let (token, running) = run_loop(
-            &f.applier,
-            vec![
-                update("a1", unreachable, bundle.clone()),
-                update("a2", mine, bundle),
-            ],
-        );
-        await_registered(&f.worker, "a2").await;
-        token.cancel();
-        running.await.unwrap();
-
-        assert_eq!(
-            f.stub.hits("/a1.fb.gz"),
-            1,
-            "an assignment is absolute, so the newer one subsumes it rather than queueing \
-             behind its backoff"
         );
     }
 
@@ -1102,26 +988,51 @@ mod tests {
         );
     }
 
-    /// The same word, heard while a pair is queued rather than mid-retry: what was queued behind
-    /// the pair in force — or behind the refused one — is no longer published, so it goes.
+    fn waiting(intake: &Intake) -> Option<(&str, &str)> {
+        intake
+            .pending
+            .as_ref()
+            .map(|u| (u.id.as_str(), u.fb_url_v1.as_str()))
+    }
+
+    /// The queue holds one announcement: the newest (the pairs the network moved past are never
+    /// started), at its latest location. An announcement of a pair with nothing outstanding — the
+    /// pair in force, or the refused one — is the network's latest word too: whatever was waiting
+    /// behind it is no longer published, so it goes, and nothing is fetched for any of it.
     #[tokio::test]
-    async fn an_announcement_of_a_pair_with_nothing_outstanding_retracts_the_queue() {
+    async fn the_queue_holds_the_newest_outstanding_announcement() {
         let f = fixture().await;
         let bundle = bundle(&f.stub);
-        let document = gzip(&worker_assignment(f.peer_id));
-        let x = f.stub.serve("/x.fb.gz", document.clone(), 0);
-        let x_moved = f.stub.serve("/x-moved.fb.gz", document, 0);
+        let at = |id: &str, path: &str| update(id, f.stub.url(path), bundle.clone());
+        let nothing_applied = NetworkPair::default();
+
+        let mut intake = Intake::new(Duration::from_secs(1));
+        for n in 1..=3 {
+            intake.absorb(at(&n.to_string(), &format!("/{n}.fb.gz")), &nothing_applied);
+        }
+        assert_eq!(
+            waiting(&intake).map(|(id, _)| id),
+            Some("3"),
+            "the pairs the network moved past are never started"
+        );
+        intake.absorb(at("3", "/3-moved.fb.gz"), &nothing_applied);
+        assert_eq!(
+            waiting(&intake),
+            Some(("3", f.stub.url("/3-moved.fb.gz").as_str())),
+            "a waiting pair announced again takes the latest location"
+        );
+
+        let x = f
+            .stub
+            .serve("/x.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
         assert_eq!(
             f.applier.apply(&update("x", x, bundle.clone())).await,
             ApplyOutcome::Applied
         );
-
-        let mut intake = Intake::new(Duration::from_millis(40));
-        intake.pending = Some(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
-        intake.absorb(
-            update("x", x_moved.clone(), bundle.clone()),
-            &f.applier.applied_pair(),
-        );
+        let applied = f.applier.applied_pair();
+        let mut intake = Intake::new(Duration::from_secs(1));
+        intake.pending = Some(at("y", "/y.fb.gz"));
+        intake.absorb(at("x", "/x-moved.fb.gz"), &applied);
         assert!(
             intake.pending.is_none(),
             "y was waiting behind x; the network is back on x"
@@ -1131,11 +1042,8 @@ mod tests {
             assignment_id: Some("r".to_owned()),
             bundle_hash: Some(bundle.0),
         });
-        intake.pending = Some(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
-        intake.absorb(
-            update("r", f.stub.url("/r-moved.fb.gz"), bundle),
-            &f.applier.applied_pair(),
-        );
+        intake.pending = Some(at("y", "/y.fb.gz"));
+        intake.absorb(at("r", "/r-moved.fb.gz"), &applied);
         assert!(
             intake.pending.is_none(),
             "y was waiting behind the refused r; the network is back on r"
@@ -1144,50 +1052,6 @@ mod tests {
             f.stub.hits("/x-moved.fb.gz"),
             0,
             "nothing was fetched for any of it"
-        );
-    }
-
-    fn queued(id: &str) -> AssignmentUpdate {
-        legacy_update(id, format!("http://example.test/{id}.fb.gz"))
-    }
-
-    fn waiting(intake: &Intake) -> Option<(&str, &str)> {
-        intake
-            .pending
-            .as_ref()
-            .map(|u| (u.id.as_str(), u.fb_url_v1.as_str()))
-    }
-
-    #[test]
-    fn only_the_newest_announcement_waits() {
-        let mut intake = Intake::new(Duration::from_secs(1));
-        let nothing_applied = NetworkPair::default();
-
-        for n in 1..=3 {
-            intake.absorb(queued(&n.to_string()), &nothing_applied);
-        }
-
-        assert_eq!(
-            waiting(&intake),
-            Some(("3", "http://example.test/3.fb.gz")),
-            "the pairs the network moved past are never started"
-        );
-    }
-
-    #[test]
-    fn a_waiting_pair_announced_again_takes_the_latest_location() {
-        let mut intake = Intake::new(Duration::from_secs(1));
-        let nothing_applied = NetworkPair::default();
-        intake.absorb(queued("1"), &nothing_applied);
-
-        intake.absorb(
-            legacy_update("1", "http://example.test/1-moved.fb.gz".to_owned()),
-            &nothing_applied,
-        );
-
-        assert_eq!(
-            waiting(&intake),
-            Some(("1", "http://example.test/1-moved.fb.gz"))
         );
     }
 

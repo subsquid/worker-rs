@@ -161,9 +161,12 @@ async fn empty_slice_assigns_nothing() {
     );
 }
 
-/// Queries address a chunk version; zero selects the ingested copy (IB-13, IB-41b).
+/// A chunk published only as a rewrite resolves through its generation prefix and is stored
+/// under its version, never where the ingested copy goes (IB-41b); a query names the copy it
+/// wants, and zero — the ingested copy, never assigned here — is not found (IB-13).
 #[tokio::test(flavor = "multi_thread")]
-async fn worker_format_serves_the_version_the_query_names() {
+async fn worker_format_fresh_rewrite_is_fetched_from_its_generation_and_served_by_version() {
+    use harness::scheduler::Scheduler;
     use harness::Config;
     use sqd_worker::cli::AssignmentSource;
 
@@ -173,21 +176,41 @@ async fn worker_format_serves_the_version_the_query_names() {
     })
     .await;
 
-    let chunk = corpus::chunk(8_000, 8_009, 1);
-    h.publish_and_apply("assignment-1", &[h.host_republished_chunk(&chunk, 1)])
-        .await;
+    let chunk = corpus::chunk(5_000, 5_009, 1);
+    let placement = h.host_republished_chunk(&chunk, 1);
+    h.publish_and_apply("assignment-1", &[placement]).await;
     h.await_all_chunks_available().await;
 
-    let query = h.all_blocks_query_at_version(&chunk.id, (8_000, 8_009), 1);
+    let generation = Scheduler::generation_prefix(1);
+    for (name, _) in &chunk.files {
+        let served = h
+            .origin
+            .served_bytes_in(&generation, &chunk.id, name)
+            .unwrap_or_else(|| panic!("IB-41b: {name} was not fetched from the generation"));
+        let on_disk = std::fs::read(h.chunk_dir_at_version(&chunk.id, 1).join(name))
+            .unwrap_or_else(|e| panic!("committed chunk is missing {name}: {e}"));
+        assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
+    }
+    assert_eq!(
+        h.origin.fetch_count(&chunk.id, "blocks.parquet"),
+        0,
+        "the ingested copy is not where a republished chunk lives"
+    );
+    assert!(
+        !h.chunk_dir(&chunk.id).exists(),
+        "a rewrite is stored under its version, not where the ingested copy goes"
+    );
+
+    let query = h.all_blocks_query_at_version(&chunk.id, (5_000, 5_009), 1);
     let served = h.serve(query.clone()).await;
     let (response, _) = served.expect_admitted();
     validators::query_response(response, &query, h.worker_id).assert_none("query response");
     let query_result::Result::Ok(ok) = response.result.as_ref().unwrap() else {
         panic!("expected a successful result, got {:?}", response.result);
     };
-    assert_eq!(ok.last_block, 8_009, "the rewrite answered the query");
+    assert_eq!(ok.last_block, 5_009, "the rewrite answered the query");
 
-    let unversioned = h.all_blocks_query(&chunk.id, (8_000, 8_009));
+    let unversioned = h.all_blocks_query(&chunk.id, (5_000, 5_009));
     let served = h.serve(unversioned).await;
     let (response, _) = served.expect_admitted();
     let query_result::Result::Err(err) = response.result.as_ref().unwrap() else {
@@ -281,9 +304,12 @@ async fn a_chunk_the_origin_will_not_serve_is_retried_by_the_next_assignment() {
     h.await_all_chunks_available().await;
 }
 
-/// Worker assignments derive files and query schemas from the write-schema roster.
+/// Worker assignments derive files and query schemas from the write-schema roster: the ingested
+/// copy is fetched, reported and queried; republishing the chunk at a new version fetches the
+/// new copy under its version and reconciliation removes the superseded one.
 #[tokio::test(flavor = "multi_thread")]
-async fn worker_format_assign_download_query() {
+async fn worker_format_v0_chunk_is_served_then_superseded_by_a_rewrite() {
+    use harness::scheduler::Scheduler;
     use harness::Config;
     use sqd_worker::cli::AssignmentSource;
 
@@ -331,65 +357,6 @@ async fn worker_format_assign_download_query() {
         })
         .collect();
     assert_eq!(blocks, (2_000..=2_009).collect::<Vec<_>>(), "RP-12");
-}
-
-/// Rewritten chunks resolve through their generation prefix (IB-41b).
-#[tokio::test(flavor = "multi_thread")]
-async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
-    use harness::scheduler::Scheduler;
-    use harness::Config;
-    use sqd_worker::cli::AssignmentSource;
-
-    let mut h = Harness::with_config(Config {
-        assignment_source: AssignmentSource::Worker,
-        ..Config::default()
-    })
-    .await;
-
-    let chunk = corpus::chunk(5_000, 5_009, 1);
-    let placement = h.host_republished_chunk(&chunk, 1);
-    h.publish_and_apply("assignment-1", &[placement]).await;
-    h.await_all_chunks_available().await;
-
-    let generation = Scheduler::generation_prefix(1);
-    for (name, _) in &chunk.files {
-        let served = h
-            .origin
-            .served_bytes_in(&generation, &chunk.id, name)
-            .unwrap_or_else(|| panic!("IB-41b: {name} was not fetched from the generation"));
-        let on_disk = std::fs::read(h.chunk_dir_at_version(&chunk.id, 1).join(name))
-            .unwrap_or_else(|e| panic!("committed chunk is missing {name}: {e}"));
-        assert_eq!(on_disk, served, "INV-13: {name} differs from origin bytes");
-    }
-    assert_eq!(
-        h.origin.fetch_count(&chunk.id, "blocks.parquet"),
-        0,
-        "the ingested copy is not where a republished chunk lives"
-    );
-    assert!(
-        !h.chunk_dir(&chunk.id).exists(),
-        "a rewrite is stored under its version, not where the ingested copy goes"
-    );
-}
-
-/// Republishing a chunk at a new version fetches and serves the new copy.
-#[tokio::test(flavor = "multi_thread")]
-async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
-    use harness::scheduler::Scheduler;
-    use harness::Config;
-    use sqd_worker::cli::AssignmentSource;
-
-    let mut h = Harness::with_config(Config {
-        assignment_source: AssignmentSource::Worker,
-        ..Config::default()
-    })
-    .await;
-
-    let chunk = corpus::chunk(6_000, 6_009, 1);
-    h.publish_and_apply("assignment-1", &[h.host_chunk(&chunk)])
-        .await;
-    h.await_all_chunks_available().await;
-    assert!(h.chunk_dir(&chunk.id).exists(), "the ingested copy is held");
 
     h.publish_and_apply("assignment-2", &[h.host_republished_chunk(&chunk, 1)])
         .await;

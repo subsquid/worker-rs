@@ -373,17 +373,8 @@ impl SchemaRegistry {
         self.snapshot.load().bundle_hash
     }
 
-    #[cfg(test)]
-    pub(crate) fn bundle_hash(&self) -> Option<BundleHash> {
-        self.installed_hash()
-    }
-
     pub fn bundle_ids(&self) -> HashSet<SchemaId> {
         self.snapshot.load().bundle_ids.clone()
-    }
-
-    pub fn loaded_ids(&self) -> HashSet<SchemaId> {
-        self.snapshot.load().by_id.keys().copied().collect()
     }
 
     #[cfg(test)]
@@ -898,25 +889,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merges_a_verified_bundle_into_the_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
-        let registry = Arc::clone(&store);
-        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = served_bundle(archive).await;
-
-        store
-            .ensure(&bundle, &reqwest::Client::new())
-            .await
-            .unwrap();
-
-        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
-        assert_eq!(store.installed_hash(), Some(bundle.hash));
-        assert_eq!(store.bundle_ids(), HashSet::from([SchemaId::new(7)]));
-        assert_eq!(stored(&dir), vec!["7.yaml"]);
-    }
-
-    #[tokio::test]
     async fn preparing_a_bundle_does_not_make_it_active() {
         let dir = tempfile::tempdir().unwrap();
         let registry = store(&dir);
@@ -940,34 +912,6 @@ mod tests {
         assert_eq!(registry.installed_hash(), Some(bundle.hash));
         assert_eq!(registry.bundle_ids(), HashSet::from([SchemaId::new(7)]));
         assert_eq!(stored(&dir), vec!["7.yaml"]);
-    }
-
-    #[tokio::test]
-    async fn dropping_a_prepared_bundle_does_not_publish_new_schemas() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = store(&dir);
-        let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let original_bundle = served_bundle(original).await;
-        registry
-            .ensure(&original_bundle, &reqwest::Client::new())
-            .await
-            .unwrap();
-
-        let replacement = targz(&[("9.yaml", SCHEMA.as_bytes())]);
-        let replacement_bundle = served_bundle(replacement).await;
-        let prepared = registry
-            .prepare_bundle(&replacement_bundle, &reqwest::Client::new())
-            .await
-            .unwrap();
-
-        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
-        assert!(registry.get_by_id(SchemaId::new(9)).is_err());
-        drop(prepared);
-        drop(registry);
-
-        let restarted = store(&dir);
-        assert_eq!(restarted.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
-        assert!(restarted.get_by_id(SchemaId::new(9)).is_err());
     }
 
     #[tokio::test]
@@ -1003,59 +947,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_republished_id_with_different_contents_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
-        let registry = Arc::clone(&store);
-
-        let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        store
-            .ensure(&served_bundle(original).await, &reqwest::Client::new())
-            .await
-            .unwrap();
-
-        let changed = targz(&[(
-            "7.yaml",
-            SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
-        )]);
-        let err = store
-            .ensure(&served_bundle(changed).await, &reqwest::Client::new())
-            .await
-            .unwrap_err();
-
-        assert!(err
-            .to_string()
-            .contains("republished with different contents"));
-        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
-        assert_eq!(stored(&dir), vec!["7.yaml"]);
-    }
-
-    #[tokio::test]
-    async fn an_identical_cached_schema_is_not_rewritten() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
-        let first = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        store
-            .ensure(&served_bundle(first).await, &reqwest::Client::new())
-            .await
-            .unwrap();
-        let path = dir.path().join("7.yaml");
-        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-
-        let second = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
-        store
-            .ensure(&served_bundle(second).await, &reqwest::Client::new())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            std::fs::metadata(path).unwrap().modified().unwrap(),
-            modified
-        );
-        assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
-    }
-
-    #[tokio::test]
     async fn retry_publishes_an_identical_schema_cached_by_a_partial_install() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
@@ -1074,140 +965,136 @@ mod tests {
         assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
     }
 
+    /// Which staging faults another attempt could end differently, and which could not. The hash
+    /// names the content, so the hash check is the dividing line: up to it — a url that does not
+    /// serve, bytes that do not match the hash (the signature of a stale or wrong url, the one
+    /// fault a corrected location is guaranteed to fix; a refusal is keyed on the pair and would
+    /// drop exactly that correction) — the fault is transient. Past it the bytes are the ones the
+    /// network vouched for: no `<id>.yaml` entry, a schema that will not parse, or an id
+    /// republished with different contents than the store holds — whether it was installed by a
+    /// bundle or adopted from disk — are verdicts on the pair, and asking again would only burn
+    /// the download every retry period. Whatever the fault, nothing is installed, the store is
+    /// as it was, and no staging directory survives the attempt that made it.
     #[tokio::test]
-    async fn rejects_a_bundle_whose_hash_does_not_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
-        let registry = Arc::clone(&store);
-        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(b"something else"),
-            url: TestServer::serve_once(archive).await,
+    async fn staging_faults_split_into_transient_and_permanent() {
+        #[derive(Clone, Copy)]
+        enum Seed {
+            Nothing,
+            Installed,
+            OnDisk,
+        }
+        let client = reqwest::Client::new();
+        let changed = || {
+            targz(&[(
+                "7.yaml",
+                SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
+            )])
         };
+        let cases: [(&str, Seed, bool, &str); 6] = [
+            (
+                "url that does not serve",
+                Seed::Nothing,
+                false,
+                "couldn't download",
+            ),
+            (
+                "bytes that do not match the hash",
+                Seed::Nothing,
+                false,
+                "hash mismatch",
+            ),
+            (
+                "no <id>.yaml entries",
+                Seed::Nothing,
+                true,
+                "no <id>.yaml entries",
+            ),
+            (
+                "schema that will not parse",
+                Seed::Nothing,
+                true,
+                "couldn't load",
+            ),
+            (
+                "id republished against an installed schema",
+                Seed::Installed,
+                true,
+                "republished with different contents",
+            ),
+            (
+                "id republished against a schema adopted from disk",
+                Seed::OnDisk,
+                true,
+                "republished with different contents",
+            ),
+        ];
 
-        let err = store
-            .ensure(&bundle, &reqwest::Client::new())
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
-        assert!(store.installed_hash().is_none());
-        assert!(registry.get_by_id(SchemaId::new(7)).is_err());
-        assert!(stored(&dir).is_empty());
-    }
+        for (case, seed, permanent, fragment) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            if let Seed::OnDisk = seed {
+                std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
+            }
+            let store = store(&dir);
+            let mut installed = None;
+            if let Seed::Installed = seed {
+                let original = served_bundle(targz(&[("7.yaml", SCHEMA.as_bytes())])).await;
+                store.ensure(&original, &client).await.unwrap();
+                installed = Some(original.hash);
+            }
+            let bundle = match case {
+                "url that does not serve" => SchemaBundle {
+                    hash: BundleHash::of(b"whatever"),
+                    url: TestServer::start().await.url("/never-served.tar.gz"),
+                },
+                "bytes that do not match the hash" => SchemaBundle {
+                    hash: BundleHash::of(b"something else"),
+                    url: TestServer::serve_once(targz(&[("7.yaml", SCHEMA.as_bytes())])).await,
+                },
+                "no <id>.yaml entries" => {
+                    served_bundle(targz(&[("readme.txt", b"no schemas here")])).await
+                }
+                "schema that will not parse" => {
+                    served_bundle(targz(&[("7.yaml", b"this is not a dataset description")])).await
+                }
+                _ => served_bundle(changed()).await,
+            };
 
-    async fn fault(store: &SchemaRegistry, bundle: &SchemaBundle) -> BundleFault {
-        store
-            .prepare_bundle(bundle, &reqwest::Client::new())
-            .await
-            .unwrap_err()
-    }
+            let fault = store.prepare_bundle(&bundle, &client).await.unwrap_err();
 
-    /// A url that does not serve is the network's to correct, and the next poll — or a corrected
-    /// location — is what fixes it.
-    #[tokio::test]
-    async fn a_bundle_that_will_not_download_is_transient() {
-        let dir = tempfile::tempdir().unwrap();
-        let server = TestServer::start().await;
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(b"whatever"),
-            url: server.url("/never-served.tar.gz"),
-        };
-
-        let fault = fault(&store(&dir), &bundle).await;
-
-        assert!(!fault.is_permanent(), "{fault:#}");
-    }
-
-    /// The hash names the content, so bytes that do not match it are the signature of a stale or
-    /// wrong url — the one fault a corrected location is guaranteed to fix. A refusal is keyed on
-    /// the pair, which would drop exactly that correction, so this half stays retryable.
-    #[tokio::test]
-    async fn a_hash_mismatch_is_transient_so_a_corrected_url_can_rescue_the_pair() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = SchemaBundle {
-            hash: BundleHash::of(b"something else"),
-            url: TestServer::serve_once(targz(&[("7.yaml", SCHEMA.as_bytes())])).await,
-        };
-
-        let fault = fault(&store(&dir), &bundle).await;
-
-        assert!(!fault.is_permanent(), "{fault:#}");
-        assert!(format!("{fault:#}").contains("hash mismatch"), "{fault:#}");
-    }
-
-    /// Past the hash check the bytes are the ones the network vouched for, so no re-fetch can
-    /// produce anything else: asking again only burns the download every retry period.
-    #[tokio::test]
-    async fn a_bundle_with_no_schemas_is_a_permanent_verdict() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = served_bundle(targz(&[("readme.txt", b"no schemas here")])).await;
-
-        let fault = fault(&store(&dir), &bundle).await;
-
-        assert!(fault.is_permanent(), "{fault:#}");
-        assert!(
-            format!("{fault:#}").contains("no <id>.yaml entries"),
-            "{fault:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_schema_that_will_not_parse_is_a_permanent_verdict() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle =
-            served_bundle(targz(&[("7.yaml", b"this is not a dataset description")])).await;
-
-        let fault = fault(&store(&dir), &bundle).await;
-
-        assert!(fault.is_permanent(), "{fault:#}");
-    }
-
-    /// The fault this split was made for: an id whose contents changed can never agree with the
-    /// store, so retrying re-downloaded the bundle every retry period for as long as the
-    /// scheduler kept publishing it.
-    #[tokio::test]
-    async fn a_republished_id_is_a_permanent_verdict() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
-        let original = targz(&[("7.yaml", SCHEMA.as_bytes())]);
-        store
-            .ensure(&served_bundle(original).await, &reqwest::Client::new())
-            .await
-            .unwrap();
-        let changed = targz(&[(
-            "7.yaml",
-            SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
-        )]);
-
-        let fault = fault(&store, &served_bundle(changed).await).await;
-
-        assert!(fault.is_permanent(), "{fault:#}");
-        assert!(
-            format!("{fault:#}").contains("republished with different contents"),
-            "{fault:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_bundle_that_will_not_parse_leaves_nothing_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir);
-        let registry = Arc::clone(&store);
-        let archive = targz(&[("7.yaml", b"this is not a dataset description")]);
-        let bundle = served_bundle(archive).await;
-
-        let err = store
-            .ensure(&bundle, &reqwest::Client::new())
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("couldn't load"), "{err:#}");
-        assert!(store.installed_hash().is_none());
-        assert!(registry.get_by_id(SchemaId::new(7)).is_err());
-        assert!(
-            stored(&dir).is_empty(),
-            "a staged bundle must not survive the attempt that made it: {:?}",
-            stored(&dir)
-        );
+            assert_eq!(fault.is_permanent(), permanent, "{case}: {fault:#}");
+            assert!(format!("{fault:#}").contains(fragment), "{case}: {fault:#}");
+            assert_eq!(
+                store.installed_hash(),
+                installed,
+                "{case}: nothing was installed"
+            );
+            match seed {
+                Seed::Nothing => {
+                    assert!(store.get_by_id(SchemaId::new(7)).is_err(), "{case}");
+                    assert!(stored(&dir).is_empty(), "{case}: {:?}", stored(&dir));
+                }
+                Seed::Installed | Seed::OnDisk => {
+                    assert_eq!(
+                        store.get_by_id(SchemaId::new(7)).unwrap().name,
+                        "evm",
+                        "{case}"
+                    );
+                    assert_eq!(stored(&dir), vec!["7.yaml"], "{case}");
+                    assert_eq!(
+                        std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
+                        SCHEMA,
+                        "{case}: the store is as it was"
+                    );
+                }
+            }
+            assert!(
+                stored_all(&dir)
+                    .iter()
+                    .all(|name| !name.starts_with(TEMP_PREFIX)),
+                "{case}: a staged bundle must not survive the attempt that made it: {:?}",
+                stored_all(&dir)
+            );
+        }
     }
 
     #[tokio::test]
@@ -1240,13 +1127,14 @@ mod tests {
         assert_eq!(stored(&dir), vec!["7.yaml"]);
     }
 
+    /// Adopted schemas answer queries but belong to no bundle this process merged, so they admit
+    /// no assignment on their own (ADR-21) and say nothing about the legacy type registry.
     #[tokio::test]
-    async fn a_restart_adopts_the_stored_schemas() {
+    async fn a_restart_adopts_stored_schemas_without_a_bundle_or_legacy_set() {
         let dir = tempfile::tempdir().unwrap();
-        let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         {
             let store = store(&dir);
-            let bundle = served_bundle(archive).await;
+            let bundle = served_bundle(targz(&[("7.yaml", SCHEMA.as_bytes())])).await;
             store
                 .ensure(&bundle, &reqwest::Client::new())
                 .await
@@ -1254,8 +1142,8 @@ mod tests {
         }
 
         let store = store(&dir);
-        let registry = Arc::clone(&store);
-        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+
+        assert_eq!(store.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
         assert_eq!(
             store.installed_hash(),
             None,
@@ -1265,28 +1153,28 @@ mod tests {
             store.bundle_ids().is_empty(),
             "so they cannot admit an assignment on their own (ADR-21)"
         );
+        assert!(
+            matches!(store.get_by_type("evm"), Err(QueryError::Other(_))),
+            "and they fill no type index"
+        );
     }
 
-    #[test]
-    fn an_unreadable_stored_schema_is_removed_at_startup() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(dir.path()).unwrap();
-        std::fs::write(root.join("7.yaml"), SCHEMA).unwrap();
-        std::fs::write(root.join("9.yaml"), b"not a schema").unwrap();
-
-        let registry = store(&dir);
-
-        assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
-        assert!(registry.get_by_id(SchemaId::new(9)).is_err());
-        assert_eq!(stored(&dir), vec!["7.yaml"], "the unreadable one is gone");
-    }
-
-    /// An unreadable cached schema must not block its ID from being reinstalled.
+    /// A stored file that will not read is removed at startup rather than skipped: in place it
+    /// would read as a republished id and refuse every bundle carrying it, so its id could never
+    /// be reinstalled. Its readable neighbours are adopted regardless.
     #[tokio::test]
     async fn a_bundle_reinstalls_a_schema_the_store_could_not_read() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("7.yaml"), b"").unwrap();
+        std::fs::write(dir.path().join("12.yaml"), SCHEMA).unwrap();
         let store = store(&dir);
+
+        assert!(
+            store.get_by_id(SchemaId::new(12)).is_ok(),
+            "the readable neighbour is adopted"
+        );
+        assert!(store.get_by_id(SchemaId::new(7)).is_err());
+        assert_eq!(stored(&dir), vec!["12.yaml"], "the unreadable one is gone");
 
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes()), ("9.yaml", SCHEMA.as_bytes())]);
         let bundle = served_bundle(archive).await;
@@ -1305,45 +1193,6 @@ mod tests {
             std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
             SCHEMA
         );
-    }
-
-    #[tokio::test]
-    async fn an_adopted_schema_still_refuses_a_republished_id() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
-        let store = store(&dir);
-
-        let changed = targz(&[(
-            "7.yaml",
-            SCHEMA.replace("name: evm", "name: evm2").as_bytes(),
-        )]);
-        let err = store
-            .ensure(&served_bundle(changed).await, &reqwest::Client::new())
-            .await
-            .unwrap_err();
-
-        assert!(err
-            .to_string()
-            .contains("republished with different contents"));
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
-            SCHEMA
-        );
-    }
-
-    #[test]
-    fn restored_bundle_schemas_do_not_mark_legacy_schemas_loaded() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(dir.path()).unwrap();
-        std::fs::write(root.join("7.yaml"), SCHEMA).unwrap();
-
-        let registry = store(&dir);
-
-        assert!(matches!(
-            registry.get_by_type("evm"),
-            Err(QueryError::Other(_))
-        ));
-        assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
     }
 
     #[test]

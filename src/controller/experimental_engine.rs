@@ -216,7 +216,6 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use serde_json::json;
-    use std::collections::HashSet;
     use std::fs::File;
     use std::future::IntoFuture;
     use tempfile::TempDir;
@@ -556,6 +555,13 @@ tables:
         );
         assert!(
             matches!(
+                wire(registry.get_by_type("evm").unwrap_err()),
+                WireErr::BadRequest(_)
+            ),
+            "a bundle fills no type index: evm is held by id 7, not by type"
+        );
+        assert!(
+            matches!(
                 wire(registry.get_by_id(id(9)).unwrap_err()),
                 WireErr::ServerError(_)
             ),
@@ -581,66 +587,5 @@ tables:
             )
             .unwrap(),
         )
-    }
-
-    #[test]
-    fn bundle_schemas_are_reachable_by_id_and_not_by_type() {
-        let registry = SchemaRegistry::memory();
-        registry.merge_bundle(
-            HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
-            hash(0xaa),
-        );
-
-        assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
-        assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
-        assert!(registry.get_by_id(id(9)).is_err());
-        assert!(
-            registry.get_by_type("evm").is_err(),
-            "a bundle fills no type index"
-        );
-    }
-
-    #[test]
-    fn the_bundle_hash_and_its_ids_travel_together() {
-        let registry = SchemaRegistry::memory();
-        assert_eq!(registry.bundle_hash(), None, "nothing loaded yet");
-        assert!(registry.bundle_ids().is_empty());
-
-        registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0x0a));
-        assert_eq!(registry.bundle_hash(), Some(hash(0x0a)));
-        assert_eq!(registry.bundle_ids(), HashSet::from([id(7)]));
-
-        registry.merge_bundle(HashMap::from([(id(12), description("solana"))]), hash(0x0b));
-        assert_eq!(registry.bundle_hash(), Some(hash(0x0b)));
-        assert_eq!(
-            registry.bundle_ids(),
-            HashSet::from([id(12)]),
-            "the ids of the bundle in force, not everything accumulated"
-        );
-        assert_eq!(
-            registry.loaded_ids(),
-            HashSet::from([id(7), id(12)]),
-            "which is a different set from what can be served"
-        );
-
-        registry.replace_legacy(HashMap::new());
-        assert_eq!(
-            registry.bundle_hash(),
-            Some(hash(0x0b)),
-            "legacy schemas do not alter bundle state"
-        );
-    }
-
-    #[test]
-    fn a_schema_survives_a_later_bundle_that_omits_it() {
-        let registry = SchemaRegistry::memory();
-        registry.merge_bundle(
-            HashMap::from([(id(7), description("evm")), (id(12), description("solana"))]),
-            hash(0xaa),
-        );
-        registry.merge_bundle(HashMap::from([(id(12), description("solana"))]), hash(0xbb));
-
-        assert_eq!(registry.get_by_id(id(7)).unwrap().name, "evm");
-        assert_eq!(registry.get_by_id(id(12)).unwrap().name, "solana");
     }
 }

@@ -389,37 +389,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_version_dir_is_spelled_one_way_and_is_never_a_top_dir() {
-        use super::parse_version_dir;
-
-        assert_eq!(parse_version_dir("_v1"), Some(1));
-        assert_eq!(parse_version_dir("_v4294967295"), Some(4_294_967_295));
-        // `str::parse` accepts all three as 1.
-        assert_eq!(parse_version_dir("_v+1"), None);
-        assert_eq!(parse_version_dir("_v01"), None);
-        assert_eq!(parse_version_dir("_v0001"), None);
-        // Version 0 is the root, so its subtree describes nothing.
-        assert_eq!(parse_version_dir("_v0"), None);
-        assert_eq!(parse_version_dir("_vfoo"), None);
-        assert_eq!(parse_version_dir("_v"), None);
-        assert_eq!(parse_version_dir("0000001000"), None);
-
-        // The other direction: a top dir is ten characters that parse as a number, which the `_`
-        // rules out however the version is written.
-        assert!(BlockNumber::try_from("0000001000").is_ok());
-        assert!(BlockNumber::try_from("_v00000001").is_err());
-    }
-
     /// One id at two versions, which only the subtree tells apart — in one tree they could not
-    /// coexist at all, since they would be the same directory.
+    /// coexist at all, since they would be the same directory. A directory whose name does not
+    /// spell a version one way is not a subtree the worker reads, so its chunks stay invisible
+    /// rather than being adopted at a guessed version; `_v0` too, since version 0 lives at the
+    /// root. A top dir is ten digits, which the `_` rules out however the version is written.
     #[tokio::test]
-    async fn every_version_subtree_is_read_with_its_version() {
+    async fn only_a_version_dir_spelled_one_way_is_read_with_its_version() {
         let dir = tempfile::tempdir().unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
         let id = "0000001000/0000001000-0000001999-abcdef12";
         std::fs::create_dir_all(root.join(id)).unwrap();
         std::fs::create_dir_all(root.join("_v3").join(id)).unwrap();
+        for bad in ["_v0", "_v01", "_v0001", "_v+1", "_v", "_vfoo", "_v00000001"] {
+            std::fs::create_dir_all(root.join(bad).join(id)).unwrap();
+        }
 
         let mut found = super::read_all_versions(&LocalFs::new(root)).await.unwrap();
         found.sort_by_key(|(version, _)| *version);
@@ -430,27 +414,8 @@ mod tests {
                 .map(|(version, chunk)| (*version, chunk.id.as_str()))
                 .collect::<Vec<_>>(),
             [(0, id), (3, id)],
-            "the version comes from the subtree, the id from the chunk dir"
+            "the version comes from the subtree, the id from the chunk dir; misspelt subtrees hold nothing"
         );
-    }
-
-    /// A directory whose name promises a version it doesn't name is not a store the worker can
-    /// read, so its chunks stay invisible rather than being adopted at the wrong version.
-    #[tokio::test]
-    async fn a_dir_that_names_no_version_holds_no_chunks() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
-        let id = "0000001000/0000001000-0000001999-abcdef12";
-        std::fs::create_dir_all(root.join(id)).unwrap();
-        // `_v0` too: version 0 lives at the root, so a subtree for it describes nothing.
-        for bad in ["_v0", "_vfoo"] {
-            std::fs::create_dir_all(root.join(bad).join(id)).unwrap();
-        }
-
-        let found = super::read_all_versions(&LocalFs::new(root)).await.unwrap();
-
-        assert_eq!(found.len(), 1, "only the chunk at the root is adopted");
-        assert_eq!(found[0].0, 0);
     }
 
     #[test]
