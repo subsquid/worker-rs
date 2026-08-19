@@ -206,14 +206,13 @@ impl AssignmentApplier {
         document: Vec<u8>,
         bundle: Option<&PreparedSchemaUpdate>,
     ) -> Result<DatasetsIndex, ApplyOutcome> {
-        let worker = Arc::clone(&self.worker);
         let keypair = self.keypair.clone();
         let id = update.id.clone();
         let assignment_source = self.assignment_source;
         let bundle_ids = bundle.map(PreparedSchemaUpdate::ids);
         let validated = tokio::task::spawn_blocking(move || {
             let assignment = assignments::decode_document(assignment_source, document)?;
-            worker.prepare_assignment(assignment, id, &keypair, |id| {
+            DatasetsIndex::new(assignment, id, &keypair, |id| {
                 bundle_ids.as_ref().is_none_or(|ids| ids.contains(&id))
             })
         })

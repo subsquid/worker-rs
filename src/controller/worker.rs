@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use crate::storage::datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex};
+use crate::storage::datasets_index::{ChunkSchema, DatasetsIndex};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use polars::{
     io::SerWriter,
@@ -15,7 +15,7 @@ use sql_query_plan::plan;
 use substrait::proto::Plan;
 use tokio_util::sync::CancellationToken;
 
-use sqd_network_transport::{Keypair, PeerId};
+use sqd_network_transport::PeerId;
 use tracing::instrument;
 
 use crate::{
@@ -26,7 +26,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::manager::{self, StateManager},
-    types::{dataset::Dataset, schema::SchemaId},
+    types::dataset::Dataset,
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -68,17 +68,6 @@ impl Worker {
 
     pub fn query_schemas(&self) -> Arc<SchemaRegistry> {
         self.query_schemas.clone()
-    }
-
-    pub fn prepare_assignment(
-        &self,
-        assignment: AssignmentBlob,
-        id: impl Into<String>,
-        key: &Keypair,
-        covered_by_bundle: impl Fn(SchemaId) -> bool,
-    ) -> anyhow::Result<DatasetsIndex> {
-        self.state_manager
-            .prepare_assignment(assignment, id, key, covered_by_bundle)
     }
 
     pub fn register_prepared_assignment(&self, assignment: DatasetsIndex) {
