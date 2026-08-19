@@ -8,7 +8,7 @@ proptest! {
     fn every_changed_published_pair_is_emitted_whole(
         pairs in prop::collection::vec((any::<u8>(), any::<u8>()), 1..100),
     ) {
-        let mut announced = Announced::default();
+        let mut announced = None;
         let mut shadow = NetworkPair::default();
 
         for (assignment_tag, bundle_tag) in pairs {
@@ -35,7 +35,11 @@ proptest! {
                 );
                 shadow = current;
             }
-            prop_assert_eq!(&announced.pair, &shadow);
+            let remembered = announced
+                .as_ref()
+                .map(AssignmentUpdate::pair)
+                .unwrap_or_default();
+            prop_assert_eq!(&remembered, &shadow);
         }
     }
 }

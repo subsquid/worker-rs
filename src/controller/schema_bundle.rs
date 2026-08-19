@@ -21,7 +21,7 @@ const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
 const TEMP_PREFIX: &str = "temp-";
 const SCHEMA_SUFFIX: &str = ".yaml";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaBundle {
     pub hash: BundleHash,
     pub url: String,

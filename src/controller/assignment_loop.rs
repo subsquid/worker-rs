@@ -574,7 +574,6 @@ mod tests {
         AssignmentUpdate {
             id: id.to_owned(),
             fb_url_v1: document_url,
-            _effective_from: 0,
             schema_bundle: Some(SchemaBundle {
                 hash: bundle.0,
                 url: bundle.1,
@@ -593,7 +592,6 @@ mod tests {
         AssignmentUpdate {
             id: id.to_owned(),
             fb_url_v1: document_url,
-            _effective_from: 0,
             schema_bundle: None,
         }
     }
