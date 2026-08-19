@@ -32,6 +32,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryResult},
     storage::layout::DataChunk,
+    types::state::ChunkRef,
     util::{timestamp_now_ms, UseOnce},
 };
 
@@ -748,16 +749,13 @@ pub async fn execute<W: QueryRunner, A: CuChecker>(
         allocation_chip = active_len as f32 / chunk_len as f32;
     };
 
+    let chunk = ChunkRef {
+        dataset: Arc::new(query.dataset.clone()),
+        chunk: Arc::from(query.chunk_id.as_str()),
+        version: query.chunk_version,
+    };
     let result = worker
-        .run_query(
-            &query.query,
-            query.dataset.clone(),
-            block_range,
-            &query.chunk_id,
-            query.chunk_version,
-            Some(peer_id),
-            query_type,
-        )
+        .run_query(&query.query, chunk, block_range, Some(peer_id), query_type)
         .await
         .inspect_err(|err| tracing::error!("error processing query: {err}"));
 

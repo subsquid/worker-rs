@@ -26,7 +26,7 @@ use crate::{
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::manager::{self, StateManager},
-    types::dataset::Dataset,
+    types::state::ChunkRef,
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -109,10 +109,8 @@ impl Worker {
     pub async fn run_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
-        chunk_version: u32,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult {
@@ -143,25 +141,12 @@ impl Worker {
         // Arrow IPC output is only produced by the dynamic engine; the pairing is
         // enforced at admission, so it can only reach the experimental path here.
         match query_type {
-            QueryType::PlainQuery => {
-                self.execute_query(query_str, dataset, block_range, chunk_id, chunk_version)
-                    .await
-            }
+            QueryType::PlainQuery => self.execute_query(query_str, chunk, block_range).await,
             QueryType::ExperimentalQuery { output_format } => {
-                self.execute_experimental_query(
-                    query_str,
-                    dataset,
-                    block_range,
-                    chunk_id,
-                    chunk_version,
-                    output_format,
-                )
-                .await
-            }
-            QueryType::SqlQuery => {
-                self.execute_sql_query(query_str, dataset, chunk_id, chunk_version)
+                self.execute_experimental_query(query_str, chunk, block_range, output_format)
                     .await
             }
+            QueryType::SqlQuery => self.execute_sql_query(query_str, chunk).await,
         }
     }
 
@@ -173,10 +158,8 @@ impl Worker {
     async fn execute_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
-        chunk_version: u32,
     ) -> QueryResult {
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
@@ -185,11 +168,7 @@ impl Worker {
         query.set_first_block(from_block);
         query.set_last_block(Some(to_block));
 
-        let Some(chunk_guard) =
-            self.state_manager
-                .clone()
-                .get_chunk(dataset, chunk_id, chunk_version)
-        else {
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(chunk) else {
             return Err(QueryError::NotFound);
         };
 
@@ -256,19 +235,13 @@ impl Worker {
     async fn execute_experimental_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
-        chunk_version: u32,
         output_format: OutputFormat,
     ) -> QueryResult {
         let dataset_type = experimental_engine::extract_dataset_type(query_str)?;
 
-        let Some(chunk) =
-            self.state_manager
-                .clone()
-                .get_query_chunk(dataset, chunk_id, chunk_version)
-        else {
+        let Some(chunk) = self.state_manager.clone().get_query_chunk(chunk) else {
             return Err(QueryError::NotFound);
         };
 
@@ -303,13 +276,7 @@ impl Worker {
     }
 
     #[instrument(skip_all)]
-    async fn execute_sql_query(
-        &self,
-        query_str: &str,
-        dataset: Dataset,
-        chunk_id: &str,
-        chunk_version: u32,
-    ) -> QueryResult {
+    async fn execute_sql_query(&self, query_str: &str, chunk: ChunkRef) -> QueryResult {
         let Ok(query_bytes) = base64.decode(query_str) else {
             return Err(QueryError::BadRequest(format!(
                 "Can't decode plan '{query_str}'"
@@ -321,16 +288,13 @@ impl Worker {
             )));
         };
 
-        let Some(chunk_guard) =
-            self.state_manager
-                .clone()
-                .get_chunk(dataset.clone(), chunk_id, chunk_version)
-        else {
+        let dataset = Arc::clone(&chunk.dataset);
+        let chunk_ids = [chunk.chunk.to_string()];
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(chunk) else {
             return Err(QueryError::NotFound);
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let local_chunk_id = chunk_id.to_owned().clone();
         sqd_polars::POOL.spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let data_source = WorkerChunkStore {
@@ -340,7 +304,7 @@ impl Worker {
                 let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
                     .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
                 let lf = target
-                    .compile(&context, &dataset, &[local_chunk_id], &data_source)
+                    .compile(&context, dataset.as_str(), &chunk_ids, &data_source)
                     .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
                 let parse_duration = parse_timer.elapsed();
                 let exec_timer = std::time::Instant::now();

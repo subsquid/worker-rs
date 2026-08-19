@@ -12,7 +12,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::{
     metrics,
     types::{
-        dataset::{self, Dataset},
+        dataset,
         schema::SchemaId,
         state::{ChunkRef, ChunkSet},
     },
@@ -346,26 +346,18 @@ impl StateManager {
     /// Pins an available chunk against eviction for the lifetime of the returned guard.
     pub fn get_chunk(
         self: Arc<Self>,
-        dataset: Dataset,
-        chunk_id: &str,
-        version: u32,
+        chunk: ChunkRef,
     ) -> Option<scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>> {
-        Some(self.get_query_chunk(dataset, chunk_id, version)?.path)
+        Some(self.get_query_chunk(chunk)?.path)
     }
 
     /// Lock order: index, then state. Version zero is the ingested copy (IB-13).
     pub fn get_query_chunk(
         self: Arc<Self>,
-        dataset: Dataset,
-        chunk_id: &str,
-        version: u32,
+        chunk: ChunkRef,
     ) -> Option<QueryChunk<impl FnOnce(PathBuf)>> {
         let index = self.datasets_index.lock();
-        let chunk = self.state.lock().get_and_lock_chunk(ChunkRef {
-            dataset: Arc::new(dataset),
-            chunk: Arc::from(chunk_id.to_string()),
-            version,
-        })?;
+        let chunk = self.state.lock().get_and_lock_chunk(chunk)?;
         let schema = index
             .as_ref()
             .map_or(ChunkSchema::ByType, |index| index.chunk_schema(&chunk));
@@ -628,7 +620,7 @@ mod tests {
 
         let held = manager
             .clone()
-            .get_query_chunk(dataset.clone(), &chunk.chunk, 0)
+            .get_query_chunk(chunk.clone())
             .expect("the chunk is available");
         assert_eq!(
             held.schema,
@@ -650,7 +642,7 @@ mod tests {
 
         let held = manager
             .clone()
-            .get_query_chunk(dataset, &chunk.chunk, 0)
+            .get_query_chunk(chunk.clone())
             .expect("still available: removal is a later pass");
         assert_eq!(
             held.schema,
