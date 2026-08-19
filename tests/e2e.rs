@@ -164,11 +164,11 @@ async fn empty_slice_assigns_nothing() {
 /// Queries address a chunk version; zero selects the ingested copy (IB-13, IB-41b).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_serves_the_version_the_query_names() {
-    use harness::scheduler::Format;
     use harness::Config;
+    use sqd_worker::cli::AssignmentSource;
 
     let mut h = Harness::with_config(Config {
-        format: Format::Worker,
+        assignment_source: AssignmentSource::Worker,
         ..Config::default()
     })
     .await;
@@ -284,11 +284,11 @@ async fn a_chunk_the_origin_will_not_serve_is_retried_by_the_next_assignment() {
 /// Worker assignments derive files and query schemas from the write-schema roster.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assign_download_query() {
-    use harness::scheduler::Format;
     use harness::Config;
+    use sqd_worker::cli::AssignmentSource;
 
     let mut h = Harness::with_config(Config {
-        format: Format::Worker,
+        assignment_source: AssignmentSource::Worker,
         ..Config::default()
     })
     .await;
@@ -336,11 +336,12 @@ async fn worker_format_assign_download_query() {
 /// Rewritten chunks resolve through their generation prefix (IB-41b).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
-    use harness::scheduler::{Format, Scheduler};
+    use harness::scheduler::Scheduler;
     use harness::Config;
+    use sqd_worker::cli::AssignmentSource;
 
     let mut h = Harness::with_config(Config {
-        format: Format::Worker,
+        assignment_source: AssignmentSource::Worker,
         ..Config::default()
     })
     .await;
@@ -374,11 +375,12 @@ async fn worker_format_fetches_a_republished_chunk_from_its_generation() {
 /// Republishing a chunk at a new version fetches and serves the new copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
-    use harness::scheduler::{Format, Scheduler};
+    use harness::scheduler::Scheduler;
     use harness::Config;
+    use sqd_worker::cli::AssignmentSource;
 
     let mut h = Harness::with_config(Config {
-        format: Format::Worker,
+        assignment_source: AssignmentSource::Worker,
         ..Config::default()
     })
     .await;
@@ -412,11 +414,12 @@ async fn worker_format_refetches_a_chunk_the_assignment_republishes() {
 /// An assignment is not applied without its schema bundle (FM-53b).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_assignment_waits_for_its_schema_bundle() {
-    use harness::scheduler::{AssignmentFault, Format};
+    use harness::scheduler::AssignmentFault;
     use harness::Config;
+    use sqd_worker::cli::AssignmentSource;
 
     let mut h = Harness::with_config(Config {
-        format: Format::Worker,
+        assignment_source: AssignmentSource::Worker,
         ..Config::default()
     })
     .await;
@@ -444,11 +447,12 @@ async fn worker_format_assignment_waits_for_its_schema_bundle() {
 /// A bundle that does not cover its assignment causes the pair to be refused (FM-53c).
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_format_refuses_an_assignment_its_bundle_does_not_cover() {
-    use harness::scheduler::{AssignmentFault, Format};
+    use harness::scheduler::AssignmentFault;
     use harness::Config;
+    use sqd_worker::cli::AssignmentSource;
 
     let mut h = Harness::with_config(Config {
-        format: Format::Worker,
+        assignment_source: AssignmentSource::Worker,
         ..Config::default()
     })
     .await;

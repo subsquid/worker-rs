@@ -10,6 +10,7 @@ use std::io::Write;
 use sha2::{Digest, Sha256};
 use sqd_assignments::{AssignmentBuilder, WorkerAssignmentBuilder, WorkerStatus};
 use sqd_network_transport::PeerId;
+use sqd_worker::cli::AssignmentSource;
 
 use super::corpus::Chunk;
 use super::seed::SplitMix64;
@@ -21,13 +22,6 @@ const STORAGE_SECRET: &str = "conformance-storage-secret";
 
 pub const WRITE_SCHEMA_ID: u32 = 7;
 const WRITE_SCHEMA_TABLES: [&str; 2] = ["blocks", "logs"];
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Format {
-    #[default]
-    Legacy,
-    Worker,
-}
 
 /// How an assignment deviates from well-formed. One knob per registered fault so a test
 /// names the defect it is provoking (spec/13 CT-4).
@@ -79,14 +73,14 @@ pub struct Scheduler {
     stub: HttpStub,
     rng: SplitMix64,
     published: Option<String>,
-    format: Format,
+    assignment_source: AssignmentSource,
     bundle_hash: Option<String>,
 }
 
 impl Scheduler {
-    pub async fn start(rng: SplitMix64, format: Format) -> Self {
+    pub async fn start(rng: SplitMix64, assignment_source: AssignmentSource) -> Self {
         let stub = HttpStub::start().await;
-        let bundle_hash = (format == Format::Worker).then(|| {
+        let bundle_hash = (assignment_source == AssignmentSource::Worker).then(|| {
             let archive = schema_bundle(&[(WRITE_SCHEMA_ID, super::corpus::SCHEMA_YAML)]);
             let hash = format!("sha256:{:x}", Sha256::digest(&archive));
             stub.put(SCHEMA_BUNDLE_PATH, archive);
@@ -96,7 +90,7 @@ impl Scheduler {
             stub,
             rng,
             published: None,
-            format,
+            assignment_source,
             bundle_hash,
         }
     }
@@ -154,9 +148,9 @@ impl Scheduler {
         placements: &[ChunkPlacement],
         fault: AssignmentFault,
     ) -> Assignment {
-        let doc = match self.format {
-            Format::Legacy => self.build_document(worker, placements, fault),
-            Format::Worker => self.build_worker_document(worker, placements, fault),
+        let doc = match self.assignment_source {
+            AssignmentSource::Legacy => self.build_document(worker, placements, fault),
+            AssignmentSource::Worker => self.build_worker_document(worker, placements, fault),
         };
         let path = format!("/assignments/{id}.fb.gz");
 
@@ -173,12 +167,12 @@ impl Scheduler {
             "fb_url_v1": self.stub.url(&path),
             "effective_from": 0,
         });
-        let state = match self.format {
-            Format::Legacy => serde_json::json!({
+        let state = match self.assignment_source {
+            AssignmentSource::Legacy => serde_json::json!({
                 "network": "conformance",
                 "assignment": pointer,
             }),
-            Format::Worker => serde_json::json!({
+            AssignmentSource::Worker => serde_json::json!({
                 "network": "conformance",
                 "worker_assignment": pointer,
                 "schema_bundle": {

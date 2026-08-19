@@ -45,7 +45,7 @@ pub mod validators;
 use origin::Origin;
 use portal::Portal;
 use registry::Registry;
-use scheduler::{Assignment, AssignmentFault, ChunkPlacement, Format, Scheduler};
+use scheduler::{Assignment, AssignmentFault, ChunkPlacement, Scheduler};
 use seed::{Seed, SeedReporter};
 use stub::HttpStub;
 
@@ -113,7 +113,7 @@ pub struct Harness {
     pub worker_id: PeerId,
 
     keypair: Keypair,
-    format: Format,
+    assignment_source: AssignmentSource,
     schemas: Arc<SchemaRegistry>,
     query_schemas: Arc<SchemaRegistry>,
     schema_stub: HttpStub,
@@ -126,13 +126,6 @@ pub struct Harness {
     _reporter: SeedReporter,
 }
 
-fn assignment_source(format: Format) -> AssignmentSource {
-    match format {
-        Format::Legacy => AssignmentSource::Legacy,
-        Format::Worker => AssignmentSource::Worker,
-    }
-}
-
 /// Options a test may vary. Defaults mirror the shipped configuration (spec/15).
 pub struct Config {
     pub parallel_queries: usize,
@@ -141,7 +134,7 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
-    pub format: Format,
+    pub assignment_source: AssignmentSource,
 }
 
 impl Default for Config {
@@ -154,7 +147,7 @@ impl Default for Config {
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
-            format: Format::Legacy,
+            assignment_source: AssignmentSource::Legacy,
         }
     }
 }
@@ -175,7 +168,8 @@ impl Harness {
         let mut portal_rng = seed.stream("portal-identity");
         let portal = Portal::new(&mut portal_rng);
 
-        let scheduler = Scheduler::start(seed.stream("assignment-builder"), config.format).await;
+        let scheduler =
+            Scheduler::start(seed.stream("assignment-builder"), config.assignment_source).await;
         let origin = Origin::start().await;
         let registry = Registry::new(&[portal.peer_id()], config.compute_units);
 
@@ -231,7 +225,7 @@ impl Harness {
             &worker,
             &allocations,
             // Worker mode must not run the legacy CDN schema loop.
-            (config.format == Format::Legacy)
+            (config.assignment_source == AssignmentSource::Legacy)
                 .then(|| (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH))),
             worker_id,
             shutdown.clone(),
@@ -244,7 +238,7 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
-            assignment_source(config.format),
+            config.assignment_source,
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
@@ -253,7 +247,7 @@ impl Harness {
             worker.clone(),
             schema_manager.clone(),
             keypair.clone(),
-            assignment_source(config.format),
+            config.assignment_source,
             assignment_client.clone(),
             Duration::from_millis(200),
         );
@@ -269,7 +263,7 @@ impl Harness {
             logs,
             worker_id,
             keypair,
-            format: config.format,
+            assignment_source: config.assignment_source,
             schemas,
             query_schemas,
             schema_stub,
@@ -279,7 +273,7 @@ impl Harness {
             data_dir,
             _reporter: reporter,
         };
-        if harness.format == Format::Legacy {
+        if harness.assignment_source == AssignmentSource::Legacy {
             harness.await_schemas_loaded().await;
         }
         harness.await_metering_ready().await;
@@ -628,7 +622,7 @@ fn build_args(
         "--l1-rpc-url",
         "http://127.0.0.1:1/unused",
         "--assignment-source",
-        &assignment_source(config.format).to_string(),
+        &config.assignment_source.to_string(),
     ]);
 
     // Positional/env-only settings (IB-32) have no flag to pass; set them directly.
