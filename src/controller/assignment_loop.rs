@@ -166,8 +166,10 @@ impl AssignmentApplier {
         ApplyOutcome::Applied
     }
 
-    /// The pair's bytes: the document as fetched, and the bundle prepared for install. Fails on
-    /// transport only; what the bytes are is judged with the rest of validation. The returned
+    /// The pair's bytes: the document as fetched, and the bundle prepared for install. The
+    /// document half fails on transport only — what its bytes are is judged with the rest of
+    /// validation; the bundle half also carries [`BundleFault`]'s verdict on bytes the hash
+    /// vouched for, which the caller refuses rather than retries. The returned
     /// [`PreparedSchemaUpdate`] holds the schema store's mutation lock until it is installed or
     /// dropped.
     async fn download(

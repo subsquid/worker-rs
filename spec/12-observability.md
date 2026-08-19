@@ -94,7 +94,8 @@ a worker refusing every assignment because the pair it is served diverges looks 
 to one that cannot reach the network. Under `--assignment-source worker` a bundle that never
 installs blocks every assignment (FM-53b) while no other signal moves — the chunk gauges
 simply freeze, which reads exactly like a quiet network — so this is the only witness
-that separates the two. Scalar signals only (OB-14). Bound in IB-31; the legacy
+that separates the two. A bundle that verifies but cannot be used is both a failed load
+and a refused pair, and counts as each (FM-53b, OB-18). Scalar signals only (OB-14). Bound in IB-31; the legacy
 manifest's fetch failures (FM-53) have no signal yet.
 
 ## Property → observable mapping

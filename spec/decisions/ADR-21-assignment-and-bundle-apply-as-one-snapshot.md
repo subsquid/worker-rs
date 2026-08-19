@@ -29,4 +29,7 @@ in force.
 There is no transaction spanning the schema store and assignment state. Safety comes from
 validation first, immutable additive schemas second, and assignment application last. Cached
 schemas keep serving chunks already on disk. Reclamation must key on schemas used by chunks on
-disk because old bundles cannot be fetched by id or hash.
+disk because old bundles cannot be fetched by id or hash. Extends ADR-11: under
+`--assignment-source worker` the operational gate is the bundle (IB-44b) — the CDN manifest is
+not polled at all — and a bundle that fails to install blocks the assignment rather than
+degrading (FM-53b).

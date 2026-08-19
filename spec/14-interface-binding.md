@@ -290,8 +290,8 @@ A bundle is **merged** into `<data-dir>/schemas/<id>.yaml`, not installed as a u
 accumulate across bundles and nothing is removed by a merge. Only the current bundle is
 published, and no schema is addressable by id or hash, so a dropped schema is
 unrecoverable and every chunk on disk written with it becomes unreadable. Schema ids are
-immutable; republishing an id with different contents rejects the update rather than changing the
-meaning of existing chunks. Merging per file makes an interrupted merge a
+immutable; republishing an id with different contents refuses the update (FM-53b) rather than
+changing the meaning of existing chunks. Merging per file makes an interrupted merge a
 smaller store rather than a false one, and the store is adopted at startup, so schemas
 already held answer queries before any download. A stored file that won't read is
 *removed* at startup rather than skipped: it names no meaning any chunk can be served

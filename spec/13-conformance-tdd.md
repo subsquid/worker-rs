@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
 Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-19**
-(baseline commit `7b588ee`). Statuses: **C** covered · **P** partial · **U** unchecked;
+(baseline commit `c40f711`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -226,7 +226,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-51 | CT-2 | U⊘ | sweep-before-check (GAP-16) |
 | FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
 | FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
-| FM-53b | CT-4 | P | `e2e` drives the block end to end: an unfetchable bundle leaves the assignment unapplied and no chunk fetched. Hash mismatch, damaged cache and retry-until-installed are unit-tested; the metrics half (OB) is unasserted; `assignment_loop_pbt` adds randomized pair histories — over any sequence of refused and transient halves, neither the active assignment nor the installed bundle moves except on a pair that applied whole |
+| FM-53b | CT-4 | P | `e2e` drives the block end to end: an unfetchable bundle leaves the assignment unapplied and no chunk fetched. Hash mismatch, damaged cache and retry-until-installed are unit-tested, and so is the line the hash check draws: a bundle with nothing to load is refused once and not fetched again while a hash mismatch is retried (`assignment_loop` tests), with the transient/verdict split of every staging failure pinned in the `schema_bundle` unit tests; the metrics half (OB) is unasserted; `assignment_loop_pbt` adds randomized pair histories — over any sequence of refused and transient halves, neither the active assignment nor the installed bundle moves except on a pair that applied whole |
 | FM-53c | CT-4 | P | unit-tested: an assignment naming a schema the bundle lacks is refused whole, and a schema survives a later bundle that omits it (bundles merge — IB-44b). ADR-21's stricter rule is driven through the harness: a bundle that omits the schema its assignment references leaves the assignment unapplied and nothing fetched, and the test fails if coverage is judged against the accumulated store instead. The OB-16 alarm is unasserted; the same property run covers refusal atomicity. IB-40b's pair announcement is asserted at the stream by `assignments_pbt` — every changed pair is emitted whole and a bundle change carries its assignment — but that a corrected bundle then gets the refused assignment reconsidered is not itself asserted |
 | FM-53d | CT-4 | P | unit-tested at the poll: a state with an assignment and no bundle, and one whose bundle hash does not parse, are each answered as not-applicable rather than an error, the pair fault is counted, and the announced pair is left alone so the corrected state re-offers it whole; a state with no assignment for the mode waits the same way whatever its bundle says, uncounted, since it is indistinguishable from a network that has not migrated. That erroring instead costs hours of backoff is reasoned, not driven — no test measures the poll cadence |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
