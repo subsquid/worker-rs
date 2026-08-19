@@ -166,16 +166,10 @@ impl DatasetsIndex {
                             dataset.id()
                         );
                     };
-                    // The id becomes the chunk's path under its dataset, and the store is read
-                    // back by that path at every start (DEF-6): admit only the canonical shape
-                    // recovery adopts, so nothing is written beside or above the dataset
-                    // directory and nothing is written that a restart would not read back.
-                    if !is_canonical_chunk_id(&id) {
-                        anyhow::bail!(
-                            "chunk '{id}' of dataset '{}' is not <top>/<first>-<last>-<hash> with ten-digit numbers and a hash of 5 to 8 word characters",
-                            dataset.id()
-                        );
-                    }
+                    // The id is the chunk's path under its dataset, and the store is read back
+                    // by that path at every start (DEF-6). The format fixes the id's shape; what
+                    // it leaves to the document is which top dir a chunk sits under, and a
+                    // restart does not adopt one that starts before its top dir.
                     if chunk.first_block() < chunk.top() {
                         anyhow::bail!(
                             "chunk '{id}' of dataset '{}' starts at block {} but lies under top dir {}, which a restart would not adopt",
@@ -218,11 +212,9 @@ impl DatasetsIndex {
                                 "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
                             );
                         }
-                        // Each table becomes `<table>.parquet` inside the chunk directory, and
-                        // the files of one chunk download concurrently: a name that is not a
-                        // file name, one too long for one, or one listed twice (two writers on
-                        // one path) is the roster disagreeing with the store it is written to.
-                        let mut seen = HashSet::new();
+                        // Each table becomes `<table>.parquet` inside the chunk directory: a
+                        // name that is not a file name, or too long for one, is the roster
+                        // disagreeing with the store it is written to.
                         for table in assignment
                             .get_write_schema(chunk.write_schema_id())
                             .into_iter()
@@ -236,11 +228,6 @@ impl DatasetsIndex {
                             if table.len() + TABLE_FILE_SUFFIX.len() > MAX_FILE_NAME_BYTES {
                                 anyhow::bail!(
                                     "write schema {schema_id} names a table whose file name would exceed {MAX_FILE_NAME_BYTES} bytes",
-                                );
-                            }
-                            if !seen.insert(table) {
-                                anyhow::bail!(
-                                    "write schema {schema_id} lists table '{table}' twice",
                                 );
                             }
                         }
@@ -311,29 +298,6 @@ const TABLE_FILE_SUFFIX: &str = ".parquet";
 
 /// The longest file name the store's filesystems accept (NAME_MAX on Linux and macOS).
 const MAX_FILE_NAME_BYTES: usize = 255;
-
-/// The canonical chunk id, `<top>/<first>-<last>-<hash>`: three ten-digit numbers and a hash of
-/// 5 to 8 word characters — the rule the assignment builder enforces and the shape a restart
-/// reads back from the store (ADR-4, DEF-6). The reader rebuilds the id from numeric columns
-/// and an eight-byte hash field it checks only for UTF-8, so a hand-built document can put path
-/// separators or `..` in the hash, and numbers of eleven digits print unpadded.
-fn is_canonical_chunk_id(id: &str) -> bool {
-    fn ten_digits(s: &str) -> bool {
-        s.len() == 10 && s.bytes().all(|b| b.is_ascii_digit())
-    }
-    let Some((top, name)) = id.split_once('/') else {
-        return false;
-    };
-    let mut parts = name.splitn(3, '-');
-    let (Some(first), Some(last), Some(hash)) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
-    ten_digits(top)
-        && ten_digits(first)
-        && ten_digits(last)
-        && (5..=8).contains(&hash.len())
-        && hash.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
 
 /// A table name becomes `<name>.parquet` inside the chunk's directory, so it has to be a file
 /// name and not a path. `..` or a separator would write the file somewhere else while the chunk

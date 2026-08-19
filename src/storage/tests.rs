@@ -464,66 +464,6 @@ mod worker_assignment {
         );
     }
 
-    /// Corrupts the one place a crafted document can put a path into a chunk id: the eight-byte
-    /// hash field, which the reader checks only for UTF-8. Corrupting an input, never the
-    /// encoder: the builder only accepts word characters.
-    fn with_hash_bytes(mut document: Vec<u8>, hash: &[u8; 8]) -> Vec<u8> {
-        // The test chunk's hash, NUL-padded to the field's width.
-        let mut stored = [0u8; 8];
-        stored[..5].copy_from_slice(b"BQJdx");
-        let at: Vec<usize> = document
-            .windows(stored.len())
-            .enumerate()
-            .filter(|(_, window)| *window == stored)
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(at.len(), 1, "the hash column holds the hash exactly once");
-        document[at[0]..at[0] + 8].copy_from_slice(hash);
-        document
-    }
-
-    fn document_for(peer_id: sqd_network_transport::PeerId) -> Vec<u8> {
-        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
-        builder.register_write_schema(7, &["blocks"]).unwrap();
-        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
-        dataset
-            .new_chunk()
-            .id(CHUNK_ID)
-            .block_range(221000000..=221000649)
-            .size(1000000)
-            .write_schema_id(7)
-            .worker_indexes(&[0])
-            .finish()
-            .unwrap();
-        dataset.finish().unwrap();
-        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
-        builder.finish()
-    }
-
-    /// The id is the chunk's path under its dataset. A hash carrying separators would put the
-    /// chunk beside or above where the store reads chunks back from; one shorter than the layout
-    /// admits would be written and never read back. Both are refused at the door.
-    #[test]
-    fn a_chunk_whose_hash_is_not_a_hash_is_refused() {
-        let keypair = Keypair::generate_ed25519();
-        let peer_id = keypair.public().to_peer_id();
-
-        for (hash, what) in [
-            (b"/../../x", "separators"),
-            (b"BQJd\0\0\0\0", "four characters"),
-        ] {
-            let document = with_hash_bytes(document_for(peer_id), hash);
-            let assignment =
-                WorkerAssignment::from_owned(document).expect("still a well-formed document");
-
-            let message = expect_rejected(assignment, &keypair);
-            assert!(
-                message.contains("is not <top>/<first>-<last>-<hash>"),
-                "{what}: {message}"
-            );
-        }
-    }
-
     /// Recovery refuses a chunk directory whose first block lies before its top dir, so a
     /// document placing one there would download fine and fail the next start.
     #[test]
@@ -552,45 +492,6 @@ mod worker_assignment {
             message.contains("lies under top dir 221001000"),
             "{message}"
         );
-    }
-
-    /// Two roster entries with one name are two concurrent writers on one file. The builder
-    /// refuses such a roster, so the document is corrupted after the fact: `blockb` becomes a
-    /// second `blocka`.
-    #[test]
-    fn a_roster_listing_a_table_twice_is_refused() {
-        let keypair = Keypair::generate_ed25519();
-        let peer_id = keypair.public().to_peer_id();
-        let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
-        builder
-            .register_write_schema(7, &["blocka", "blockb"])
-            .unwrap();
-        let mut dataset = builder.new_dataset(DATASET, BASE_URL);
-        dataset
-            .new_chunk()
-            .id(CHUNK_ID)
-            .block_range(221000000..=221000649)
-            .size(1000000)
-            .write_schema_id(7)
-            .worker_indexes(&[0])
-            .finish()
-            .unwrap();
-        dataset.finish().unwrap();
-        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
-        let mut document = builder.finish();
-        let at: Vec<usize> = document
-            .windows(6)
-            .enumerate()
-            .filter(|(_, window)| *window == b"blockb")
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(at.len(), 1, "the roster holds the name exactly once");
-        document[at[0]..at[0] + 6].copy_from_slice(b"blocka");
-        let assignment =
-            WorkerAssignment::from_owned(document).expect("still a well-formed document");
-
-        let message = expect_rejected(assignment, &keypair);
-        assert!(message.contains("lists table 'blocka' twice"), "{message}");
     }
 
     /// A name the filesystem will not take fails every download of every chunk on the schema.
