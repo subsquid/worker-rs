@@ -1,6 +1,8 @@
 //! Applies assignments announced by [`super::assignments`].
 
 use std::collections::VecDeque;
+use std::mem;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,13 +10,14 @@ use futures::{Stream, StreamExt};
 use rand::Rng;
 use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, Instrument};
+use tracing::{debug, info, warn, Instrument};
 
 use super::assignments::{self, AssignmentUpdate, NetworkPair};
 use super::schema_bundle::{PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
 use crate::cli::AssignmentSource;
 use crate::metrics;
+use crate::storage::datasets_index::DatasetsIndex;
 use crate::storage::manager::AssignmentOutcome;
 
 const MAX_PENDING_ASSIGNMENTS: usize = 5;
@@ -31,28 +34,6 @@ pub enum ApplyOutcome {
     Refused,
     /// Transient network or local failure.
     Failed,
-}
-
-/// Whether the assignment that just failed is still the one to try.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Wait {
-    Retry,
-    /// The network announced something else meanwhile. Whatever that queued is next; if it
-    /// queued nothing — the pair in force again — the failed pair is simply retracted.
-    Superseded,
-    Stop,
-}
-
-/// Which half of the pair could not be fetched. The bundle is prepared first, so a bundle
-/// failure must not read as a document one.
-enum Unfetched {
-    Bundle(anyhow::Error),
-    Document(anyhow::Error),
-}
-
-/// The whole cause chain on one line; `Display` alone shows only the outermost context.
-fn chain(error: &anyhow::Error) -> String {
-    format!("{error:#}")
 }
 
 pub struct AssignmentApplier {
@@ -93,198 +74,103 @@ impl AssignmentApplier {
                 .take_until(cancellation_token.clone().cancelled_owned())
                 .fuse(),
         );
-        let mut pending: VecDeque<AssignmentUpdate> = VecDeque::new();
-        // The last pair refused; a new location for it changes nothing. One slot, so alternating
-        // bad pairs cost one wasted fetch each.
-        let mut refused: Option<NetworkPair> = None;
-        let mut processing_id: Option<String> = None;
-        let mut processing_stalled = false;
-        let base = RETRY_BASE.min(self.retry_cap);
-        let mut backoff = base;
+        let mut intake = Intake::new(self.retry_cap);
 
-        'assignments: loop {
-            if processing_id.is_none() {
-                if let Some(update) = pending.pop_front() {
-                    match self.apply(&update).await {
-                        ApplyOutcome::Applied => {
-                            backoff = base;
-                            if self.assignment_source == AssignmentSource::Worker {
-                                processing_id = Some(update.id);
-                                processing_stalled = false;
-                            }
-                        }
-                        ApplyOutcome::Refused => {
-                            refused = Some(update.pair());
-                            backoff = base;
-                        }
-                        ApplyOutcome::Failed => {
-                            match self
-                                .wait_before_retry(
-                                    backoff,
-                                    &mut pending,
-                                    &refused,
-                                    &mut updates,
-                                    &cancellation_token,
-                                )
-                                .await
-                            {
-                                Wait::Retry => {
-                                    backoff = (backoff * 2).min(self.retry_cap);
-                                    requeue_pending_assignment(&mut pending, update);
-                                }
-                                Wait::Superseded => backoff = base,
-                                Wait::Stop => break 'assignments,
-                            }
-                        }
+        loop {
+            let event = match intake.in_flight.clone() {
+                InFlight::Idle => match intake.pending.pop_front() {
+                    Some(update) => Event::Apply(update),
+                    None => announcement(&mut updates, &cancellation_token).await,
+                },
+                InFlight::Stalled(_) if !intake.pending.is_empty() => Event::SkipStalled,
+                InFlight::Stalled(_) => announcement(&mut updates, &cancellation_token).await,
+                InFlight::Settling(id) => tokio::select! {
+                    update = updates.next() => update.map_or(Event::Stop, Event::Announced),
+                    settled = self.worker.wait_until_assignment_settled(&id, cancellation_token.clone()) => {
+                        settled.map_or(Event::Stop, Event::Settled)
                     }
-                    continue;
-                }
-            }
-
-            match processing_id.clone() {
-                Some(id) if processing_stalled => {
-                    if !pending.is_empty() {
-                        let skipped = keep_only_latest_pending_assignment(&mut pending);
-                        warn!(
-                            assignment_id = %id,
-                            skipped,
-                            "Skipping stalled assignment in favor of the most recent one"
-                        );
-                        processing_id = None;
-                        processing_stalled = false;
-                        continue;
-                    }
-                    tokio::select! {
-                        update = updates.next() => {
-                            let Some(update) = update else {
-                                break;
-                            };
-                            self.absorb(update, &mut pending, &refused);
-                        }
-                        _ = cancellation_token.cancelled() => break,
+                },
+            };
+            match event {
+                Event::Stop => break,
+                Event::Apply(update) => {
+                    let flow = self
+                        .apply_next(update, &mut intake, &mut updates, &cancellation_token)
+                        .await;
+                    if flow.is_break() {
+                        break;
                     }
                 }
-                Some(id) => {
-                    tokio::select! {
-                        update = updates.next() => {
-                            let Some(update) = update else {
-                                break;
-                            };
-                            if self.absorb(update, &mut pending, &refused) {
-                                warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
-                                processing_id = None;
-                            }
-                        }
-                        settled = self.worker.wait_until_assignment_settled(&id, cancellation_token.clone()) => {
-                            match settled {
-                                None => break,
-                                Some(AssignmentOutcome::Applied) => {
-                                    processing_id = None;
-                                }
-                                Some(AssignmentOutcome::Stalled) => {
-                                    warn!(assignment_id = %id, "Assignment stalled: some chunks exhausted their download attempts");
-                                    processing_stalled = true;
-                                }
-                            }
-                        }
+                Event::Announced(update) => {
+                    if intake.absorb(update, &self.applied_pair()) == Absorbed::Overflowed {
+                        intake.abandon_settling();
                     }
                 }
-                None => {
-                    tokio::select! {
-                        update = updates.next() => {
-                            let Some(update) = update else {
-                                break;
-                            };
-                            self.absorb(update, &mut pending, &refused);
-                        }
-                        _ = cancellation_token.cancelled() => break,
-                    }
-                }
+                Event::Settled(outcome) => intake.settle(outcome),
+                Event::SkipStalled => intake.skip_stalled(),
             }
         }
         info!("Assignment processing task finished");
     }
 
+    async fn apply_next(
+        &self,
+        update: AssignmentUpdate,
+        intake: &mut Intake,
+        updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
+        cancellation_token: &CancellationToken,
+    ) -> ControlFlow<()> {
+        match self.apply(&update).await {
+            ApplyOutcome::Applied => {
+                intake.backoff.reset();
+                if self.assignment_source == AssignmentSource::Worker {
+                    intake.in_flight = InFlight::Settling(update.id);
+                }
+            }
+            ApplyOutcome::Refused => {
+                intake.refused = Some(update.pair());
+                intake.backoff.reset();
+            }
+            ApplyOutcome::Failed => {
+                match self
+                    .wait_before_retry(intake, updates, cancellation_token)
+                    .await
+                {
+                    Wait::Retry => {
+                        intake.backoff.grow();
+                        intake.pending.push_front(update);
+                    }
+                    Wait::Superseded => intake.backoff.reset(),
+                    Wait::Stop => return ControlFlow::Break(()),
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
     /// Downloads the pair, validates the assignment against the bundle, installs the schemas,
     /// and registers the assignment — in that order (ADR-21).
     pub async fn apply(&self, update: &AssignmentUpdate) -> ApplyOutcome {
-        tracing::debug!("Downloading assignment \"{}\"", update.id);
-        let (document, prepared_bundle) = match self.download(update).await {
-            Ok(downloaded) => downloaded,
-            Err(Unfetched::Bundle(e)) => {
-                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to prepare schema bundle");
-                return ApplyOutcome::Failed;
-            }
-            Err(Unfetched::Document(e)) => {
-                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to download assignment");
-                return ApplyOutcome::Failed;
-            }
+        debug!("Downloading assignment \"{}\"", update.id);
+        let (document, bundle) = match self.download(update).await {
+            Ok(fetched) => fetched,
+            Err(unfetched) => return unfetched.fail(update),
         };
-        tracing::debug!("Downloaded assignment \"{}\"", update.id);
+        debug!("Downloaded assignment \"{}\"", update.id);
 
-        let worker = Arc::clone(&self.worker);
-        let keypair = self.keypair.clone();
-        let id = update.id.clone();
-        let assignment_source = self.assignment_source;
-        let prepared_ids = prepared_bundle.as_ref().map(|bundle| bundle.ids());
-        // Decoding is a verdict on the document like the rest of validation (FM-12): a document
-        // that will not decode is refused, not retried, and the verifier runs off the runtime.
-        let validated = tokio::task::spawn_blocking(move || {
-            let assignment = assignments::decode_document(assignment_source, document)?;
-            worker.prepare_assignment(assignment, id, &keypair, |id| {
-                prepared_ids.as_ref().is_none_or(|ids| ids.contains(&id))
-            })
-        })
-        .instrument(tracing::info_span!("validate_assignment", id = %update.id))
-        .await;
-        let prepared_assignment = match validated {
-            Ok(Ok(assignment)) => assignment,
-            Ok(Err(e)) => {
-                return self.refuse(update, e);
-            }
-            // FlatBuffers verification does not validate peer-id bytes; contain reader panics.
-            Err(e) if e.is_panic() => {
-                return self.refuse(update, "reading it panicked");
-            }
-            Err(e) => {
-                warn!(assignment_id = %update.id, error = %chain(&e.into()), "Validation didn't finish");
-                return ApplyOutcome::Failed;
-            }
+        let index = match self.validate(update, document, bundle.as_ref()).await {
+            Ok(index) => index,
+            Err(outcome) => return outcome,
         };
-
-        if let Some(bundle) = prepared_bundle {
+        if let Some(bundle) = bundle {
             if let Err(e) = bundle.install() {
                 metrics::SCHEMA_BUNDLE_FAILURES.inc();
                 warn!(assignment_id = %update.id, error = %chain(&e), "Failed to activate schema bundle");
                 return ApplyOutcome::Failed;
             }
         }
-
-        // Do not reset the download budget for a bundle-only update.
-        if self.worker.registered_assignment_id().as_deref() != Some(update.id.as_str()) {
-            let worker = Arc::clone(&self.worker);
-            tokio::task::spawn_blocking(move || {
-                worker.register_prepared_assignment(prepared_assignment)
-            })
-            .instrument(tracing::info_span!("set_assignment", id = %update.id))
-            .await
-            .expect("register_assignment shouldn't panic");
-        }
-
+        self.register(update, index).await;
         ApplyOutcome::Applied
-    }
-
-    /// Refuses the pair without replacing the active assignment.
-    fn refuse(&self, update: &AssignmentUpdate, reason: impl std::fmt::Display) -> ApplyOutcome {
-        if self.worker.registered_assignment_id().is_none() {
-            metrics::set_status(metrics::WorkerStatus::NotRegistered);
-        }
-        metrics::ASSIGNMENTS_REFUSED.inc();
-        warn!(
-            assignment_id = %update.id, reason = %reason,
-            "Refused assignment; only a different one can be applied now"
-        );
-        ApplyOutcome::Refused
     }
 
     /// The pair's bytes: the document as fetched, and the bundle prepared for install. Fails on
@@ -295,7 +181,7 @@ impl AssignmentApplier {
         &self,
         update: &AssignmentUpdate,
     ) -> Result<(Vec<u8>, Option<PreparedSchemaUpdate>), Unfetched> {
-        let prepared = match self.assignment_source {
+        let bundle = match self.assignment_source {
             AssignmentSource::Legacy => None,
             AssignmentSource::Worker => {
                 let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
@@ -314,42 +200,65 @@ impl AssignmentApplier {
         let document = assignments::fetch_document(&update.fb_url_v1, &self.client)
             .await
             .map_err(Unfetched::Document)?;
-        Ok((document, prepared))
+        Ok((document, bundle))
     }
 
-    /// Queues an update unless nothing is outstanding for its pair. A location only matters
-    /// while a fetch of that identity can still be rescued by it; under a pair already applied
-    /// or refused, acting on one would re-fetch the document on every url rotation. Such an
-    /// announcement is still the network's latest word, though: whatever was queued behind it
-    /// is no longer published, so it is dropped rather than applied later.
-    fn absorb(
+    /// Decoding is a verdict on the document like the rest of validation (FM-12), so it runs
+    /// here, off the runtime thread, and a failure is a refusal.
+    async fn validate(
         &self,
-        update: AssignmentUpdate,
-        pending: &mut VecDeque<AssignmentUpdate>,
-        refused: &Option<NetworkPair>,
-    ) -> bool {
-        let pair = update.pair();
-        let applied = NetworkPair {
-            assignment_id: self.worker.registered_assignment_id(),
-            bundle_hash: self.schema_manager.installed_hash(),
-        };
-        if pair == applied || refused.as_ref() == Some(&pair) {
-            if pending.is_empty() {
-                tracing::debug!(
-                    assignment_id = %update.id,
-                    "Nothing outstanding for this pair; its location moved and that is all"
-                );
-            } else {
-                tracing::info!(
-                    assignment_id = %update.id,
-                    retracted = pending.len(),
-                    "Network is back on a pair with nothing outstanding; dropping what was queued"
-                );
-                pending.clear();
+        update: &AssignmentUpdate,
+        document: Vec<u8>,
+        bundle: Option<&PreparedSchemaUpdate>,
+    ) -> Result<DatasetsIndex, ApplyOutcome> {
+        let worker = Arc::clone(&self.worker);
+        let keypair = self.keypair.clone();
+        let id = update.id.clone();
+        let assignment_source = self.assignment_source;
+        let bundle_ids = bundle.map(PreparedSchemaUpdate::ids);
+        let validated = tokio::task::spawn_blocking(move || {
+            let assignment = assignments::decode_document(assignment_source, document)?;
+            worker.prepare_assignment(assignment, id, &keypair, |id| {
+                bundle_ids.as_ref().is_none_or(|ids| ids.contains(&id))
+            })
+        })
+        .instrument(tracing::info_span!("validate_assignment", id = %update.id))
+        .await;
+        match validated {
+            Ok(Ok(index)) => Ok(index),
+            Ok(Err(e)) => Err(self.refuse(update, e)),
+            // FlatBuffers verification does not validate peer-id bytes; contain reader panics.
+            Err(e) if e.is_panic() => Err(self.refuse(update, "reading it panicked")),
+            Err(e) => {
+                warn!(assignment_id = %update.id, error = %chain(&e.into()), "Validation didn't finish");
+                Err(ApplyOutcome::Failed)
             }
-            return false;
         }
-        push_pending_assignment(pending, update)
+    }
+
+    async fn register(&self, update: &AssignmentUpdate, index: DatasetsIndex) {
+        // A bundle-only update keeps the assignment's download budget.
+        if self.worker.registered_assignment_id().as_deref() == Some(update.id.as_str()) {
+            return;
+        }
+        let worker = Arc::clone(&self.worker);
+        tokio::task::spawn_blocking(move || worker.register_prepared_assignment(index))
+            .instrument(tracing::info_span!("set_assignment", id = %update.id))
+            .await
+            .expect("register_assignment shouldn't panic");
+    }
+
+    /// Refuses the pair without replacing the active assignment.
+    fn refuse(&self, update: &AssignmentUpdate, reason: impl std::fmt::Display) -> ApplyOutcome {
+        if self.worker.registered_assignment_id().is_none() {
+            metrics::set_status(metrics::WorkerStatus::NotRegistered);
+        }
+        metrics::ASSIGNMENTS_REFUSED.inc();
+        warn!(
+            assignment_id = %update.id, reason = %reason,
+            "Refused assignment; only a different one can be applied now"
+        );
+        ApplyOutcome::Refused
     }
 
     /// Accepts newer announcements while waiting to retry. Any announcement ends the wait: it
@@ -358,13 +267,11 @@ impl AssignmentApplier {
     /// what to retry.
     async fn wait_before_retry(
         &self,
-        backoff: Duration,
-        pending: &mut VecDeque<AssignmentUpdate>,
-        refused: &Option<NetworkPair>,
+        intake: &mut Intake,
         updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
         cancellation_token: &CancellationToken,
     ) -> Wait {
-        if !pending.is_empty() {
+        if !intake.pending.is_empty() {
             return Wait::Superseded;
         }
         tokio::select! {
@@ -372,12 +279,29 @@ impl AssignmentApplier {
                 let Some(update) = update else {
                     return Wait::Stop;
                 };
-                self.absorb(update, pending, refused);
+                intake.absorb(update, &self.applied_pair());
                 Wait::Superseded
             }
-            _ = tokio::time::sleep(jitter(backoff)) => Wait::Retry,
+            _ = tokio::time::sleep(jitter(intake.backoff.current())) => Wait::Retry,
             _ = cancellation_token.cancelled() => Wait::Stop,
         }
+    }
+
+    fn applied_pair(&self) -> NetworkPair {
+        NetworkPair {
+            assignment_id: self.worker.registered_assignment_id(),
+            bundle_hash: self.schema_manager.installed_hash(),
+        }
+    }
+}
+
+async fn announcement(
+    updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
+    cancellation_token: &CancellationToken,
+) -> Event {
+    tokio::select! {
+        update = updates.next() => update.map_or(Event::Stop, Event::Announced),
+        _ = cancellation_token.cancelled() => Event::Stop,
     }
 }
 
@@ -386,74 +310,200 @@ fn jitter(delay: Duration) -> Duration {
     rand::rng().random_range((delay / 2)..=delay)
 }
 
-/// Takes an announced update into the queue, and answers whether that overflowed it.
-///
-/// The stream announces a change of *where* as well as of *what* (IB-40b), because a corrected
-/// url is the only thing that can rescue a fetch that keeps failing. Identity still decides what
-/// to do — so an update whose pair is already queued replaces it rather than queueing twice, and
-/// the queued copy is the one carrying the locations the network published most recently.
-fn push_pending_assignment(
-    pending: &mut VecDeque<AssignmentUpdate>,
-    update: AssignmentUpdate,
-) -> bool {
-    if let Some(queued) = pending
-        .back_mut()
-        .filter(|queued| queued.pair() == update.pair())
-    {
-        tracing::debug!(assignment_id = %update.id, "Already queued; taking the latest locations");
-        *queued = update;
-        return false;
+/// The whole cause chain on one line; `Display` alone shows only the outermost context.
+fn chain(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
+enum Event {
+    Apply(AssignmentUpdate),
+    Announced(AssignmentUpdate),
+    Settled(AssignmentOutcome),
+    SkipStalled,
+    Stop,
+}
+
+/// Whether the update that just failed is still the one to retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    Retry,
+    /// The network announced something else meanwhile. Whatever that queued is next; if it
+    /// queued nothing — the pair in force again — the failed pair is simply retracted.
+    Superseded,
+    Stop,
+}
+
+/// Which half of the pair could not be fetched. The bundle is prepared first, so a bundle
+/// failure must not read as a document one.
+enum Unfetched {
+    Bundle(anyhow::Error),
+    Document(anyhow::Error),
+}
+
+impl Unfetched {
+    fn fail(self, update: &AssignmentUpdate) -> ApplyOutcome {
+        match self {
+            Unfetched::Bundle(e) => {
+                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to prepare schema bundle");
+            }
+            Unfetched::Document(e) => {
+                warn!(assignment_id = %update.id, error = %chain(&e), "Failed to download assignment");
+            }
+        }
+        ApplyOutcome::Failed
     }
-    if let Some(skipped) = push_pending_item(pending, update) {
+}
+
+/// The assignment registered last, as the loop relates to it. Legacy mode never leaves `Idle`:
+/// it applies each update as it arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InFlight {
+    Idle,
+    /// Registered; the next update waits for its verdict (strictly in-order application).
+    Settling(String),
+    /// Stalled, which is terminal; only a newer update moves things.
+    Stalled(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Absorbed {
+    Queued,
+    /// The pair has nothing outstanding — applied or refused — so only its location moved.
+    NothingOutstanding,
+    Overflowed,
+}
+
+struct Backoff {
+    base: Duration,
+    cap: Duration,
+    current: Duration,
+}
+
+impl Backoff {
+    fn new(cap: Duration) -> Self {
+        let base = RETRY_BASE.min(cap);
+        Self {
+            base,
+            cap,
+            current: base,
+        }
+    }
+
+    fn current(&self) -> Duration {
+        self.current
+    }
+
+    fn grow(&mut self) {
+        self.current = (self.current * 2).min(self.cap);
+    }
+
+    fn reset(&mut self) {
+        self.current = self.base;
+    }
+}
+
+/// The loop's bookkeeping: what is queued, what was refused, what is in flight, how long the
+/// next retry waits.
+struct Intake {
+    pending: VecDeque<AssignmentUpdate>,
+    /// The last pair refused; a new location for it changes nothing. One slot, so alternating
+    /// bad pairs cost one wasted fetch each.
+    refused: Option<NetworkPair>,
+    in_flight: InFlight,
+    backoff: Backoff,
+}
+
+impl Intake {
+    fn new(retry_cap: Duration) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            refused: None,
+            in_flight: InFlight::Idle,
+            backoff: Backoff::new(retry_cap),
+        }
+    }
+
+    /// Queues an update unless nothing is outstanding for its pair. A location only matters
+    /// while a fetch of that identity can still be rescued by it; under a pair already applied
+    /// or refused, acting on one would re-fetch the document on every url rotation. Such an
+    /// announcement is still the network's latest word, though: whatever was queued behind it
+    /// is no longer published, so it is dropped rather than applied later. A pair already queued
+    /// is replaced rather than queued twice, so the queued copy carries the latest locations.
+    fn absorb(&mut self, update: AssignmentUpdate, applied: &NetworkPair) -> Absorbed {
+        let pair = update.pair();
+        if pair == *applied || self.refused.as_ref() == Some(&pair) {
+            if self.pending.is_empty() {
+                debug!(
+                    assignment_id = %update.id,
+                    "Nothing outstanding for this pair; its location moved and that is all"
+                );
+            } else {
+                info!(
+                    assignment_id = %update.id,
+                    retracted = self.pending.len(),
+                    "Network is back on a pair with nothing outstanding; dropping what was queued"
+                );
+                self.pending.clear();
+            }
+            return Absorbed::NothingOutstanding;
+        }
+        if let Some(queued) = self
+            .pending
+            .back_mut()
+            .filter(|queued| queued.pair() == pair)
+        {
+            debug!(assignment_id = %update.id, "Already queued; taking the latest locations");
+            *queued = update;
+            return Absorbed::Queued;
+        }
+        self.pending.push_back(update);
+        if self.pending.len() <= MAX_PENDING_ASSIGNMENTS {
+            return Absorbed::Queued;
+        }
+        let skipped = self.keep_latest();
+        warn!("Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
+        Absorbed::Overflowed
+    }
+
+    fn keep_latest(&mut self) -> usize {
+        let latest = self
+            .pending
+            .pop_back()
+            .expect("pending queue was just checked as non-empty");
+        let skipped = self.pending.len();
+        self.pending.clear();
+        self.pending.push_back(latest);
+        skipped
+    }
+
+    fn settle(&mut self, outcome: AssignmentOutcome) {
+        let InFlight::Settling(id) = mem::replace(&mut self.in_flight, InFlight::Idle) else {
+            return;
+        };
+        if outcome == AssignmentOutcome::Stalled {
+            warn!(assignment_id = %id, "Assignment stalled: some chunks exhausted their download attempts");
+            self.in_flight = InFlight::Stalled(id);
+        }
+    }
+
+    fn skip_stalled(&mut self) {
+        let InFlight::Stalled(id) = mem::replace(&mut self.in_flight, InFlight::Idle) else {
+            return;
+        };
+        let skipped = self.keep_latest();
         warn!(
-            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
+            assignment_id = %id,
+            skipped,
+            "Skipping stalled assignment in favor of the most recent one"
         );
-        true
-    } else {
-        false
     }
-}
 
-fn push_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
-    pending.push_back(item);
-    if pending.len() > MAX_PENDING_ASSIGNMENTS {
-        Some(keep_only_latest_pending_assignment(pending))
-    } else {
-        None
+    fn abandon_settling(&mut self) {
+        if let InFlight::Settling(id) = &self.in_flight {
+            warn!(assignment_id = %id, "Skipping current assignment because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}");
+            self.in_flight = InFlight::Idle;
+        }
     }
-}
-
-fn requeue_pending_assignment(
-    pending: &mut VecDeque<AssignmentUpdate>,
-    update: AssignmentUpdate,
-) -> bool {
-    if let Some(skipped) = requeue_pending_item(pending, update) {
-        warn!(
-            "Skipping {skipped} pending assignments because assignment queue exceeded {MAX_PENDING_ASSIGNMENTS}"
-        );
-        true
-    } else {
-        false
-    }
-}
-
-fn requeue_pending_item<T>(pending: &mut VecDeque<T>, item: T) -> Option<usize> {
-    pending.push_front(item);
-    if pending.len() > MAX_PENDING_ASSIGNMENTS {
-        Some(keep_only_latest_pending_assignment(pending))
-    } else {
-        None
-    }
-}
-
-fn keep_only_latest_pending_assignment<T>(pending: &mut VecDeque<T>) -> usize {
-    let latest = pending
-        .pop_back()
-        .expect("pending queue was just checked as non-empty");
-    let skipped = pending.len();
-    pending.clear();
-    pending.push_back(latest);
-    skipped
 }
 
 #[cfg(test)]
@@ -1047,30 +1097,35 @@ mod tests {
             ApplyOutcome::Applied
         );
 
-        let mut pending = VecDeque::from([update("y", f.stub.url("/y.fb.gz"), bundle.clone())]);
-        let overflowed = f.applier.absorb(
-            update("x", x_moved.clone(), bundle.clone()),
-            &mut pending,
-            &None,
+        let mut intake = Intake::new(Duration::from_millis(40));
+        intake
+            .pending
+            .push_back(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
+        assert_eq!(
+            intake.absorb(
+                update("x", x_moved.clone(), bundle.clone()),
+                &f.applier.applied_pair()
+            ),
+            Absorbed::NothingOutstanding
         );
-        assert!(!overflowed);
         assert!(
-            pending.is_empty(),
+            intake.pending.is_empty(),
             "y was queued behind x; the network is back on x"
         );
 
-        let refused = Some(NetworkPair {
+        intake.refused = Some(NetworkPair {
             assignment_id: Some("r".to_owned()),
             bundle_hash: Some(bundle.0),
         });
-        let mut pending = VecDeque::from([update("y", f.stub.url("/y.fb.gz"), bundle.clone())]);
-        f.applier.absorb(
+        intake
+            .pending
+            .push_back(update("y", f.stub.url("/y.fb.gz"), bundle.clone()));
+        intake.absorb(
             update("r", f.stub.url("/r-moved.fb.gz"), bundle),
-            &mut pending,
-            &refused,
+            &f.applier.applied_pair(),
         );
         assert!(
-            pending.is_empty(),
+            intake.pending.is_empty(),
             "y was queued behind the refused r; the network is back on r"
         );
         assert_eq!(
@@ -1080,35 +1135,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keep_only_latest_pending_assignment_drops_intermediate_assignments() {
-        let mut pending: VecDeque<usize> = (1..=4).collect();
+    fn queued(id: &str) -> AssignmentUpdate {
+        legacy_update(id, format!("http://example.test/{id}.fb.gz"))
+    }
 
-        assert_eq!(keep_only_latest_pending_assignment(&mut pending), 3);
-        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![4]);
+    fn queued_ids(intake: &Intake) -> Vec<&str> {
+        intake.pending.iter().map(|u| u.id.as_str()).collect()
     }
 
     #[test]
     fn pending_assignments_below_threshold_keep_fifo_order() {
-        let mut pending: VecDeque<usize> = VecDeque::new();
+        let mut intake = Intake::new(Duration::from_secs(1));
+        let nothing_applied = NetworkPair::default();
 
-        for assignment in 1..=MAX_PENDING_ASSIGNMENTS {
-            assert_eq!(push_pending_item(&mut pending, assignment), None);
+        for n in 1..=MAX_PENDING_ASSIGNMENTS {
+            assert_eq!(
+                intake.absorb(queued(&n.to_string()), &nothing_applied),
+                Absorbed::Queued
+            );
         }
-        assert_eq!(
-            pending.iter().copied().collect::<Vec<_>>(),
-            (1..=MAX_PENDING_ASSIGNMENTS).collect::<Vec<_>>()
-        );
+
+        assert_eq!(queued_ids(&intake), ["1", "2", "3", "4", "5"]);
     }
 
     #[test]
-    fn failed_assignment_requeue_overflow_keeps_latest_pending_assignment() {
-        let mut pending: VecDeque<usize> = (1..=MAX_PENDING_ASSIGNMENTS).collect();
+    fn one_pair_past_the_threshold_keeps_only_the_latest() {
+        let mut intake = Intake::new(Duration::from_secs(1));
+        let nothing_applied = NetworkPair::default();
+        for n in 1..=MAX_PENDING_ASSIGNMENTS {
+            intake.absorb(queued(&n.to_string()), &nothing_applied);
+        }
 
         assert_eq!(
-            requeue_pending_item(&mut pending, 0),
-            Some(MAX_PENDING_ASSIGNMENTS)
+            intake.absorb(queued("6"), &nothing_applied),
+            Absorbed::Overflowed
         );
-        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![5]);
+        assert_eq!(queued_ids(&intake), ["6"]);
+    }
+
+    #[test]
+    fn a_queued_pair_announced_again_takes_the_latest_locations_in_place() {
+        let mut intake = Intake::new(Duration::from_secs(1));
+        let nothing_applied = NetworkPair::default();
+        intake.absorb(queued("1"), &nothing_applied);
+        intake.absorb(queued("2"), &nothing_applied);
+
+        assert_eq!(
+            intake.absorb(
+                legacy_update("2", "http://example.test/2-moved.fb.gz".to_owned()),
+                &nothing_applied
+            ),
+            Absorbed::Queued
+        );
+
+        assert_eq!(queued_ids(&intake), ["1", "2"]);
+        assert_eq!(
+            intake.pending.back().unwrap().fb_url_v1,
+            "http://example.test/2-moved.fb.gz"
+        );
     }
 }
