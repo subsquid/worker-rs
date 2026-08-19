@@ -106,7 +106,7 @@ impl DatasetsIndex {
                 })?;
                 let mut result = Vec::new();
                 for table in tables {
-                    let name = format!("{table}.parquet");
+                    let name = format!("{table}{TABLE_FILE_SUFFIX}");
                     result.push(RemoteFile {
                         url: join_file(&base_url, &name)?,
                         name,
@@ -166,6 +166,24 @@ impl DatasetsIndex {
                             dataset.id()
                         );
                     };
+                    // The id becomes the chunk's path under its dataset, and the store is read
+                    // back by that path at every start (DEF-6): admit only the canonical shape
+                    // recovery adopts, so nothing is written beside or above the dataset
+                    // directory and nothing is written that a restart would not read back.
+                    if !is_canonical_chunk_id(&id) {
+                        anyhow::bail!(
+                            "chunk '{id}' of dataset '{}' is not <top>/<first>-<last>-<hash> with ten-digit numbers and a hash of 5 to 8 word characters",
+                            dataset.id()
+                        );
+                    }
+                    if chunk.first_block() < chunk.top() {
+                        anyhow::bail!(
+                            "chunk '{id}' of dataset '{}' starts at block {} but lies under top dir {}, which a restart would not adopt",
+                            dataset.id(),
+                            chunk.first_block(),
+                            chunk.top()
+                        );
+                    }
                     // A document that contradicts itself is inapplicable whole (FM-12), and
                     // each of these is checked once per dataset, not per chunk: a base url that
                     // won't parse, or a version the dataset registers no generation for, leaves
@@ -200,15 +218,31 @@ impl DatasetsIndex {
                                 "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
                             );
                         }
-                        if let Some(table) = assignment
+                        // Each table becomes `<table>.parquet` inside the chunk directory, and
+                        // the files of one chunk download concurrently: a name that is not a
+                        // file name, one too long for one, or one listed twice (two writers on
+                        // one path) is the roster disagreeing with the store it is written to.
+                        let mut seen = HashSet::new();
+                        for table in assignment
                             .get_write_schema(chunk.write_schema_id())
-                            .and_then(|roster| {
-                                roster.tables().iter().find(|table| !is_file_name(table))
-                            })
+                            .into_iter()
+                            .flat_map(|roster| roster.tables().iter())
                         {
-                            anyhow::bail!(
-                                "write schema {schema_id} names a table '{table}' that is not a file name",
-                            );
+                            if !is_file_name(table) {
+                                anyhow::bail!(
+                                    "write schema {schema_id} names a table '{table}' that is not a file name",
+                                );
+                            }
+                            if table.len() + TABLE_FILE_SUFFIX.len() > MAX_FILE_NAME_BYTES {
+                                anyhow::bail!(
+                                    "write schema {schema_id} names a table whose file name would exceed {MAX_FILE_NAME_BYTES} bytes",
+                                );
+                            }
+                            if !seen.insert(table) {
+                                anyhow::bail!(
+                                    "write schema {schema_id} lists table '{table}' twice",
+                                );
+                            }
                         }
                     }
                     chunks.insert(
@@ -270,6 +304,35 @@ impl DatasetsIndex {
     pub fn chunks(&self) -> &HashMap<ChunkRef, ChunkAssignmentRef> {
         &self.chunks
     }
+}
+
+/// What a roster table becomes inside the chunk directory.
+const TABLE_FILE_SUFFIX: &str = ".parquet";
+
+/// The longest file name the store's filesystems accept (NAME_MAX on Linux and macOS).
+const MAX_FILE_NAME_BYTES: usize = 255;
+
+/// The canonical chunk id, `<top>/<first>-<last>-<hash>`: three ten-digit numbers and a hash of
+/// 5 to 8 word characters — the rule the assignment builder enforces and the shape a restart
+/// reads back from the store (ADR-4, DEF-6). The reader rebuilds the id from numeric columns
+/// and an eight-byte hash field it checks only for UTF-8, so a hand-built document can put path
+/// separators or `..` in the hash, and numbers of eleven digits print unpadded.
+fn is_canonical_chunk_id(id: &str) -> bool {
+    fn ten_digits(s: &str) -> bool {
+        s.len() == 10 && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    let Some((top, name)) = id.split_once('/') else {
+        return false;
+    };
+    let mut parts = name.splitn(3, '-');
+    let (Some(first), Some(last), Some(hash)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    ten_digits(top)
+        && ten_digits(first)
+        && ten_digits(last)
+        && (5..=8).contains(&hash.len())
+        && hash.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// A table name becomes `<name>.parquet` inside the chunk's directory, so it has to be a file

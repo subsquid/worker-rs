@@ -475,6 +475,8 @@ pub fn mark_assignment_settled_if_ready(
 fn remove_temps(fs: &LocalFs) -> Result<()> {
     for entry in glob::glob(fs.root.join("**/temp-*").as_str())? {
         match entry {
+            // Residue is always a directory; a `temp-*` file is data — a chunk table named so.
+            Ok(path) if !path.is_dir() => {}
             Ok(path) => {
                 info!("Removing temp dir '{}'", path.display());
                 std::fs::remove_dir_all(&path)
@@ -869,6 +871,38 @@ mod tests {
         std::fs::remove_dir_all(&chunk_dir).unwrap();
 
         manager.run(CancellationToken::new()).await;
+    }
+
+    /// Startup cleanup sweeps `temp-*` residue. A roster may name a table `temp-x`, which makes
+    /// a `temp-x.parquet` inside a committed chunk: data, not residue — removing it as a
+    /// directory used to fail the start, and that chunk is held by every worker on the schema.
+    #[tokio::test]
+    async fn a_temp_named_table_file_is_data_not_residue() {
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let top = workdir
+            .join(crate::types::dataset::encode_dataset("s3://test"))
+            .join("0000001000");
+        let chunk_dir = top.join("0000001000-0000001999-abcdef12");
+        std::fs::create_dir_all(&chunk_dir).unwrap();
+        std::fs::write(chunk_dir.join("temp-x.parquet"), b"data").unwrap();
+        let residue = top.join("temp-123-0000002000-0000002999-bbbbbbbb");
+        std::fs::create_dir_all(&residue).unwrap();
+
+        let manager = test_manager(workdir, worker_id).await;
+
+        assert!(
+            chunk_dir.join("temp-x.parquet").exists(),
+            "a chunk's table file is data"
+        );
+        assert!(!residue.exists(), "a temp directory is residue");
+        assert_eq!(
+            manager.state.lock().status().available.len(),
+            1,
+            "the chunk is adopted, table file and all"
+        );
     }
 
     #[test]
