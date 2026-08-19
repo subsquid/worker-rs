@@ -5,6 +5,7 @@ use std::{
 };
 
 use camino::{Utf8Component, Utf8Path};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Url;
 use sqd_network_transport::Keypair;
 use tracing::error;
@@ -22,7 +23,7 @@ pub struct DatasetsIndex {
     assignment: AssignmentBlob,
     assignment_id: String,
     status: sqd_assignments::WorkerStatus,
-    http_headers: reqwest::header::HeaderMap,
+    http_headers: HeaderMap,
     // chunks assigned to this worker
     chunks: HashMap<ChunkRef, ChunkAssignmentRef>,
 }
@@ -61,29 +62,31 @@ impl DatasetsIndex {
     /// If the chunk is not in this assignment, or the assignment carries no address the worker
     /// can fetch it from.
     pub fn list_files(&self, chunk: &ChunkRef) -> Result<Vec<RemoteFile>, UnresolvedChunk> {
-        let chunk_ref = self.chunks.get(chunk).ok_or(UnresolvedChunk::NotAssigned)?;
+        let chunk_ref = *self.chunks.get(chunk).ok_or(UnresolvedChunk::NotAssigned)?;
         match &self.assignment {
             AssignmentBlob::Legacy(assignment) => {
                 let chunk = assignment
-                    .get_chunk(*chunk_ref)
+                    .get_chunk(chunk_ref)
                     .ok_or(UnresolvedChunk::NotAssigned)?;
                 let base_url = chunk_base_url(
                     chunk.dataset_id(),
                     chunk.dataset_base_url(),
                     chunk.base_url(),
                 )?;
-                let mut result = Vec::with_capacity(chunk.files().len());
-                for file in chunk.files() {
-                    result.push(RemoteFile {
-                        name: file.filename().to_owned(),
-                        url: join_file(&base_url, file.url())?,
-                    });
-                }
-                Ok(result)
+                chunk
+                    .files()
+                    .iter()
+                    .map(|file| {
+                        Ok(RemoteFile {
+                            url: join_file(&base_url, file.url())?,
+                            name: file.filename().to_owned(),
+                        })
+                    })
+                    .collect()
             }
             AssignmentBlob::Worker(assignment) => {
                 let chunk = assignment
-                    .get_chunk(*chunk_ref)
+                    .get_chunk(chunk_ref)
                     .ok_or(UnresolvedChunk::NotAssigned)?;
                 let chunk_url = chunk.url().ok_or_else(|| {
                     UnresolvedChunk::NoAddress(format!(
@@ -104,15 +107,13 @@ impl DatasetsIndex {
                         chunk.write_schema_id()
                     ))
                 })?;
-                let mut result = Vec::new();
-                for table in tables {
-                    let name = format!("{table}{TABLE_FILE_SUFFIX}");
-                    result.push(RemoteFile {
-                        url: join_file(&base_url, &name)?,
-                        name,
-                    });
-                }
-                Ok(result)
+                tables
+                    .map(|table| {
+                        let name = format!("{table}{TABLE_FILE_SUFFIX}");
+                        let url = join_file(&base_url, &name)?;
+                        Ok(RemoteFile { url, name })
+                    })
+                    .collect()
             }
         }
     }
@@ -124,14 +125,12 @@ impl DatasetsIndex {
         schema_available: impl Fn(SchemaId) -> bool,
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
+        let no_worker = || anyhow::anyhow!("no assignment for this worker");
         let mut pool = StringPool::default();
-        let mut checked = HashSet::new();
 
         let (status, headers, chunks) = match &assignment {
             AssignmentBlob::Legacy(assignment) => {
-                let Some(worker) = assignment.get_worker(&peer_id) else {
-                    anyhow::bail!("no assignment for this worker");
-                };
+                let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
                 let mut chunks = HashMap::new();
                 let mut addressed = HashSet::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
@@ -151,12 +150,11 @@ impl DatasetsIndex {
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
             }
             AssignmentBlob::Worker(assignment) => {
-                let Some(worker) = assignment.get_worker(&peer_id) else {
-                    anyhow::bail!("no assignment for this worker");
-                };
+                let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
                 let mut chunks = HashMap::new();
                 let mut addressed = HashSet::new();
                 let mut generations = HashSet::new();
+                let mut checked = HashSet::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
                     let dataset = chunk.dataset();
                     let Some(id) = chunk.id() else {
@@ -200,28 +198,16 @@ impl DatasetsIndex {
                                 "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
                             );
                         }
-                        // Each table becomes `<table>.parquet` inside the chunk directory: a
-                        // name that is not a file name, or too long for one, is the roster
-                        // disagreeing with the store it is written to.
-                        for table in assignment
-                            .get_write_schema(chunk.write_schema_id())
-                            .into_iter()
-                            .flat_map(|roster| roster.tables().iter())
-                        {
-                            if !is_file_name(table) {
-                                anyhow::bail!(
-                                    "write schema {schema_id} names a table '{table}' that is not a file name",
-                                );
-                            }
-                            if table.len() + TABLE_FILE_SUFFIX.len() > MAX_FILE_NAME_BYTES {
-                                anyhow::bail!(
-                                    "write schema {schema_id} names a table whose file name would exceed {MAX_FILE_NAME_BYTES} bytes",
-                                );
-                            }
-                        }
+                        admit_roster(
+                            schema_id,
+                            assignment
+                                .get_write_schema(chunk.write_schema_id())
+                                .into_iter()
+                                .flat_map(|roster| roster.tables().iter()),
+                        )?;
                     }
                     chunks.insert(
-                        pool.chunk_ref(chunk.dataset().id(), &id, chunk.version()),
+                        pool.chunk_ref(dataset.id(), &id, chunk.version()),
                         chunk_ref,
                     );
                 }
@@ -229,38 +215,23 @@ impl DatasetsIndex {
             }
         };
 
-        let http_headers = headers
-            .into_iter()
-            .filter_map(|(k, v)| {
-                let key = reqwest::header::HeaderName::from_str(&k)
-                    .inspect_err(|err| error!("Couldn't parse header name: {}: {err:?}", k))
-                    .ok()?;
-                let val = reqwest::header::HeaderValue::from_str(&v)
-                    .inspect_err(|err| error!("Couldn't parse header value: {}: {err:?}", k))
-                    .ok()?;
-                Some((key, val))
-            })
-            .collect();
-
         Ok(Self {
             status,
             assignment,
             assignment_id: id.into(),
-            http_headers,
+            http_headers: header_map(headers),
             chunks,
         })
     }
 
     pub fn chunk_schema(&self, chunk: &ChunkRef) -> ChunkSchema {
-        let Some(chunk_ref) = self.chunks.get(chunk) else {
-            return ChunkSchema::ByType;
-        };
-        match &self.assignment {
-            AssignmentBlob::Legacy(_) => ChunkSchema::ByType,
-            AssignmentBlob::Worker(assignment) => assignment
+        match (&self.assignment, self.chunks.get(chunk)) {
+            (AssignmentBlob::Worker(assignment), Some(chunk_ref)) => assignment
                 .get_chunk(*chunk_ref)
-                .map(|c| ChunkSchema::Pinned(SchemaId::from(c.write_schema_id())))
-                .unwrap_or(ChunkSchema::ByType),
+                .map_or(ChunkSchema::ByType, |chunk| {
+                    ChunkSchema::Pinned(SchemaId::from(chunk.write_schema_id()))
+                }),
+            _ => ChunkSchema::ByType,
         }
     }
 
@@ -268,7 +239,7 @@ impl DatasetsIndex {
         self.status
     }
 
-    pub fn get_headers(&self) -> &reqwest::header::HeaderMap {
+    pub fn headers(&self) -> &HeaderMap {
         &self.http_headers
     }
 
@@ -287,6 +258,25 @@ const TABLE_FILE_SUFFIX: &str = ".parquet";
 /// The longest file name the store's filesystems accept (NAME_MAX on Linux and macOS).
 const MAX_FILE_NAME_BYTES: usize = 255;
 
+fn admit_roster<'a>(
+    schema_id: SchemaId,
+    tables: impl IntoIterator<Item = &'a str>,
+) -> anyhow::Result<()> {
+    for table in tables {
+        if !is_file_name(table) {
+            anyhow::bail!(
+                "write schema {schema_id} names a table '{table}' that is not a file name"
+            );
+        }
+        if table.len() + TABLE_FILE_SUFFIX.len() > MAX_FILE_NAME_BYTES {
+            anyhow::bail!(
+                "write schema {schema_id} names a table whose file name would exceed {MAX_FILE_NAME_BYTES} bytes"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// A table name becomes `<name>.parquet` inside the chunk's directory, so it has to be a file
 /// name and not a path. `..` or a separator would write the file somewhere else while the chunk
 /// still commits, leaving one the worker holds and reports while it is quietly missing a table —
@@ -295,6 +285,21 @@ fn is_file_name(name: &str) -> bool {
     let mut components = Utf8Path::new(name).components();
     matches!(components.next(), Some(Utf8Component::Normal(first)) if first == name)
         && components.next().is_none()
+}
+
+fn header_map(headers: impl IntoIterator<Item = (String, String)>) -> HeaderMap {
+    headers
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let key = HeaderName::from_str(&k)
+                .inspect_err(|err| error!("Couldn't parse header name: {}: {err:?}", k))
+                .ok()?;
+            let val = HeaderValue::from_str(&v)
+                .inspect_err(|err| error!("Couldn't parse header value: {}: {err:?}", k))
+                .ok()?;
+            Some((key, val))
+        })
+        .collect()
 }
 
 /// A dataset's base url, as admission and [`DatasetsIndex::list_files`] both read it, so the
@@ -347,25 +352,27 @@ impl StringPool {
     }
 
     fn get(&mut self, s: &str) -> Arc<String> {
-        match self.map.get(s) {
-            Some(s) => s.clone(),
-            None => {
-                let key = s.to_owned();
-                let value = Arc::new(s.to_owned());
-                self.map.insert(key, value.clone());
-                value
-            }
+        if let Some(pooled) = self.map.get(s) {
+            return Arc::clone(pooled);
         }
+        let pooled = Arc::new(s.to_owned());
+        self.map.insert(s.to_owned(), Arc::clone(&pooled));
+        pooled
     }
 }
 
-#[test]
-fn test_url_joining() {
-    let base_url = Url::from_str("https://eclipse-testnet-2.sqd-datasets.io/").unwrap();
-    let url = base_url
-        .join(&format!("{}/", "0086800000/0089600001-0089800000-cg1JNYDM"))
-        .unwrap()
-        .join("blocks.parquet")
-        .unwrap();
-    assert_eq!(url.as_str(), "https://eclipse-testnet-2.sqd-datasets.io/0086800000/0089600001-0089800000-cg1JNYDM/blocks.parquet");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_joining() {
+        let base_url = Url::from_str("https://eclipse-testnet-2.sqd-datasets.io/").unwrap();
+        let url = base_url
+            .join(&format!("{}/", "0086800000/0089600001-0089800000-cg1JNYDM"))
+            .unwrap()
+            .join("blocks.parquet")
+            .unwrap();
+        assert_eq!(url.as_str(), "https://eclipse-testnet-2.sqd-datasets.io/0086800000/0089600001-0089800000-cg1JNYDM/blocks.parquet");
+    }
 }

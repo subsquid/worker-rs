@@ -196,7 +196,7 @@ impl StateManager {
                         continue;
                     }
                 };
-                let headers = dataset_index.get_headers().clone();
+                let headers = dataset_index.headers().clone();
                 downloader.start_download(chunk_ref, dst, files, headers);
             }
             self.mark_current_assignment_settled_if_ready();
