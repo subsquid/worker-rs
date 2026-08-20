@@ -28,7 +28,7 @@ produces a log record that collectors pull as evidence of work performed.
 | Data origin | inbound (polled) | serves chunk files named by the assignment | credentials from the assignment; payload unverified (GAP-5) |
 | Logs collector | inbound | pulls query-execution log records | network membership only; no per-request auth (GAP-22) |
 | Chain registry | inbound (polled) | epoch number, CU allocations, peer membership | trusted read |
-| Schema registry | inbound (polled) | dataset schemas for the dynamic engine: a CDN manifest, or the network state's schema bundle under `--assignment-source worker` | transport security only; the bundle is content-hash verified |
+| Schema registry | inbound (polled) | dataset schemas for the dynamic engine: a CDN manifest, or the network state's schema bundle for a split assignment | transport security only; the bundle is content-hash verified |
 | Operator (human) | config | runs the process, sets configuration, watches metrics | — |
 
 ## Design goals

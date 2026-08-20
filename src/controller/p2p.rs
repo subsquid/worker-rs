@@ -4,6 +4,7 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::RwLock;
+use sqd_assignments::AssignmentType;
 use sqd_messages::{
     query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted,
     TimeReport, WorkerStatus,
@@ -41,7 +42,6 @@ use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::schema_bundle;
 use super::worker::Worker;
-use crate::cli::AssignmentSource;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_REQUESTS_QUEUE_SIZE: usize = 4;
@@ -93,7 +93,7 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    assignment_source: AssignmentSource,
+    assignment_type: Option<AssignmentType>,
     schema_manager: Arc<schema_bundle::SchemaManager>,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
@@ -147,7 +147,7 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         assignment_url: args.assignment_url,
-        assignment_source: args.assignment_source,
+        assignment_type: args.assignment_source,
         schema_manager,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
@@ -189,17 +189,18 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         start_loop(s, "assignments", |t| {
             self.run_assignments_loop(t, self.assignment_check_interval)
         });
-        if self.assignment_source == AssignmentSource::Legacy {
-            start_loop(s, "query_schemas", |t| {
-                experimental_engine::run_schemas_refresh_loop(
-                    self.worker.query_schemas(),
-                    self.query_schemas_url.clone(),
-                    self.query_schemas_refresh_interval,
-                    self.worker_id,
-                    t,
-                )
-            });
-        }
+        // Unconditional: a chunk the assignment in force does not pin resolves by the query's
+        // dataset type whatever the resolved type is (IB-44), and which type that will be is
+        // not known at startup anyway.
+        start_loop(s, "query_schemas", |t| {
+            experimental_engine::run_schemas_refresh_loop(
+                self.worker.query_schemas(),
+                self.query_schemas_url.clone(),
+                self.query_schemas_refresh_interval,
+                self.worker_id,
+                t,
+            )
+        });
         start_loop(s, "logs", |t| self.run_logs_loop(t));
         start_loop(s, "logs_cleanup", |t| {
             self.run_logs_cleanup_loop(t, LOGS_CLEANUP_INTERVAL)
@@ -287,13 +288,12 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             self.assignment_fetch_timeout,
             self.assignment_fetch_max_delay,
             self.worker_id,
-            self.assignment_source,
+            self.assignment_type,
         );
         AssignmentApplier::new(
             Arc::clone(&self.worker),
             Arc::clone(&self.schema_manager),
             self.keypair.clone(),
-            self.assignment_source,
             client,
             assignment_check_interval,
         )

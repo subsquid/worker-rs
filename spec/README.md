@@ -92,6 +92,7 @@ retention/space lifecycle (10).
 | [ADR-20](decisions/ADR-20-freshness-rejection-attribution.md) | Freshness rejections are worker-fault outcomes | Proposed |
 | [ADR-21](decisions/ADR-21-assignment-and-bundle-apply-as-one-snapshot.md) | Validate a worker assignment against its schema bundle | Accepted |
 | [ADR-22](decisions/ADR-22-on-disk-layout-chunk-versions-and-schema-store.md) | On-disk layout: chunk versions and the schema store | Accepted |
+| [ADR-23](decisions/ADR-23-network-names-the-assignment-type.md) | The network state names the assignment type; the CLI only pins it | Accepted |
 
 ## How to use this suite
 

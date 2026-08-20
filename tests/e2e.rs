@@ -168,10 +168,10 @@ async fn empty_slice_assigns_nothing() {
 async fn worker_format_fresh_rewrite_is_fetched_from_its_generation_and_served_by_version() {
     use harness::scheduler::Scheduler;
     use harness::Config;
-    use sqd_worker::cli::AssignmentSource;
+    use sqd_assignments::AssignmentType;
 
     let mut h = Harness::with_config(Config {
-        assignment_source: AssignmentSource::Worker,
+        assignment_type: AssignmentType::Split,
         ..Config::default()
     })
     .await;
@@ -310,10 +310,10 @@ async fn a_chunk_the_origin_will_not_serve_is_retried_by_the_next_assignment() {
 async fn worker_format_v0_chunk_is_served_then_superseded_by_a_rewrite() {
     use harness::scheduler::Scheduler;
     use harness::Config;
-    use sqd_worker::cli::AssignmentSource;
+    use sqd_assignments::AssignmentType;
 
     let mut h = Harness::with_config(Config {
-        assignment_source: AssignmentSource::Worker,
+        assignment_type: AssignmentType::Split,
         ..Config::default()
     })
     .await;
@@ -382,10 +382,10 @@ async fn worker_format_v0_chunk_is_served_then_superseded_by_a_rewrite() {
 async fn worker_format_assignment_waits_for_its_schema_bundle() {
     use harness::scheduler::AssignmentFault;
     use harness::Config;
-    use sqd_worker::cli::AssignmentSource;
+    use sqd_assignments::AssignmentType;
 
     let mut h = Harness::with_config(Config {
-        assignment_source: AssignmentSource::Worker,
+        assignment_type: AssignmentType::Split,
         ..Config::default()
     })
     .await;
@@ -415,10 +415,10 @@ async fn worker_format_assignment_waits_for_its_schema_bundle() {
 async fn worker_format_refuses_an_assignment_its_bundle_does_not_cover() {
     use harness::scheduler::AssignmentFault;
     use harness::Config;
-    use sqd_worker::cli::AssignmentSource;
+    use sqd_assignments::AssignmentType;
 
     let mut h = Harness::with_config(Config {
-        assignment_source: AssignmentSource::Worker,
+        assignment_type: AssignmentType::Split,
         ..Config::default()
     })
     .await;

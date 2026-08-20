@@ -40,6 +40,13 @@ struct QueryExecutedLabels {
     status: QueryStatus,
 }
 
+/// The blob a network state resolved to nothing for, or `assignment_type` when the picker
+/// itself would not read. A fixed set, so the label space stays bounded (OB-14).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct UnresolvedLabels {
+    reason: &'static str,
+}
+
 lazy_static::lazy_static! {
     // Worker info metric (kept as worker_info_info for backward compatibility)
     pub static ref WORKER_INFO: Family<WorkerInfoLabels, Gauge> = Default::default();
@@ -57,6 +64,7 @@ lazy_static::lazy_static! {
     pub static ref STORED_BYTES: Gauge = Default::default();
 
     pub static ref ASSIGNMENTS_REFUSED: Counter = Default::default();
+    static ref NETWORK_STATE_UNRESOLVED: Family<UnresolvedLabels, Counter> = Default::default();
 
     pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
     pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
@@ -75,6 +83,21 @@ pub fn set_status(status: WorkerStatus) {
             worker_status: status,
         })
         .set(1);
+}
+
+/// Counts one poll whose network state named no assignment this worker could read (OB-19).
+/// Counted per poll, so what a stalled fleet shows is persistence rather than a single edge.
+pub fn network_state_unresolved(reason: &'static str) {
+    NETWORK_STATE_UNRESOLVED
+        .get_or_create(&UnresolvedLabels { reason })
+        .inc();
+}
+
+#[cfg(test)]
+pub fn unresolved_count(reason: &'static str) -> u64 {
+    NETWORK_STATE_UNRESOLVED
+        .get_or_create(&UnresolvedLabels { reason })
+        .get()
 }
 
 pub fn query_executed(result: &QueryResult) {
@@ -196,6 +219,11 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "running_queries",
         "Current number of queries being executed",
         RUNNING_QUERIES.clone(),
+    );
+    registry.register(
+        "network_state_unresolved",
+        "Polls whose network state named no assignment this worker could read, by reason",
+        NETWORK_STATE_UNRESOLVED.clone(),
     );
     registry.register("worker_status", "Status of the worker", STATUS.clone());
     set_status(WorkerStatus::Starting);

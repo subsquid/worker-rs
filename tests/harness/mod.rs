@@ -22,7 +22,8 @@ use sqd_messages::{query_error, Query, QueryExecuted, QueryLogs};
 use sqd_network_transport::{protocol, Keypair, PeerId};
 use tokio_util::sync::CancellationToken;
 
-use sqd_worker::cli::{Args, AssignmentSource};
+use sqd_assignments::AssignmentType;
+use sqd_worker::cli::Args;
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
 use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
@@ -113,7 +114,6 @@ pub struct Harness {
     pub worker_id: PeerId,
 
     keypair: Keypair,
-    assignment_source: AssignmentSource,
     schemas: Arc<SchemaRegistry>,
     query_schemas: Arc<SchemaRegistry>,
     schema_stub: HttpStub,
@@ -134,7 +134,8 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
-    pub assignment_source: AssignmentSource,
+    /// What the scheduler publishes. The worker pins nothing, so it is what resolves too.
+    pub assignment_type: AssignmentType,
 }
 
 impl Default for Config {
@@ -147,7 +148,7 @@ impl Default for Config {
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
-            assignment_source: AssignmentSource::Legacy,
+            assignment_type: AssignmentType::Legacy,
         }
     }
 }
@@ -169,7 +170,7 @@ impl Harness {
         let portal = Portal::new(&mut portal_rng);
 
         let scheduler =
-            Scheduler::start(seed.stream("assignment-builder"), config.assignment_source).await;
+            Scheduler::start(seed.stream("assignment-builder"), config.assignment_type).await;
         let origin = Origin::start().await;
         let registry = Registry::new(&[portal.peer_id()], config.compute_units);
 
@@ -224,9 +225,7 @@ impl Harness {
         spawn_subsystems(
             &worker,
             &allocations,
-            // Worker mode must not run the legacy CDN schema loop.
-            (config.assignment_source == AssignmentSource::Legacy)
-                .then(|| (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH))),
+            (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH)),
             worker_id,
             shutdown.clone(),
         );
@@ -238,7 +237,8 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
-            config.assignment_source,
+            // Unpinned: what the state names is what the worker reads.
+            None,
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
@@ -247,7 +247,6 @@ impl Harness {
             worker.clone(),
             schema_manager.clone(),
             keypair.clone(),
-            config.assignment_source,
             assignment_client.clone(),
             Duration::from_millis(200),
         );
@@ -263,7 +262,6 @@ impl Harness {
             logs,
             worker_id,
             keypair,
-            assignment_source: config.assignment_source,
             schemas,
             query_schemas,
             schema_stub,
@@ -273,9 +271,7 @@ impl Harness {
             data_dir,
             _reporter: reporter,
         };
-        if harness.assignment_source == AssignmentSource::Legacy {
-            harness.await_schemas_loaded().await;
-        }
+        harness.await_schemas_loaded().await;
         harness.await_metering_ready().await;
         harness
     }
@@ -563,11 +559,10 @@ impl Drop for Harness {
     }
 }
 
-/// `cdn_schemas` is `None` in worker format, where the bundle replaces the CDN manifest.
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    cdn_schemas: Option<(Arc<SchemaRegistry>, String)>,
+    cdn_schemas: (Arc<SchemaRegistry>, String),
     worker_id: PeerId,
     shutdown: CancellationToken,
 ) {
@@ -579,18 +574,17 @@ fn spawn_subsystems(
     let alloc_token = shutdown.clone();
     tokio::spawn(async move { alloc.run(alloc_token).await });
 
-    if let Some((registry, manifest_url)) = cdn_schemas {
-        tokio::spawn(async move {
-            run_schemas_refresh_loop(
-                registry,
-                manifest_url,
-                Duration::from_secs(3600),
-                worker_id,
-                shutdown,
-            )
-            .await
-        });
-    }
+    let (registry, manifest_url) = cdn_schemas;
+    tokio::spawn(async move {
+        run_schemas_refresh_loop(
+            registry,
+            manifest_url,
+            Duration::from_secs(3600),
+            worker_id,
+            shutdown,
+        )
+        .await
+    });
 }
 
 fn build_args(
@@ -621,8 +615,6 @@ fn build_args(
         "http://127.0.0.1:1/unused",
         "--l1-rpc-url",
         "http://127.0.0.1:1/unused",
-        "--assignment-source",
-        &config.assignment_source.to_string(),
     ]);
 
     // Positional/env-only settings (IB-32) have no flag to pass; set them directly.

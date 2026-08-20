@@ -85,13 +85,23 @@ an origin that may come back and the other is a document that will still be unus
 every retry, so without the distinction a scheduler publishing bad addresses reads exactly
 like a flaky origin. Scalar signal only (OB-14). Bound in IB-31.
 
+**OB-19 — Network-state resolution.** [MUST] A reason-coded counter of polls whose network
+state named no assignment this worker could read: the blob the resolved type wanted, or
+`assignment_type` when the picker itself will not read (FM-53d/53e). Counted per poll while it
+persists, like OB-18 — absence is a legal shape mid-migration, so what marks a fault is that it
+lasts, not that it happened once, and an alert reads persistence rather than an edge. Without it
+nothing moves at all: the previous assignment stays in force, the chunk gauges hold, and a
+scheduler that declares `split` and never publishes the portal half — which the worker requires
+but never reads — stalls the whole fleet looking exactly like a quiet network. Reasons are a
+fixed set, not scheduler-supplied text (OB-14). Bound in IB-31.
+
 **OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, a counter of
 failures to load one, and a counter of **pairs the scheduler published that do not hold
 together**: an assignment refused because its bundle does not cover it (FM-53c), or a state
 naming an assignment without a usable bundle (FM-53d). The last is the scheduler's invariant breaking
 rather than the worker's, and it must be distinguishable from an ordinary intake failure —
 a worker refusing every assignment because the pair it is served diverges looks identical
-to one that cannot reach the network. Under `--assignment-source worker` a bundle that never
+to one that cannot reach the network. For a split assignment a bundle that never
 installs blocks every assignment (FM-53b) while no other signal moves — the chunk gauges
 simply freeze, which reads exactly like a quiet network — so this is the only witness
 that separates the two. A bundle that verifies but cannot be used is both a failed load

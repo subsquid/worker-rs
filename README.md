@@ -55,15 +55,23 @@ The worker is configured through command-line flags or the equivalent environmen
 | `--concurrent-downloads` | `CONCURRENT_DOWNLOADS` | `3` | Maximum number of concurrent chunk downloads |
 | `--query-threads` | `QUERY_THREADS` | (CPU count) | Threads used by the query engine |
 | `--assignment-url` | `ASSIGNMENT_URL` | network-dependent | URL of the chunk assignment / network state |
-| `--assignment-source` | `ASSIGNMENT_SOURCE` | `legacy` | Which assignment the worker reads: `legacy` or `worker` (see below) |
+| `--assignment-source` | `ASSIGNMENT_SOURCE` | (the network's) | Pins which assignment the worker reads: `legacy` or `split` (see below) |
 
 Network selection and boot nodes come from the transport arguments (see `--help`). When the network is set to `mainnet` or `tethys`, default boot nodes and the assignment URL are filled in automatically.
 
-### Worker-oriented assignments
+### Split assignments
 
-With `--assignment-source worker`, the worker reads the network state's `worker_assignment`
-pointer instead of the legacy shared `assignment`, and ignores the legacy one entirely — there is
-no fallback if `worker_assignment` is absent. This changes five things:
+The network state names an `assignment_type` — `legacy` or `split` — and the worker reads the
+assignments it names, re-reading it on every poll. `--assignment-source` overrides that, which
+is how a single worker is switched over ahead of the network, or held back during the migration;
+left unset, the network decides and no worker has to be reconfigured to follow it.
+
+Under `split` the worker reads the state's `worker_assignment` pointer and its `schema_bundle`
+instead of the legacy shared `assignment`, and never falls back to the legacy one. The state
+must also publish a `portal_assignment`: the worker does not read it, but a state that declares
+`split` without it is one the network has not finished publishing, and the worker waits — each
+such poll counting under `network_state_unresolved{reason}`, so a network stuck that way is
+alertable rather than silent. This changes five things:
 
 - **Chunk contents** come from the assignment's inline write-schema rosters, narrowed by each
   chunk's `tables_present` bitmap, rather than from a per-chunk file list.
@@ -77,7 +85,11 @@ no fallback if `worker_assignment` is absent. This changes five things:
   does not hold answers `not_found`.
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
   `<schema_id>.yaml`, verified against its `sha256:` hash) rather than from
-  `--query-schemas-url`, which is not polled at all in this mode. Bundles are *merged* into
+  `--query-schemas-url`, which the assignment's own chunks no longer consult. That manifest is
+  still polled under every assignment type: it answers for chunks the assignment in force does
+  not pin — held from an earlier one, or held before any applies — and unlike the bundle it is
+  never stored, so it is empty after a restart until the first fetch lands. Bundles are *merged*
+  into
   `<data-dir>/schemas/<id>.yaml` rather than replacing what is there: chunks on disk outlive the
   bundle that described them, only the current bundle is published, and no schema can be fetched
   by id, so a schema dropped locally would strand data permanently. The store is read back at
@@ -93,8 +105,6 @@ no fallback if `worker_assignment` is absent. This changes five things:
   assignment with it and the scheduler need not publish a new assignment id.
 - **Assignments are applied strictly in order**, each waiting for the previous one to settle,
   instead of immediately on arrival.
-
-The flag is off by default; leaving it off preserves the previous behaviour exactly.
 
 Run `sqd-worker --help` for the full list of options.
 

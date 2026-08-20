@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
+use sqd_assignments::AssignmentType;
 use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
 use tower::retry::backoff::{Backoff, ExponentialBackoff, ExponentialBackoffMaker, MakeBackoff};
@@ -14,7 +15,6 @@ use tracing::{debug, info, warn, Instrument};
 use super::assignments::{self, AssignmentUpdate, NetworkPair};
 use super::schema_bundle::{BundleFault, PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
-use crate::cli::AssignmentSource;
 use crate::metrics;
 use crate::storage::datasets_index::DatasetsIndex;
 use crate::storage::manager::AssignmentOutcome;
@@ -40,7 +40,6 @@ pub struct AssignmentApplier {
     worker: Arc<Worker>,
     schema_manager: Arc<SchemaManager>,
     keypair: Keypair,
-    assignment_source: AssignmentSource,
     client: reqwest::Client,
     retry_cap: Duration,
 }
@@ -50,7 +49,6 @@ impl AssignmentApplier {
         worker: Arc<Worker>,
         schema_manager: Arc<SchemaManager>,
         keypair: Keypair,
-        assignment_source: AssignmentSource,
         client: reqwest::Client,
         retry_cap: Duration,
     ) -> Self {
@@ -58,7 +56,6 @@ impl AssignmentApplier {
             worker,
             schema_manager,
             keypair,
-            assignment_source,
             client,
             retry_cap,
         }
@@ -119,7 +116,7 @@ impl AssignmentApplier {
         match self.apply(&update).await {
             ApplyOutcome::Applied => {
                 intake.reset_backoff();
-                if self.assignment_source == AssignmentSource::Worker {
+                if update.assignment_type == AssignmentType::Split {
                     intake.in_flight = InFlight::Settling(update.id);
                 }
             }
@@ -176,9 +173,9 @@ impl AssignmentApplier {
         &self,
         update: &AssignmentUpdate,
     ) -> Result<(Vec<u8>, Option<PreparedSchemaUpdate>), Unfetched> {
-        let bundle = match self.assignment_source {
-            AssignmentSource::Legacy => None,
-            AssignmentSource::Worker => {
+        let bundle = match update.assignment_type {
+            AssignmentType::Legacy => None,
+            AssignmentType::Split => {
                 let bundle = update.schema_bundle.as_ref().ok_or_else(|| {
                     // The stream already withholds a half-published pair, so this is defensive;
                     // treat it as the network's to correct rather than the pair's fault.
@@ -194,7 +191,7 @@ impl AssignmentApplier {
                 )
             }
         };
-        let document = assignments::fetch_document(&update.fb_url_v1, &self.client)
+        let document = assignments::fetch_document(&update.fb_url, &self.client)
             .await
             .map_err(Unfetched::Document)?;
         Ok((document, bundle))
@@ -210,10 +207,10 @@ impl AssignmentApplier {
     ) -> Result<DatasetsIndex, ApplyOutcome> {
         let keypair = self.keypair.clone();
         let id = update.id.clone();
-        let assignment_source = self.assignment_source;
+        let assignment_type = update.assignment_type;
         let bundle_ids = bundle.map(PreparedSchemaUpdate::ids);
         let validated = tokio::task::spawn_blocking(move || {
-            let assignment = assignments::decode_document(assignment_source, document)?;
+            let assignment = assignments::decode_document(assignment_type, document)?;
             DatasetsIndex::new(assignment, id, &keypair, |id| {
                 bundle_ids.as_ref().is_none_or(|ids| ids.contains(&id))
             })
@@ -472,10 +469,6 @@ mod tests {
     }
 
     async fn fixture() -> Fixture {
-        fixture_with(AssignmentSource::Worker).await
-    }
-
-    async fn fixture_with(assignment_source: AssignmentSource) -> Fixture {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let dir = tempfile::tempdir().unwrap();
@@ -499,7 +492,6 @@ mod tests {
             Arc::clone(&worker),
             Arc::clone(&schema_manager),
             keypair,
-            assignment_source,
             assignments::new_reqwest_client(Duration::from_secs(5), peer_id),
             // Caps the retry backoff, and with it the base, in test time.
             Duration::from_millis(40),
@@ -573,7 +565,8 @@ mod tests {
     fn update(id: &str, document_url: String, bundle: (BundleHash, String)) -> AssignmentUpdate {
         AssignmentUpdate {
             id: id.to_owned(),
-            fb_url_v1: document_url,
+            assignment_type: AssignmentType::Split,
+            fb_url: document_url,
             schema_bundle: Some(SchemaBundle {
                 hash: bundle.0,
                 url: bundle.1,
@@ -591,7 +584,8 @@ mod tests {
     fn legacy_update(id: &str, document_url: String) -> AssignmentUpdate {
         AssignmentUpdate {
             id: id.to_owned(),
-            fb_url_v1: document_url,
+            assignment_type: AssignmentType::Legacy,
+            fb_url: document_url,
             schema_bundle: None,
         }
     }
@@ -921,10 +915,10 @@ mod tests {
     /// The network can take a pair back: X in force, Y published and failing to fetch, then X
     /// again. That announcement is dropped as nothing-to-do for X — but it is also the network's
     /// last word on Y, so Y must not be retried, let alone applied once its documents turn up.
-    /// Legacy mode, where nothing waits on a settle, so the retry itself is what is exercised.
+    /// A legacy pair, which waits on no settle, so the retry itself is what is exercised.
     #[tokio::test]
     async fn a_pair_the_network_retracts_is_not_retried() {
-        let f = fixture_with(AssignmentSource::Legacy).await;
+        let f = fixture().await;
         let document = gzip(&legacy_assignment(f.peer_id));
         let x = f.stub.serve("/x.fb.gz", document.clone(), 0);
         // Fails once, so a retry would fetch it — and, being valid, apply it.
@@ -973,7 +967,7 @@ mod tests {
         intake
             .pending
             .as_ref()
-            .map(|u| (u.id.as_str(), u.fb_url_v1.as_str()))
+            .map(|u| (u.id.as_str(), u.fb_url.as_str()))
     }
 
     /// The queue holds one announcement — the newest, at its latest location — and an announcement

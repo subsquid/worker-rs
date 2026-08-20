@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-19**
-(baseline commit `6689f75`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-20**
+(baseline commit `0703a3a`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -121,7 +121,7 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-08-19)
+## Traceability matrix (as of 2026-08-20)
 
 Statuses reflect the actual test inventory: inline unit tests, all built unconditionally;
 `state_pbt` / `state_regression` over the chunk state machine and assignment
@@ -177,7 +177,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-23 | CT-5 | P | downgrade-agreement + log-summary unit tests |
 | INV-24 | CT-4/6 | U | boundary corpus absent |
 | INV-25 | CT-5 | P | HC-5 verifies the response signature on every response it sees, success and error alike |
-| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness). The bundle path attributes correctly and is unit-tested both ways: a pinned schema id the loaded bundle lacks is `server_error`, an unknown dataset type stays `bad_request`, and a chunk with no pinned id resolves by type — `server_error` in worker mode, where nothing fills that registry. A query naming a version is driven end to end: the named copy answers, and version 0 — never assigned — is `not_found` |
+| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness). The bundle path attributes correctly and is unit-tested both ways: a pinned schema id the loaded bundle lacks is `server_error`, an unknown dataset type stays `bad_request`, and a chunk with no pinned id resolves by type, which the manifest fills under every assignment type (IB-44) — unasserted for a chunk held outside a split assignment's slice. A query naming a version is driven end to end: the named copy answers, and version 0 — never assigned — is `not_found` |
 | INV-30 | CT-3 | U⊘ | known-violated (GAP-11). HC-5 checks map length and ones-count per read, but tearing needs a racing test |
 | INV-31 | CT-1/6 | P⊘ | running-query gauge covered; the remaining counters are still known-violated (GAP-17) |
 | INV-32 | CT-5/7 | P⊘ | admitted-always-logged unit-tested and now end-to-end (admitted → exactly one record; pre-admission → none); duplicate/oversize drop known (GAP-12/14) |
@@ -225,15 +225,16 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-50 | CT-2 | U | |
 | FM-51 | CT-2 | U⊘ | sweep-before-check (GAP-16) |
 | FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
-| FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
+| FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server. That a restart starts with an empty type registry — the manifest is never stored — is reasoned from ADR-22, not driven: no test restarts a worker and queries an unpinned chunk before the first load |
 | FM-53b | CT-4 | P | `e2e` drives the block end to end: an unfetchable bundle leaves the assignment unapplied and no chunk fetched. Hash mismatch, damaged cache and retry-until-installed are unit-tested, and so is the line the hash check draws: a bundle with nothing to load is refused once and not fetched again while a hash mismatch is retried (`assignment_loop` tests), with the transient/verdict split of every staging failure pinned in the `schema_bundle` unit tests; the metrics half (OB) is unasserted; `assignment_loop_pbt` adds randomized pair histories — over any sequence of refused and transient halves, neither the active assignment nor the installed bundle moves except on a pair that applied whole |
 | FM-53c | CT-4 | P | unit-tested: an assignment naming a schema the bundle lacks is refused whole, and a schema survives a later bundle that omits it (bundles merge — IB-44b). ADR-21's stricter rule is driven through the harness: a bundle that omits the schema its assignment references leaves the assignment unapplied and nothing fetched, and the test fails if coverage is judged against the accumulated store instead. The OB-16 alarm is unasserted; the same property run covers refusal atomicity. IB-40b's pair announcement is asserted at the stream by one sequence test (`poll_announces_each_change_of_pair_or_location_once`: either half moving yields an update, an unchanged pair is not offered again, a bundle change re-offers the assignment as a pair, a moved location is announced under an unchanged pair), but that a corrected bundle then gets the refused assignment reconsidered is not itself asserted |
-| FM-53d | CT-4 | P | unit-tested at the poll: a state with an assignment and no bundle, and one whose bundle hash does not parse, are each answered as not-applicable rather than an error, the pair fault is counted, and the announced pair is left alone so the corrected state re-offers it whole; a state with no assignment for the mode waits the same way whatever its bundle says, uncounted, since it is indistinguishable from a network that has not migrated. That erroring instead costs hours of backoff is reasoned, not driven — no test measures the poll cadence |
+| FM-53d | CT-4 | P | unit-tested at the poll: a `split` state with an assignment and no bundle, and one whose bundle hash does not parse, are each answered as not-applicable rather than an error, the fault is counted, and the announced pair is left alone so the corrected state re-offers it whole. That erroring instead costs hours of backoff is reasoned, not driven — no test measures the poll cadence |
+| FM-53e | CT-4 | P | unit-tested at the poll alongside FM-53d: a `split` state without its portal half, a state whose resolved type names no assignment at all, and an `assignment_type` that will not decode with none pinned each wait with `announced` untouched, and each moves `network_state_unresolved` under its own reason (OB-19). That a pin rescues the last of those is unit-tested at `resolve`. That an operator can alert on persistence is reasoned, not driven — no test holds a state stuck |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-08-19)
+## Gap register (as of 2026-08-20)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.
@@ -309,7 +310,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::format`, worker format serving a schema bundle alongside and able to republish a chunk at a version whose files live under a generation prefix (IB-41b). Fault corpus holds 3 of the CT-4 cases (bad file URL and empty slice, both driven by `e2e`; truncated document, wired but undriven) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::assignment_type`, published under the matching `assignment_type` so the worker under test resolves it with nothing pinned (IB-40), the split shape serving a schema bundle and a portal pointer alongside and able to republish a chunk at a version whose files live under a generation prefix (IB-41b). Fault corpus holds 3 of the CT-4 cases (bad file URL and empty slice, both driven by `e2e`; truncated document, wired but undriven) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

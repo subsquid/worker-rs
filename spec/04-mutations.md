@@ -27,7 +27,7 @@ pair is announced once and that backoff is the only thing that returns to it. A 
 failure is a state the worker cannot read at all — transport, or a body that is not a
 JSON object. A state that reads but is not applicable — no pointer for the worker's mode,
 a pointer that will not decode or names no document to fetch, or under
-`--assignment-source worker` no usable bundle reference — is not a failure: nothing is
+for a split assignment no usable bundle reference — is not a failure: nothing is
 announced, the worker re-reads it at P-ASSIGN-POLL, and an unusable pointer alarms (OB-18)
 as an unusable bundle reference does (OB-16, FM-53d); the backoff ladder would only delay
 noticing that the scheduler has fixed it. Retries of
@@ -54,7 +54,7 @@ completes ahead of a bulk backfill. Within a dataset, order is unspecified (02
 
 **WP-4 — Single applier.** [MUST] At most one assignment application executes at a time;
 an application in progress is never interrupted by a newer arrival (ADR-16), however many
-arrive: under `--assignment-source worker` it runs to its verdict — applied or stalled —
+arrive: a split assignment runs to its verdict — applied or stalled —
 first. Arrivals coalesce to the newest, so a pair the network has moved past is never
 started; a stalled application yields to the newest at once.
 

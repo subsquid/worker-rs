@@ -8,9 +8,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use sha2::{Digest, Sha256};
-use sqd_assignments::{AssignmentBuilder, WorkerAssignmentBuilder, WorkerStatus};
+use sqd_assignments::{AssignmentBuilder, AssignmentType, WorkerAssignmentBuilder, WorkerStatus};
 use sqd_network_transport::PeerId;
-use sqd_worker::cli::AssignmentSource;
 
 use super::corpus::Chunk;
 use super::seed::SplitMix64;
@@ -73,14 +72,14 @@ pub struct Scheduler {
     stub: HttpStub,
     rng: SplitMix64,
     published: Option<String>,
-    assignment_source: AssignmentSource,
+    assignment_type: AssignmentType,
     bundle_hash: Option<String>,
 }
 
 impl Scheduler {
-    pub async fn start(rng: SplitMix64, assignment_source: AssignmentSource) -> Self {
+    pub async fn start(rng: SplitMix64, assignment_type: AssignmentType) -> Self {
         let stub = HttpStub::start().await;
-        let bundle_hash = (assignment_source == AssignmentSource::Worker).then(|| {
+        let bundle_hash = (assignment_type == AssignmentType::Split).then(|| {
             let archive = schema_bundle(&[(WRITE_SCHEMA_ID, super::corpus::SCHEMA_YAML)]);
             let hash = format!("sha256:{:x}", Sha256::digest(&archive));
             stub.put(SCHEMA_BUNDLE_PATH, archive);
@@ -90,7 +89,7 @@ impl Scheduler {
             stub,
             rng,
             published: None,
-            assignment_source,
+            assignment_type,
             bundle_hash,
         }
     }
@@ -148,9 +147,9 @@ impl Scheduler {
         placements: &[ChunkPlacement],
         fault: AssignmentFault,
     ) -> Assignment {
-        let doc = match self.assignment_source {
-            AssignmentSource::Legacy => self.build_document(worker, placements, fault),
-            AssignmentSource::Worker => self.build_worker_document(worker, placements, fault),
+        let doc = match self.assignment_type {
+            AssignmentType::Legacy => self.build_document(worker, placements, fault),
+            AssignmentType::Split => self.build_worker_document(worker, placements, fault),
         };
         let path = format!("/assignments/{id}.fb.gz");
 
@@ -162,21 +161,29 @@ impl Scheduler {
         };
         self.stub.put(path.clone(), body);
 
-        let pointer = serde_json::json!({
-            "id": id,
-            "fb_url_v1": self.stub.url(&path),
-            "effective_from": 0,
-        });
-        let state = match self.assignment_source {
-            AssignmentSource::Legacy => serde_json::json!({
+        let state = match self.assignment_type {
+            AssignmentType::Legacy => serde_json::json!({
                 "network": "conformance",
-                "assignment": pointer,
+                "assignment_type": "legacy",
+                "assignment": {
+                    "id": id,
+                    "fb_url_v1": self.stub.url(&path),
+                    "effective_from": 0,
+                },
             }),
-            AssignmentSource::Worker => serde_json::json!({
+            // Never fetched, but a split state that omits the portal half resolves to
+            // nothing (IB-40b).
+            AssignmentType::Split => serde_json::json!({
                 "network": "conformance",
-                "worker_assignment": pointer,
+                "assignment_type": "split",
+                "worker_assignment": {"id": id, "fb_url": self.stub.url(&path), "version": "1"},
+                "portal_assignment": {
+                    "id": id,
+                    "fb_url": self.stub.url("/portal-assignment.fb.gz"),
+                    "version": "1",
+                },
                 "schema_bundle": {
-                    "hash": self.bundle_hash.as_deref().expect("worker format publishes a bundle"),
+                    "hash": self.bundle_hash.as_deref().expect("a split state publishes a bundle"),
                     "url": self.stub.url(SCHEMA_BUNDLE_PATH),
                 },
             }),
