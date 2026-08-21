@@ -38,7 +38,7 @@ pub enum ApplyOutcome {
 /// Applies announced pairs in order, retries what failed, and refuses what cannot apply.
 pub struct AssignmentApplier {
     worker: Arc<Worker>,
-    schema_manager: Arc<SchemaManager>,
+    schemas: SchemaManager,
     keypair: Keypair,
     client: reqwest::Client,
     retry_cap: Duration,
@@ -47,14 +47,14 @@ pub struct AssignmentApplier {
 impl AssignmentApplier {
     pub fn new(
         worker: Arc<Worker>,
-        schema_manager: Arc<SchemaManager>,
+        schemas: SchemaManager,
         keypair: Keypair,
         client: reqwest::Client,
         retry_cap: Duration,
     ) -> Self {
         Self {
             worker,
-            schema_manager,
+            schemas,
             keypair,
             client,
             retry_cap,
@@ -184,7 +184,7 @@ impl AssignmentApplier {
                     )))
                 })?;
                 Some(
-                    self.schema_manager
+                    self.schemas
                         .prepare(bundle, &self.client)
                         .await
                         .map_err(Unfetched::Bundle)?,
@@ -304,7 +304,7 @@ impl AssignmentApplier {
     fn applied_pair(&self) -> NetworkPair {
         NetworkPair {
             assignment_id: self.worker.registered_assignment_id(),
-            bundle_hash: self.schema_manager.installed_hash(),
+            bundle_hash: self.schemas.registry().installed_hash(),
         }
     }
 }
@@ -450,7 +450,7 @@ mod tests {
 
     use crate::controller::schema_bundle::test_support::{targz, SCHEMA};
     use crate::controller::schema_bundle::{BundleHash, SchemaBundle};
-    use crate::controller::test_support::TestServer;
+    use crate::controller::test_support::{gzip, TestServer};
     use crate::storage::downloader::DownloadConfig;
     use crate::storage::manager::StateManager;
     use crate::types::schema::SchemaId;
@@ -461,7 +461,7 @@ mod tests {
     struct Fixture {
         applier: Arc<AssignmentApplier>,
         worker: Arc<Worker>,
-        schema_manager: Arc<SchemaManager>,
+        schemas: SchemaManager,
         peer_id: PeerId,
         stub: TestServer,
         // Dropped last: the store outlives the worker that writes into it.
@@ -486,11 +486,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let schema_manager = Arc::new(SchemaManager::open(root.join("schemas")));
-        let worker = Arc::new(Worker::new(state_manager, schema_manager.registry(), 1));
+        let schemas = SchemaManager::open(root.join("schemas"));
+        let worker = Arc::new(Worker::new(state_manager, schemas.registry(), 1));
         let applier = Arc::new(AssignmentApplier::new(
             Arc::clone(&worker),
-            Arc::clone(&schema_manager),
+            schemas.clone(),
             keypair,
             assignments::new_reqwest_client(Duration::from_secs(5), peer_id),
             // Caps the retry backoff, and with it the base, in test time.
@@ -499,7 +499,7 @@ mod tests {
         Fixture {
             applier,
             worker,
-            schema_manager,
+            schemas,
             peer_id,
             stub: TestServer::start().await,
             _dir: dir,
@@ -553,13 +553,6 @@ mod tests {
             "the point of the corruption is that these bytes no longer decode"
         );
         document
-    }
-
-    fn gzip(bytes: &[u8]) -> Vec<u8> {
-        use std::io::Write;
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(bytes).unwrap();
-        encoder.finish().unwrap()
     }
 
     fn update(id: &str, document_url: String, bundle: (BundleHash, String)) -> AssignmentUpdate {
@@ -639,7 +632,7 @@ mod tests {
         assert_eq!(outcome, ApplyOutcome::Applied);
         assert_eq!(f.worker.registered_assignment_id().as_deref(), Some("a1"));
         assert_eq!(
-            f.schema_manager.installed_hash(),
+            f.schemas.registry().installed_hash(),
             Some(bundle.0),
             "the schemas are in force by the time the assignment is"
         );
@@ -783,10 +776,10 @@ mod tests {
             );
             let update = update("a1", document, bundle);
             if fails == Fails::Activation {
-                f.schema_manager.fail_next_install();
+                f.schemas.registry().fail_next_install();
                 assert_eq!(f.applier.apply(&update).await, ApplyOutcome::Failed);
                 assert!(f.worker.registered_assignment_id().is_none());
-                assert!(f.schema_manager.installed_hash().is_none());
+                assert!(f.schemas.registry().installed_hash().is_none());
             }
 
             let (token, running) = run_loop(&f.applier, vec![update]);

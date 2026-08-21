@@ -15,7 +15,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -113,8 +112,7 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
-    let schema_manager = Arc::new(SchemaManager::open(args.data_dir.join("schemas")));
-    let query_schemas = schema_manager.registry();
+    let schemas = SchemaManager::open(args.data_dir.join("schemas"));
 
     let _sentry_guard = if args_clone.sentry_is_enabled {
         setup_sentry(&args_clone, peer_id.to_string())
@@ -122,14 +120,11 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
         None
     };
 
-    let worker = Worker::new(
-        state_manager,
-        Arc::clone(&query_schemas),
-        args.parallel_queries,
-    );
+    // Both faces of one registry: the schemas a pair installs are the ones its chunks are
+    // then queried against (ADR-21).
+    let worker = Worker::new(state_manager, schemas.registry(), args.parallel_queries);
 
-    let controller =
-        create_p2p_controller(worker, schema_manager, transport_builder, args_clone).await?;
+    let controller = create_p2p_controller(worker, schemas, transport_builder, args_clone).await?;
     // Leaked to give the subsystem tasks `&'static` access; lives until process exit anyway
     let controller = &*Box::leak(Box::new(controller));
 

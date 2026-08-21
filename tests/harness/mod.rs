@@ -114,8 +114,7 @@ pub struct Harness {
     pub worker_id: PeerId,
 
     keypair: Keypair,
-    schemas: Arc<SchemaRegistry>,
-    query_schemas: Arc<SchemaRegistry>,
+    schemas: SchemaManager,
     schema_stub: HttpStub,
     assignment_stream:
         std::pin::Pin<Box<dyn futures::Stream<Item = assignments::AssignmentUpdate>>>,
@@ -196,11 +195,10 @@ impl Harness {
         .await
         .expect("state manager initialises");
 
-        let schema_manager = Arc::new(SchemaManager::open(data_path.join("schemas")));
-        let schemas = schema_manager.registry();
+        let schemas = SchemaManager::open(data_path.join("schemas"));
         let worker = Arc::new(Worker::new(
             state_manager,
-            schemas.clone(),
+            schemas.registry(),
             config.parallel_queries,
         ));
 
@@ -219,13 +217,11 @@ impl Harness {
             .await
             .expect("log store opens");
 
-        let query_schemas = Arc::clone(&schemas);
-
         let shutdown = CancellationToken::new();
         spawn_subsystems(
             &worker,
             &allocations,
-            (schemas.clone(), schema_stub.url(SCHEMA_MANIFEST_PATH)),
+            (schemas.registry(), schema_stub.url(SCHEMA_MANIFEST_PATH)),
             worker_id,
             shutdown.clone(),
         );
@@ -244,8 +240,8 @@ impl Harness {
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
         // Exercise the production bundle-before-assignment ordering (ADR-21).
         let applier = AssignmentApplier::new(
-            worker.clone(),
-            schema_manager.clone(),
+            Arc::clone(&worker),
+            schemas.clone(),
             keypair.clone(),
             assignment_client.clone(),
             Duration::from_millis(200),
@@ -263,7 +259,6 @@ impl Harness {
             worker_id,
             keypair,
             schemas,
-            query_schemas,
             schema_stub,
             assignment_stream,
             applier,
@@ -505,7 +500,7 @@ impl Harness {
 
     async fn await_schemas_loaded(&self) {
         self.await_condition("query schemas loaded", || async {
-            self.schemas.get_by_type("evm").is_ok()
+            self.schemas.registry().get_by_type("evm").is_ok()
         })
         .await;
     }

@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use crate::metrics;
 use crate::query::result::QueryError;
 use crate::types::schema::SchemaId;
+use crate::util::encoding::Encoding;
 
 /// Maximum compressed and decompressed bundle size.
 const MAX_BUNDLE_SIZE: usize = 64 * 1024 * 1024;
@@ -117,12 +118,8 @@ pub struct PreparedSchemaUpdate {
 }
 
 impl PreparedSchemaUpdate {
-    pub fn contains(&self, id: SchemaId) -> bool {
-        self.bundle.contains(id)
-    }
-
     pub fn ids(&self) -> Arc<HashSet<SchemaId>> {
-        self.bundle.ids()
+        Arc::clone(&self.bundle.ids)
     }
 
     /// Moves the staged schemas into the store and publishes them. The file moves run off the
@@ -146,20 +143,6 @@ enum PreparedFiles {
         dir: TempDir,
         missing: HashSet<SchemaId>,
     },
-}
-
-impl PreparedBundle {
-    pub fn hash(&self) -> BundleHash {
-        self.hash
-    }
-
-    pub fn contains(&self, id: SchemaId) -> bool {
-        self.ids.contains(&id)
-    }
-
-    pub fn ids(&self) -> Arc<HashSet<SchemaId>> {
-        Arc::clone(&self.ids)
-    }
 }
 
 impl TryFrom<sqd_assignments::SchemaBundle> for SchemaBundle {
@@ -225,34 +208,41 @@ impl std::fmt::LowerHex for BundleHash {
     }
 }
 
-/// Additive persistent schema store.
 #[derive(Default)]
 pub(crate) struct SchemaSnapshot {
     pub(crate) legacy_loaded: bool,
     pub(crate) by_type: HashMap<String, Arc<DatasetDescription>>,
     pub(crate) by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
     pub(crate) bundle_hash: Option<BundleHash>,
-    pub(crate) bundle_ids: HashSet<SchemaId>,
+    pub(crate) bundle_ids: Arc<HashSet<SchemaId>>,
 }
 
+/// Two writers merge into its snapshot: an installed bundle, and a refreshed CDN manifest.
 pub struct SchemaRegistry {
     dir: Utf8PathBuf,
     snapshot: ArcSwap<SchemaSnapshot>,
-    merge_lock: parking_lot::Mutex<()>,
+    /// `ArcSwap` cannot read-modify-write, and both writers do. Sync: `activate_bundle` takes
+    /// it from `spawn_blocking`.
+    publish_lock: parking_lot::Mutex<()>,
     #[cfg(test)]
     activation_failures: std::sync::atomic::AtomicUsize,
 }
 
+/// The write face over a [`SchemaRegistry`]. A cheap handle — clone it, don't wrap it in an
+/// `Arc`; every clone shares the one staging lock.
+#[derive(Clone)]
 pub struct SchemaManager {
     registry: Arc<SchemaRegistry>,
-    mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Held from staging until install or drop, so two bundles never stage at once. Async: it
+    /// spans the bundle download.
+    staging_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SchemaManager {
     pub fn open(dir: impl Into<Utf8PathBuf>) -> Self {
         Self {
             registry: Arc::new(SchemaRegistry::open(dir)),
-            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            staging_lock: Default::default(),
         }
     }
 
@@ -260,29 +250,19 @@ impl SchemaManager {
         Arc::clone(&self.registry)
     }
 
+    /// Stages a bundle without publishing it.
     pub async fn prepare(
         &self,
         bundle: &SchemaBundle,
         client: &reqwest::Client,
     ) -> Result<PreparedSchemaUpdate, BundleFault> {
-        let guard = Arc::clone(&self.mutation_lock).lock_owned().await;
+        let guard = Arc::clone(&self.staging_lock).lock_owned().await;
         let bundle = self.registry.prepare_bundle(bundle, client).await?;
         Ok(PreparedSchemaUpdate {
             registry: Arc::clone(&self.registry),
             bundle,
             _guard: guard,
         })
-    }
-
-    pub fn installed_hash(&self) -> Option<BundleHash> {
-        self.registry.installed_hash()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_install(&self) {
-        self.registry
-            .activation_failures
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -292,9 +272,15 @@ impl SchemaRegistry {
         Self {
             dir: Utf8PathBuf::new(),
             snapshot: ArcSwap::from_pointee(SchemaSnapshot::default()),
-            merge_lock: parking_lot::Mutex::new(()),
+            publish_lock: parking_lot::Mutex::new(()),
             activation_failures: Default::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_install(&self) {
+        self.activation_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn open(dir: impl Into<Utf8PathBuf>) -> Self {
@@ -320,7 +306,7 @@ impl SchemaRegistry {
         Self {
             dir,
             snapshot: ArcSwap::from_pointee(snapshot),
-            merge_lock: parking_lot::Mutex::new(()),
+            publish_lock: parking_lot::Mutex::new(()),
             #[cfg(test)]
             activation_failures: Default::default(),
         }
@@ -358,7 +344,7 @@ impl SchemaRegistry {
     }
 
     pub(crate) fn replace_legacy(&self, by_type: HashMap<String, Arc<DatasetDescription>>) {
-        let _updating = self.merge_lock.lock();
+        let _publishing = self.publish_lock.lock();
         let current = self.snapshot.load_full();
         self.snapshot.store(Arc::new(SchemaSnapshot {
             legacy_loaded: true,
@@ -373,8 +359,8 @@ impl SchemaRegistry {
         self.snapshot.load().bundle_hash
     }
 
-    pub fn bundle_ids(&self) -> HashSet<SchemaId> {
-        self.snapshot.load().bundle_ids.clone()
+    pub fn bundle_ids(&self) -> Arc<HashSet<SchemaId>> {
+        Arc::clone(&self.snapshot.load().bundle_ids)
     }
 
     #[cfg(test)]
@@ -425,7 +411,7 @@ impl SchemaRegistry {
             tracing::debug!(hash = %bundle.hash, "Schema bundle unchanged");
             return Ok(PreparedBundle {
                 hash: bundle.hash,
-                ids: Arc::new(self.bundle_ids()),
+                ids: self.bundle_ids(),
                 schemas: HashMap::new(),
                 files: PreparedFiles::Cached,
             });
@@ -445,9 +431,10 @@ impl SchemaRegistry {
                 bundle.hash
             )));
         }
-        let staged = unpack(bytes, self.dir.clone())
+        let encoding = Encoding::of(&bundle.url);
+        let staged = unpack(bytes, encoding, self.dir.clone())
             .await
-            .map_err(|e| e.context("couldn't unpack schema bundle"))?;
+            .map_err(|e| e.context(format!("couldn't unpack the {encoding} schema bundle")))?;
         let staged_path = Utf8Path::from_path(staged.path())
             .ok_or_else(|| {
                 BundleFault::transient(anyhow::anyhow!("staging directory path is not UTF-8"))
@@ -457,8 +444,9 @@ impl SchemaRegistry {
             .await
             .map_err(|e| e.context("couldn't load the staged schema bundle"))?;
 
-        let ids = Arc::new(schemas.keys().copied().collect());
-        let schemas_to_install = classify_cached(self.dir.clone(), staged_path, &ids).await?;
+        let ids: Arc<HashSet<SchemaId>> = Arc::new(schemas.keys().copied().collect());
+        let schemas_to_install =
+            classify_cached(self.dir.clone(), staged_path, Arc::clone(&ids)).await?;
 
         tracing::info!(hash = %bundle.hash, new_schemas = schemas_to_install.len(), "Merging schema bundle");
         Ok(PreparedBundle {
@@ -473,14 +461,6 @@ impl SchemaRegistry {
     }
 
     fn activate_bundle(&self, bundle: PreparedBundle) -> anyhow::Result<()> {
-        self.activate_bundle_with(bundle, &metrics::SCHEMA_BUNDLE_LOADED)
-    }
-
-    fn activate_bundle_with(
-        &self,
-        bundle: PreparedBundle,
-        loaded: &prometheus_client::metrics::gauge::Gauge,
-    ) -> anyhow::Result<()> {
         #[cfg(test)]
         if self
             .activation_failures
@@ -493,7 +473,7 @@ impl SchemaRegistry {
         {
             anyhow::bail!("injected schema bundle activation failure");
         }
-        let _updating = self.merge_lock.lock();
+        let _publishing = self.publish_lock.lock();
         match bundle.files {
             PreparedFiles::Cached => {}
             PreparedFiles::Staged { dir, missing } => {
@@ -509,17 +489,15 @@ impl SchemaRegistry {
         }
         let current = self.snapshot.load_full();
         let mut by_id = current.by_id.clone();
-        for (id, description) in bundle.schemas {
-            by_id.insert(id, description);
-        }
+        by_id.extend(bundle.schemas);
         self.snapshot.store(Arc::new(SchemaSnapshot {
             legacy_loaded: current.legacy_loaded,
             by_type: current.by_type.clone(),
             by_id,
             bundle_hash: Some(bundle.hash),
-            bundle_ids: (*bundle.ids).clone(),
+            bundle_ids: bundle.ids,
         }));
-        loaded.set(1);
+        metrics::SCHEMA_BUNDLE_LOADED.set(1);
         Ok(())
     }
 }
@@ -605,7 +583,11 @@ async fn download(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>
     Ok(buf)
 }
 
-async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> Result<TempDir, BundleFault> {
+async fn unpack(
+    bytes: Vec<u8>,
+    encoding: Encoding,
+    parent: Utf8PathBuf,
+) -> Result<TempDir, BundleFault> {
     joined(
         tokio::task::spawn_blocking(move || {
             // Making somewhere to stage is this worker's business, not the bundle's.
@@ -618,7 +600,7 @@ async fn unpack(bytes: Vec<u8>, parent: Utf8PathBuf) -> Result<TempDir, BundleFa
                 BundleFault::transient(anyhow::anyhow!("staging directory path is not UTF-8"))
             })?;
 
-            extract_schemas(&bytes, path, MAX_BUNDLE_SIZE)?;
+            extract_schemas(&bytes, encoding, path, MAX_BUNDLE_SIZE)?;
             Ok(temp)
         })
         .await,
@@ -648,17 +630,33 @@ impl<R: std::io::Read> std::io::Read for Bounded<R> {
 }
 
 /// Extracts root-level `<id>.yaml` files and ignores other entries.
-fn extract_schemas(bytes: &[u8], dest: &Utf8Path, limit: usize) -> Result<(), BundleFault> {
+fn extract_schemas(
+    bytes: &[u8],
+    encoding: Encoding,
+    dest: &Utf8Path,
+    limit: usize,
+) -> Result<(), BundleFault> {
     use std::io::Read;
 
+    // The url names the encoding, so a frame mismatch is the location's fault — transient,
+    // like a hash mismatch.
+    if !bytes.starts_with(encoding.magic()) {
+        return Err(BundleFault::transient(anyhow::anyhow!(
+            "schema bundle url names {encoding}, but its bytes are not a {encoding} frame"
+        )));
+    }
+    let decoder: Box<dyn Read + '_> = match encoding {
+        Encoding::Gzip => Box::new(flate2::read::GzDecoder::new(bytes)),
+        Encoding::Zstd => Box::new(zstd::Decoder::new(bytes).map_err(BundleFault::permanent)?),
+    };
     let mut archive = tar::Archive::new(Bounded {
-        inner: flate2::read::GzDecoder::new(bytes),
+        inner: decoder,
         limit,
         read: 0,
     });
     let mut written = 0usize;
 
-    // Walking the archive only ever reads the bytes in hand — the gzip framing, the tar
+    // Walking the archive only ever reads the bytes in hand — the frame, the tar
     // structure, and the decompressed-size cap are all properties of what the hash vouched for.
     for entry in archive.entries().map_err(BundleFault::permanent)? {
         let mut entry = entry.map_err(BundleFault::permanent)?;
@@ -758,13 +756,12 @@ async fn load_dir(
 async fn classify_cached(
     store: Utf8PathBuf,
     staged: Utf8PathBuf,
-    ids: &HashSet<SchemaId>,
+    ids: Arc<HashSet<SchemaId>>,
 ) -> Result<HashSet<SchemaId>, BundleFault> {
-    let ids = ids.clone();
     joined(
         tokio::task::spawn_blocking(move || {
             let mut missing = HashSet::new();
-            for id in ids {
+            for &id in ids.iter() {
                 let name = format!("{id}{SCHEMA_SUFFIX}");
                 let stored = store.join(&name);
                 if !stored.exists() {
@@ -801,11 +798,8 @@ tables:
         type: uint64
 "#;
 
-    pub(crate) fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-            Vec::new(),
-            flate2::Compression::default(),
-        ));
+    fn tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
         for (name, body) in entries {
             let mut header = tar::Header::new_gnu();
             header.set_size(body.len() as u64);
@@ -816,13 +810,24 @@ tables:
             header.set_cksum();
             builder.append(&header, *body).unwrap();
         }
-        builder.into_inner().unwrap().finish().unwrap()
+        builder.into_inner().unwrap()
+    }
+
+    pub(crate) fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tarball(entries)).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    pub(crate) fn tarzst(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        zstd::encode_all(tarball(entries).as_slice(), 0).unwrap()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{targz, SCHEMA};
+    use super::test_support::{targz, tarzst, SCHEMA};
     use super::*;
     use crate::controller::test_support::TestServer;
 
@@ -871,21 +876,62 @@ mod tests {
 
     #[test]
     fn an_ignored_entry_counts_against_the_unpacked_cap() {
+        type Archive = fn(&[(&str, &[u8])]) -> Vec<u8>;
+        for (encoding, build) in [
+            (Encoding::Gzip, targz as Archive),
+            (Encoding::Zstd, tarzst as Archive),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let dest = Utf8Path::from_path(dir.path()).unwrap();
+            let archive = build(&[
+                ("7.yaml", SCHEMA.as_bytes()),
+                ("junk.bin", &vec![0u8; 64 * 1024]),
+            ]);
+
+            // Room for the schema and its tar framing, not for the member that is thrown away.
+            let error = extract_schemas(&archive, encoding, dest, 8 * 1024)
+                .expect_err("an ignored entry is decompressed like any other");
+            assert!(
+                format!("{error:#}").contains("exceeds"),
+                "{encoding}: {error:#}"
+            );
+
+            // The same archive is fine under the real cap, and still yields only the schema.
+            extract_schemas(&archive, encoding, dest, MAX_BUNDLE_SIZE).unwrap();
+            assert_eq!(stored(&dir), vec!["7.yaml"], "{encoding}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bundle_url_suffix_picks_the_decoder() {
         let dir = tempfile::tempdir().unwrap();
-        let dest = Utf8Path::from_path(dir.path()).unwrap();
-        let archive = targz(&[
-            ("7.yaml", SCHEMA.as_bytes()),
-            ("junk.bin", &vec![0u8; 64 * 1024]),
-        ]);
+        let store = store(&dir);
+        let client = reqwest::Client::new();
+        let server = TestServer::start().await;
+        let zst = tarzst(&[("7.yaml", SCHEMA.as_bytes())]);
+        let gz = targz(&[(
+            "12.yaml",
+            SCHEMA.replace("name: evm", "name: solana").as_bytes(),
+        )]);
 
-        // Room for the schema and its tar framing, not for the member that is thrown away.
-        let error = extract_schemas(&archive, dest, 8 * 1024)
-            .expect_err("an ignored entry is decompressed like any other");
-        assert!(format!("{error:#}").contains("exceeds"), "{error:#}");
+        let bundle = SchemaBundle {
+            hash: BundleHash::of(&zst),
+            url: server.serve("/b.tar.zst", zst, 0),
+        };
+        store.ensure(&bundle, &client).await.unwrap();
+        assert_eq!(store.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
 
-        // The same archive is fine under the real cap, and still yields only the schema.
-        extract_schemas(&archive, dest, MAX_BUNDLE_SIZE).unwrap();
-        assert_eq!(stored(&dir), vec!["7.yaml"]);
+        // Same bytes, right hash, wrong suffix.
+        let mislabelled = SchemaBundle {
+            hash: BundleHash::of(&gz),
+            url: server.serve("/c.tar.zst", gz, 0),
+        };
+        let fault = store
+            .prepare_bundle(&mislabelled, &client)
+            .await
+            .unwrap_err();
+        assert!(!fault.is_permanent(), "a corrected url still rescues it");
+        assert!(format!("{fault:#}").contains("zstd"), "{fault:#}");
     }
 
     #[tokio::test]
@@ -905,12 +951,10 @@ mod tests {
         assert!(registry.bundle_ids().is_empty());
         assert!(stored(&dir).is_empty());
 
-        let loaded = prometheus_client::metrics::gauge::Gauge::default();
-        assert_eq!(loaded.get(), 0);
-        registry.activate_bundle_with(prepared, &loaded).unwrap();
-        assert_eq!(loaded.get(), 1);
+        registry.activate_bundle(prepared).unwrap();
+
         assert_eq!(registry.installed_hash(), Some(bundle.hash));
-        assert_eq!(registry.bundle_ids(), HashSet::from([SchemaId::new(7)]));
+        assert_eq!(*registry.bundle_ids(), HashSet::from([SchemaId::new(7)]));
         assert_eq!(stored(&dir), vec!["7.yaml"]);
     }
 
@@ -918,7 +962,6 @@ mod tests {
     async fn a_later_bundle_adds_to_the_store_rather_than_replacing_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
-        let registry = Arc::clone(&store);
 
         for (name, body) in [
             ("7.yaml", SCHEMA.to_owned()),
@@ -933,17 +976,14 @@ mod tests {
         }
 
         assert_eq!(
-            registry.get_by_id(SchemaId::new(7)).unwrap().name,
+            store.get_by_id(SchemaId::new(7)).unwrap().name,
             "evm",
             "the first bundle's schema survives the second"
         );
-        assert_eq!(
-            registry.get_by_id(SchemaId::new(12)).unwrap().name,
-            "solana"
-        );
+        assert_eq!(store.get_by_id(SchemaId::new(12)).unwrap().name, "solana");
         assert_eq!(stored(&dir), vec!["12.yaml", "7.yaml"]);
 
-        assert_eq!(store.bundle_ids(), HashSet::from([SchemaId::new(12)]));
+        assert_eq!(*store.bundle_ids(), HashSet::from([SchemaId::new(12)]));
     }
 
     #[tokio::test]
@@ -1081,7 +1121,6 @@ mod tests {
     async fn ignores_entries_that_are_not_root_level_id_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
-        let registry = Arc::clone(&store);
         let archive = targz(&[
             ("7.yaml", SCHEMA.as_bytes()),
             ("nested/9.yaml", SCHEMA.as_bytes()),
@@ -1095,9 +1134,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(registry.get_by_id(SchemaId::new(7)).is_ok());
+        assert!(store.get_by_id(SchemaId::new(7)).is_ok());
         assert!(
-            registry.get_by_id(SchemaId::new(9)).is_err(),
+            store.get_by_id(SchemaId::new(9)).is_err(),
             "nested entries are not unpacked"
         );
         assert!(

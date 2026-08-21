@@ -117,7 +117,7 @@ async fn check_pair_history(history: Vec<PublishedPair>) {
             "a refused or incomplete pair changed the active assignment at step {step}"
         );
         assert_eq!(
-            f.schema_manager.installed_hash(),
+            f.schemas.registry().installed_hash(),
             expected_bundle,
             "a refused or incomplete pair changed the active bundle at step {step}"
         );

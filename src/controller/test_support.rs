@@ -89,6 +89,17 @@ impl TestServer {
     }
 }
 
+pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+pub(crate) fn zstd(bytes: &[u8]) -> Vec<u8> {
+    zstd::encode_all(bytes, 0).unwrap()
+}
+
 fn ok_response(body: Vec<u8>) -> Vec<u8> {
     let mut response = format!(
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",

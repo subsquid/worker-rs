@@ -40,7 +40,7 @@ use crate::{
 use super::assignment_loop::AssignmentApplier;
 use super::experimental_engine;
 use super::query_deps::{CuChecker, QueryRunner};
-use super::schema_bundle;
+use super::schema_bundle::SchemaManager;
 use super::worker::Worker;
 
 const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -94,7 +94,7 @@ pub struct P2PController<EventStream> {
     keypair: Keypair,
     assignment_url: String,
     assignment_type: Option<AssignmentType>,
-    schema_manager: Arc<schema_bundle::SchemaManager>,
+    schemas: SchemaManager,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
     queries_tx: mpsc::Sender<AdmittedQuery>,
@@ -109,7 +109,7 @@ pub struct P2PController<EventStream> {
 
 pub async fn create_p2p_controller(
     worker: Worker,
-    schema_manager: Arc<schema_bundle::SchemaManager>,
+    schemas: SchemaManager,
     transport_builder: P2PTransportBuilder,
     args: Args,
 ) -> Result<P2PController<impl Stream<Item = WorkerEvent>>> {
@@ -148,7 +148,7 @@ pub async fn create_p2p_controller(
         keypair,
         assignment_url: args.assignment_url,
         assignment_type: args.assignment_source,
-        schema_manager,
+        schemas,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
@@ -292,7 +292,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         );
         AssignmentApplier::new(
             Arc::clone(&self.worker),
-            Arc::clone(&self.schema_manager),
+            self.schemas.clone(),
             self.keypair.clone(),
             client,
             assignment_check_interval,

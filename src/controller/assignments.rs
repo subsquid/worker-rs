@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, time::Duration};
+use std::time::Duration;
 
 use async_stream::stream;
 use futures::Stream;
@@ -11,6 +11,7 @@ use super::schema_bundle::{BundleHash, SchemaBundle};
 use crate::metrics;
 use crate::storage::datasets_index::AssignmentBlob;
 use crate::util::backoff;
+use crate::util::encoding::Encoding;
 
 /// Identifies an assignment and schema bundle announcement (ADR-21). Identity, not location: an
 /// id names one document for all time (IB-40b).
@@ -300,15 +301,6 @@ async fn fetch_network_state(
     Ok(published)
 }
 
-/// The assignment document's bytes, gunzipped. Fails on transport and gzip errors only: whether
-/// the bytes are a document is a verdict on the document, decided in [`decode_document`].
-pub async fn fetch_document(
-    url: &str,
-    reqwest_client: &reqwest::Client,
-) -> anyhow::Result<Vec<u8>> {
-    download_gzipped(url, reqwest_client).await
-}
-
 /// Reads a fetched document in the announcement's format. A split document is verified and a
 /// failure is a property of the bytes (FM-12); a legacy document is trusted (ADR-3), so reading
 /// it can panic later and callers contain that where they read.
@@ -326,28 +318,34 @@ pub fn decode_document(
     }
 }
 
-async fn download_gzipped(url: &str, reqwest_client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
-    use async_compression::tokio::bufread::GzipDecoder;
+/// The assignment document's bytes, decompressed. Fails on transport and decoding errors only:
+/// whether the bytes are a document is a verdict on the document, decided in [`decode_document`].
+pub async fn fetch_document(
+    url: &str,
+    reqwest_client: &reqwest::Client,
+) -> anyhow::Result<Vec<u8>> {
+    use async_compression::tokio::bufread::{GzipDecoder, ZstdDecoder};
     use futures::TryStreamExt;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
 
+    let encoding = Encoding::of(url);
     let response = reqwest_client.get(url).send().await?.error_for_status()?;
     let stream = response.bytes_stream();
-    let reader = StreamReader::new(stream.map_err(|e| std::io::Error::new(ErrorKind::Other, e)));
+    let reader = StreamReader::new(stream.map_err(std::io::Error::other));
     let mut buf = Vec::new();
-    let mut decoder = GzipDecoder::new(reader);
-    decoder
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to download assignment: {}", e))?;
+    match encoding {
+        Encoding::Gzip => GzipDecoder::new(reader).read_to_end(&mut buf).await,
+        Encoding::Zstd => ZstdDecoder::new(reader).read_to_end(&mut buf).await,
+    }
+    .map_err(|e| anyhow::anyhow!("Failed to read the assignment document as {encoding}: {e}"))?;
     Ok(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controller::test_support::TestServer;
+    use crate::controller::test_support::{gzip, zstd, TestServer};
 
     fn published_state(json: &str) -> PublishedState {
         serde_json::from_str(json).unwrap()
@@ -503,6 +501,22 @@ mod tests {
 
     fn test_client() -> reqwest::Client {
         new_reqwest_client(Duration::from_secs(5), PeerId::random())
+    }
+
+    #[tokio::test]
+    async fn a_document_is_read_in_the_encoding_its_url_names() {
+        let document = b"not a real flatbuffer, but the bytes round-trip all the same".to_vec();
+        let server = TestServer::start().await;
+        let gz = server.serve("/a.fb.gz", gzip(&document), 0);
+        let zst = server.serve("/a.fb.zst", zstd(&document), 0);
+        let mislabelled = server.serve("/b.fb.zst", gzip(&document), 0);
+        let client = test_client();
+
+        assert_eq!(fetch_document(&gz, &client).await.unwrap(), document);
+        assert_eq!(fetch_document(&zst, &client).await.unwrap(), document);
+
+        let error = fetch_document(&mislabelled, &client).await.unwrap_err();
+        assert!(format!("{error:#}").contains("zstd"), "{error:#}");
     }
 
     /// Either half moving re-announces the pair, and so does a change of location under an

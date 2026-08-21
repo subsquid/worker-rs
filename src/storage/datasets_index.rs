@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     str::FromStr,
     sync::Arc,
 };
@@ -11,7 +11,7 @@ use sqd_network_transport::Keypair;
 use tracing::error;
 
 use crate::types::schema::SchemaId;
-use crate::types::state::ChunkRef;
+use crate::types::state::{ChunkRef, DatasetId};
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
 pub enum AssignmentBlob {
@@ -126,33 +126,26 @@ impl DatasetsIndex {
     ) -> anyhow::Result<Self> {
         let peer_id = key.public().to_peer_id();
         let no_worker = || anyhow::anyhow!("no assignment for this worker");
-        let mut pool = StringPool::default();
+        let mut datasets = HashMap::new();
 
         let (status, headers, chunks) = match &assignment {
             AssignmentBlob::Legacy(assignment) => {
                 let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
                 let mut chunks = HashMap::new();
-                let mut addressed = HashSet::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-                    // Once per dataset: the base url is shared by every chunk of it, so one
-                    // that won't parse leaves the whole dataset without an address — the
-                    // document contradicting itself, which makes it inapplicable (FM-12).
-                    if addressed.insert(chunk.dataset_id()) {
-                        dataset_base(chunk.dataset_id(), chunk.dataset_base_url())?;
-                    }
-                    chunks.insert(
-                        // Legacy assignments have no versions: every chunk is the ingested
-                        // copy, stored where it has always been.
-                        pool.chunk_ref(chunk.dataset_id(), chunk.id(), 0),
-                        chunk_ref,
-                    );
+                    // A base url that won't parse leaves the whole dataset unaddressable — the
+                    // document contradicting itself, so it is inapplicable whole (FM-12).
+                    let dataset = pool(&mut datasets, chunk.dataset_id(), || {
+                        dataset_base(chunk.dataset_id(), chunk.dataset_base_url())
+                    })?;
+                    // Legacy assignments have no versions: every chunk is the ingested copy.
+                    chunks.insert(ChunkRef::new(dataset, Arc::from(chunk.id())), chunk_ref);
                 }
                 (worker.status(), worker.decrypt_headers(key)?, chunks)
             }
             AssignmentBlob::Worker(assignment) => {
                 let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
                 let mut chunks = HashMap::new();
-                let mut addressed = HashSet::new();
                 let mut generations = HashSet::new();
                 let mut checked = HashSet::new();
                 for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
@@ -164,13 +157,11 @@ impl DatasetsIndex {
                             dataset.id()
                         );
                     };
-                    // A document that contradicts itself is inapplicable whole (FM-12), and
-                    // each of these is checked once per dataset, not per chunk: a base url that
-                    // won't parse, or a version the dataset registers no generation for, leaves
-                    // every chunk sharing it without an address.
-                    if addressed.insert(dataset.id()) {
-                        dataset_base(dataset.id(), dataset.base_url())?;
-                    }
+                    // A base url that won't parse, or a version with no generation, leaves every
+                    // chunk sharing it unaddressable — inapplicable whole (FM-12).
+                    let dataset_id = pool(&mut datasets, dataset.id(), || {
+                        dataset_base(dataset.id(), dataset.base_url())
+                    })?;
                     if chunk.version() != 0
                         && generations.insert((dataset.id(), chunk.version()))
                         && dataset.get_generation(chunk.version()).is_none()
@@ -207,7 +198,11 @@ impl DatasetsIndex {
                         )?;
                     }
                     chunks.insert(
-                        pool.chunk_ref(dataset.id(), &id, chunk.version()),
+                        ChunkRef {
+                            dataset: dataset_id,
+                            chunk: Arc::from(id),
+                            version: chunk.version(),
+                        },
                         chunk_ref,
                     );
                 }
@@ -337,26 +332,17 @@ fn join_file(base_url: &Url, file: &str) -> Result<Url, UnresolvedChunk> {
         .map_err(|e| UnresolvedChunk::NoAddress(format!("file url '{file}' doesn't parse: {e}")))
 }
 
-#[derive(Default)]
-struct StringPool {
-    map: HashMap<String, Arc<String>>,
-}
-
-impl StringPool {
-    fn chunk_ref(&mut self, dataset: &str, chunk: &str, version: u32) -> ChunkRef {
-        ChunkRef {
-            dataset: self.get(dataset),
-            chunk: Arc::from(chunk),
-            version,
+/// One `Arc` per dataset id, shared by its chunks. `admit` runs on the first chunk only.
+fn pool<'a, T>(
+    pooled: &mut HashMap<&'a str, DatasetId>,
+    dataset: &'a str,
+    admit: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<DatasetId> {
+    match pooled.entry(dataset) {
+        Entry::Occupied(known) => Ok(Arc::clone(known.get())),
+        Entry::Vacant(slot) => {
+            admit()?;
+            Ok(Arc::clone(slot.insert(Arc::new(dataset.to_owned()))))
         }
-    }
-
-    fn get(&mut self, s: &str) -> Arc<String> {
-        if let Some(pooled) = self.map.get(s) {
-            return Arc::clone(pooled);
-        }
-        let pooled = Arc::new(s.to_owned());
-        self.map.insert(s.to_owned(), Arc::clone(&pooled));
-        pooled
     }
 }

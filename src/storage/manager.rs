@@ -5,7 +5,6 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use sqd_contract_client::PeerId;
-use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
@@ -13,13 +12,12 @@ use crate::{
     metrics,
     types::{
         dataset,
-        schema::SchemaId,
         state::{ChunkRef, ChunkSet},
     },
 };
 
 use super::{
-    datasets_index::{AssignmentBlob, ChunkSchema, DatasetsIndex, UnresolvedChunk},
+    datasets_index::{ChunkSchema, DatasetsIndex, UnresolvedChunk},
     downloader::{ChunkDownloader, DownloadConfig},
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -36,6 +34,9 @@ const CONCURRENT_REMOVALS: usize = 4;
 
 pub struct StateManager {
     fs: LocalFs,
+    // Locked index → application → state, and `parking_lot` is not reentrant: a holder must
+    // release before calling anything that locks again — `mark_current_assignment_settled_if_ready`
+    // does, which is why `set_prepared_assignment` drops all three explicitly.
     datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
     assignment_application: Mutex<AssignmentApplicationStatus>,
@@ -256,23 +257,13 @@ impl StateManager {
         }
     }
 
-    pub fn prepare_assignment(
-        &self,
-        assignment: AssignmentBlob,
-        id: impl Into<String>,
-        key: &Keypair,
-        schema_available: impl Fn(SchemaId) -> bool,
-    ) -> anyhow::Result<DatasetsIndex> {
-        DatasetsIndex::new(assignment, id, key, schema_available)
-    }
-
     pub fn set_prepared_assignment(&self, datasets_index: DatasetsIndex) {
         let current_assignment_id = datasets_index.assignment_id().to_owned();
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
         let mut index = self.datasets_index.lock();
-        // Lock order: index → application → state. The ID and desired set must change atomically.
+        // All three at once: the ID and the desired set must change atomically.
         let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
@@ -284,9 +275,7 @@ impl StateManager {
         // one idle pass.
         self.notify.notify_one();
         *index = Some(datasets_index);
-        {
-            assignment_application.current_assignment_id = Some(current_assignment_id);
-        }
+        assignment_application.current_assignment_id = Some(current_assignment_id);
         drop(state);
         drop(assignment_application);
         drop(index);
@@ -552,14 +541,17 @@ mod tests {
     use sqd_network_transport::Keypair;
     use tokio_util::sync::CancellationToken;
 
+    use super::{DatasetsIndex, DownloadConfig, StateManager};
     use crate::storage::datasets_index::AssignmentBlob;
-
-    fn no_schemas_needed(_: crate::types::schema::SchemaId) -> bool {
-        unreachable!("a legacy assignment references no write schemas")
-    }
-
-    use super::{DownloadConfig, StateManager};
     use crate::types::dataset::encode_dataset;
+
+    /// A legacy document, admitted: it references no write schemas, so none can be missing.
+    fn prepared(assignment: sqd_assignments::Assignment, id: &str, key: &Keypair) -> DatasetsIndex {
+        DatasetsIndex::new(AssignmentBlob::Legacy(assignment), id, key, |_| {
+            unreachable!("a legacy assignment references no write schemas")
+        })
+        .expect("the document lists this worker")
+    }
 
     fn empty_assignment_for(peer_id: sqd_contract_client::PeerId) -> sqd_assignments::Assignment {
         let mut builder = sqd_assignments::AssignmentBuilder::new("test-secret");
@@ -631,16 +623,7 @@ mod tests {
         );
         drop(held);
 
-        manager.set_prepared_assignment(
-            manager
-                .prepare_assignment(
-                    AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
-                    "A",
-                    &keypair,
-                    no_schemas_needed,
-                )
-                .expect("the document lists this worker"),
-        );
+        manager.set_prepared_assignment(prepared(empty_assignment_for(worker_id), "A", &keypair));
 
         let held = manager
             .clone()
@@ -740,19 +723,11 @@ mod tests {
         });
 
         for id in ["A", "B"] {
-            manager.set_prepared_assignment(
-                manager
-                    .prepare_assignment(
-                        AssignmentBlob::Legacy(unfetchable_assignment_for(
-                            worker_id,
-                            &origin.url("/"),
-                        )),
-                        id,
-                        &keypair,
-                        no_schemas_needed,
-                    )
-                    .expect("the document lists this worker"),
-            );
+            manager.set_prepared_assignment(prepared(
+                unfetchable_assignment_for(worker_id, &origin.url("/")),
+                id,
+                &keypair,
+            ));
             let verdict = tokio::time::timeout(
                 Duration::from_secs(5),
                 manager.wait_until_assignment_settled(id, token.clone()),
@@ -793,16 +768,7 @@ mod tests {
 
         let manager = test_manager(workdir, worker_id).await;
 
-        manager.set_prepared_assignment(
-            manager
-                .prepare_assignment(
-                    AssignmentBlob::Legacy(empty_assignment_for(worker_id)),
-                    "A",
-                    &keypair,
-                    no_schemas_needed,
-                )
-                .expect("the document lists this worker"),
-        );
+        manager.set_prepared_assignment(prepared(empty_assignment_for(worker_id), "A", &keypair));
 
         std::fs::remove_dir_all(&chunk_dir).unwrap();
 

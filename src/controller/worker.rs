@@ -67,7 +67,7 @@ impl Worker {
     }
 
     pub fn query_schemas(&self) -> Arc<SchemaRegistry> {
-        self.query_schemas.clone()
+        Arc::clone(&self.query_schemas)
     }
 
     pub fn register_prepared_assignment(&self, assignment: DatasetsIndex) {
@@ -172,63 +172,45 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sqd_polars::POOL.spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let data_chunk = ParquetChunk::new(chunk_guard.as_str());
-                let parse_timer = std::time::Instant::now();
-                let plan = query.compile();
-                let parse_duration = parse_timer.elapsed();
-                let exec_timer = std::time::Instant::now();
-                let data = Vec::with_capacity(1024 * 1024);
-                let mut writer = sqd_query::JsonLinesWriter::new(data);
-                let blocks = plan.execute(&data_chunk)?;
-                let exec_duration = exec_timer.elapsed();
-                let serialization_timer = std::time::Instant::now();
-                let last_block = if let Some(mut blocks) = blocks {
-                    writer.write_blocks(&mut blocks)?;
-                    blocks.last_block()
-                } else {
-                    // No matching rows in this chunk. We used to fall back to
-                    // the chunk's last_block (parsed from the chunk_id) so the
-                    // portal could see progress. After NET-385 the worker
-                    // treats chunk_id as opaque, so we report the query's
-                    // upper bound
-                    to_block
-                };
-                let bytes = writer.finish()?;
-                let serialization_duration = serialization_timer.elapsed();
+        run_in_pool(move || {
+            let data_chunk = ParquetChunk::new(chunk_guard.as_str());
+            let parse_timer = std::time::Instant::now();
+            let plan = query.compile();
+            let parse_duration = parse_timer.elapsed();
+            let exec_timer = std::time::Instant::now();
+            let data = Vec::with_capacity(1024 * 1024);
+            let mut writer = sqd_query::JsonLinesWriter::new(data);
+            let blocks = plan.execute(&data_chunk)?;
+            let exec_duration = exec_timer.elapsed();
+            let serialization_timer = std::time::Instant::now();
+            let last_block = if let Some(mut blocks) = blocks {
+                writer.write_blocks(&mut blocks)?;
+                blocks.last_block()
+            } else {
+                // No matching rows in this chunk. We used to fall back to
+                // the chunk's last_block (parsed from the chunk_id) so the
+                // portal could see progress. After NET-385 the worker
+                // treats chunk_id as opaque, so we report the query's
+                // upper bound
+                to_block
+            };
+            let bytes = writer.finish()?;
+            let serialization_duration = serialization_timer.elapsed();
 
-                if bytes.len() > RESPONSE_LIMIT {
-                    return Err(QueryError::from(anyhow::anyhow!("Response too large")));
-                }
+            if bytes.len() > RESPONSE_LIMIT {
+                return Err(QueryError::from(anyhow::anyhow!("Response too large")));
+            }
 
-                Ok(QueryOk::new(
-                    bytes,
-                    1,
-                    last_block,
-                    parse_duration,
-                    exec_duration,
-                    serialization_duration,
-                ))
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
-            });
-            tx.send(result).unwrap_or_else(|_| {
-                tracing::warn!("Query runner didn't wait for the result");
-            })
-        });
-        rx.await.unwrap_or_else(|_| {
-            Err(QueryError::from(anyhow::anyhow!(
-                "Query processor didn't produce a result"
-            )))
+            Ok(QueryOk::new(
+                bytes,
+                1,
+                last_block,
+                parse_duration,
+                exec_duration,
+                serialization_duration,
+            ))
         })
+        .await
     }
 
     #[instrument(skip_all)]
@@ -294,72 +276,51 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sqd_polars::POOL.spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let data_source = WorkerChunkStore {
-                    path: chunk_guard.as_str().to_owned(),
-                };
-                let parse_timer = std::time::Instant::now();
-                let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
-                    .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
-                let lf = target
-                    .compile(&context, dataset.as_str(), &chunk_ids, &data_source)
-                    .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
-                let parse_duration = parse_timer.elapsed();
-                let exec_timer = std::time::Instant::now();
-                let mut df = match lf {
-                    Some(lf) => {
-                        tracing::debug!("LF Plan: {:?}", lf.describe_plan());
-                        lf.collect()
-                            .map_err(|err| anyhow::anyhow!("Planning error: {:?}", err))?
-                    }
-                    None => {
-                        return Err(QueryError::from(anyhow::anyhow!("Planning error: No data")))
-                    }
-                };
-                let exec_duration = exec_timer.elapsed();
-                let serialization_timer = std::time::Instant::now();
-                let mut buf = std::io::BufWriter::new(Vec::new());
-                JsonWriter::new(&mut buf)
-                    .with_json_format(JsonFormat::JsonLines)
-                    .finish(&mut df)
-                    .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
-                let bytes = buf
-                    .into_inner()
-                    .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
-                let serialization_duration = serialization_timer.elapsed();
+        run_in_pool(move || {
+            let data_source = WorkerChunkStore {
+                path: chunk_guard.as_str().to_owned(),
+            };
+            let parse_timer = std::time::Instant::now();
+            let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
+                .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
+            let lf = target
+                .compile(&context, dataset.as_str(), &chunk_ids, &data_source)
+                .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
+            let parse_duration = parse_timer.elapsed();
+            let exec_timer = std::time::Instant::now();
+            let Some(lf) = lf else {
+                return Err(QueryError::from(anyhow::anyhow!("Planning error: No data")));
+            };
+            tracing::debug!("LF Plan: {:?}", lf.describe_plan());
+            let mut df = lf
+                .collect()
+                .map_err(|err| anyhow::anyhow!("Planning error: {:?}", err))?;
+            let exec_duration = exec_timer.elapsed();
+            let serialization_timer = std::time::Instant::now();
+            let mut buf = std::io::BufWriter::new(Vec::new());
+            JsonWriter::new(&mut buf)
+                .with_json_format(JsonFormat::JsonLines)
+                .finish(&mut df)
+                .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+            let bytes = buf
+                .into_inner()
+                .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+            let serialization_duration = serialization_timer.elapsed();
 
-                if bytes.len() > RESPONSE_LIMIT {
-                    return Err(QueryError::from(anyhow::anyhow!("Response too large")));
-                }
+            if bytes.len() > RESPONSE_LIMIT {
+                return Err(QueryError::from(anyhow::anyhow!("Response too large")));
+            }
 
-                Ok(QueryOk::new(
-                    bytes,
-                    1,
-                    0,
-                    parse_duration,
-                    exec_duration,
-                    serialization_duration,
-                ))
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
-            });
-            tx.send(result).unwrap_or_else(|_| {
-                tracing::warn!("Query runner didn't wait for the result");
-            })
-        });
-        rx.await.unwrap_or_else(|_| {
-            Err(QueryError::from(anyhow::anyhow!(
-                "Query processor didn't produce a result"
-            )))
+            Ok(QueryOk::new(
+                bytes,
+                1,
+                0,
+                parse_duration,
+                exec_duration,
+                serialization_duration,
+            ))
         })
+        .await
     }
 }
 
