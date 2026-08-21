@@ -7,9 +7,11 @@ use camino::Utf8Path as Path;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
+use super::local_fs::LocalFs;
 use super::Filesystem;
+use crate::types::state::VERSION_PREFIX;
 
 // TODO: use u64
 #[derive(PartialOrd, Ord, PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
@@ -150,6 +152,38 @@ async fn list_chunks(fs: &impl Filesystem, top: &BlockNumber) -> Result<Vec<Data
     Ok(entries)
 }
 
+/// Reads every chunk and its version. Each version is validated independently.
+pub async fn read_all_versions(fs: &LocalFs) -> Result<Vec<(u32, DataChunk)>> {
+    let mut result: Vec<(u32, DataChunk)> = read_all_chunks(fs)
+        .await?
+        .into_iter()
+        .map(|chunk| (0, chunk))
+        .collect();
+    for dir in fs.ls_root().await? {
+        let Some(name) = dir.file_name().filter(|n| n.starts_with(VERSION_PREFIX)) else {
+            continue;
+        };
+        let Some(version) = parse_version_dir(name) else {
+            warn!("Unrecognized version dir in the chunk store: '{dir}'");
+            continue;
+        };
+        let chunks = read_all_chunks(&fs.cd(name))
+            .await
+            .context(format!("Invalid layout in '{dir}'"))?;
+        result.extend(chunks.into_iter().map(|chunk| (version, chunk)));
+    }
+    Ok(result)
+}
+
+/// Accepts only `_vN`; version zero lives at the dataset root.
+fn parse_version_dir(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix(VERSION_PREFIX)?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     let tops = list_top_dirs(fs).await?;
     let mut handles = Vec::new();
@@ -184,8 +218,7 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
                 }
             }
             for (cur, next) in chunks.iter().tuple_windows() {
-                // Two chunks sharing the exact same range are allowed —
-                // suffix-distinguished forks. Anything else overlapping bails.
+                // Suffix-distinguished chunks may share an exact range.
                 let same_range =
                     cur.first_block == next.first_block && cur.last_block == next.last_block;
                 if !same_range && cur.last_block >= next.first_block {
@@ -202,16 +235,17 @@ pub async fn read_all_chunks(fs: &impl Filesystem) -> Result<Vec<DataChunk>> {
     Ok(nested_chunks.into_iter().flatten().collect())
 }
 
-pub fn clean_chunk_ancestors(path: impl AsRef<Path>) -> Result<()> {
-    // take(2) limits it to removing range dir and dataset dir but not the workdir itself
-    for dir in path.as_ref().ancestors().skip(1).take(2) {
+/// Removes empty chunk ancestors without removing the workdir.
+pub fn clean_chunk_ancestors(path: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<()> {
+    let root = root.as_ref();
+    for dir in path.as_ref().ancestors().skip(1) {
+        if dir == root || !dir.starts_with(root) {
+            break;
+        }
         if is_dir_empty(dir) {
             info!("Removing empty dir '{dir}'");
             if let Err(e) = std::fs::remove_dir(dir) {
-                // Racing housekeeping is benign: the dir may already be
-                // gone (NotFound) or a download may have started repopulating
-                // it between the emptiness check and the removal
-                // (DirectoryNotEmpty). Either way the dir needs no action.
+                // Another cleanup or download may race this best-effort removal.
                 match e.kind() {
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty => {}
                     _ => return Err(e).context(format!("Couldn't remove dir '{dir}'")),
@@ -353,6 +387,54 @@ mod tests {
             assert_eq!(chunk.first_block, 0u64.into());
             assert_eq!(chunk.last_block, 1000u64.into());
         }
+    }
+
+    /// Each version subtree is read with its version; a subtree whose name does not spell a version
+    /// one way (`_v0` too — version 0 is the root) holds nothing the worker adopts.
+    #[tokio::test]
+    async fn only_a_version_dir_spelled_one_way_is_read_with_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let id = "0000001000/0000001000-0000001999-abcdef12";
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        std::fs::create_dir_all(root.join("_v3").join(id)).unwrap();
+        for bad in ["_v0", "_v01", "_v0001", "_v+1", "_v", "_vfoo", "_v00000001"] {
+            std::fs::create_dir_all(root.join(bad).join(id)).unwrap();
+        }
+
+        let mut found = super::read_all_versions(&LocalFs::new(root)).await.unwrap();
+        found.sort_by_key(|(version, _)| *version);
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|(version, chunk)| (*version, chunk.id.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, id), (3, id)],
+            "the version comes from the subtree, the id from the chunk dir"
+        );
+    }
+
+    #[test]
+    fn cleaning_ancestors_stops_at_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let chunk = root
+            .join("ds")
+            .join("_v1")
+            .join("0000001000")
+            .join("0000001000-0000001999-abcdef12");
+        std::fs::create_dir_all(&chunk).unwrap();
+        // The state of things right after a removal: the chunk dir is gone, its ancestors aren't.
+        std::fs::remove_dir(&chunk).unwrap();
+
+        super::clean_chunk_ancestors(&chunk, &root).unwrap();
+
+        assert!(
+            !root.join("ds").exists(),
+            "an emptied dataset dir goes, version subtree and all"
+        );
+        assert!(root.exists(), "the workdir is not ours to remove");
     }
 
     #[tokio::test]

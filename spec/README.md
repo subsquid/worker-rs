@@ -57,9 +57,11 @@ retention/space lifecycle (10).
 - **Math notation**: ℕ for naturals, ⊥ for "absent", `\` for set difference, ∪ ∩ ⊆ as
   usual; ⟨…⟩ for tuples; sequences are ordered multisets.
 - **Mutability rule**: exactly two documents carry dates and statuses —
-  13-conformance-tdd.md and 15-parameters.md. `decisions/` only ever gains files; an
-  accepted ADR is never edited except to gain `Superseded by ADR-n`. All other documents
-  change only when *intended behavior* changes.
+  13-conformance-tdd.md and 15-parameters.md. `decisions/` only ever gains files; an ADR
+  becomes append-only when it merges, and from then on is edited only to gain
+  `Superseded by ADR-n` or to drop a citation of a GAP row that closed (closed rows leave
+  the register). A later decision that extends an earlier one says so in its own file. All
+  other documents change only when *intended behavior* changes.
 - **Scope tags** on invariants: `[state]` holds in every observable state ·
   `[transition]` relates consecutive states · `[response]` holds for every result ·
   `[recovery]` holds across crash/restart.
@@ -88,6 +90,9 @@ retention/space lifecycle (10).
 | [ADR-18](decisions/ADR-18-bounded-validated-assignment-intake.md) | Bounded, validated assignment intake | Proposed |
 | [ADR-19](decisions/ADR-19-ratify-provisional-targets.md) | Ratify provisional SLO targets and gate thresholds | Proposed |
 | [ADR-20](decisions/ADR-20-freshness-rejection-attribution.md) | Freshness rejections are worker-fault outcomes | Proposed |
+| [ADR-21](decisions/ADR-21-assignment-and-bundle-apply-as-one-snapshot.md) | Validate a worker assignment against its schema bundle | Accepted |
+| [ADR-22](decisions/ADR-22-on-disk-layout-chunk-versions-and-schema-store.md) | On-disk layout: chunk versions and the schema store | Accepted |
+| [ADR-23](decisions/ADR-23-network-names-the-assignment-type.md) | The network state names the assignment type; the CLI only pins it | Accepted |
 
 ## How to use this suite
 

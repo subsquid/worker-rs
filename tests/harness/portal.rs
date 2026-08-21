@@ -65,6 +65,7 @@ impl Portal {
                 query_engine: QueryEngine::Dynamic as i32,
                 output_format: OutputFormat::Jsonl as i32,
                 request_id: format!("conformance-request-{n}"),
+                chunk_version: 0,
             },
         }
     }
@@ -80,6 +81,12 @@ pub struct Draft<'a> {
 impl Draft<'_> {
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.query.query = body.into();
+        self
+    }
+
+    /// Sets the unsigned chunk-version field (IB-13).
+    pub fn chunk_version(mut self, version: u32) -> Self {
+        self.query.chunk_version = version;
         self
     }
 

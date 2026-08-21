@@ -21,9 +21,20 @@ loop:
 **WP-1 — Assignment intake.** [MUST] The worker polls the network-state document every
 P-ASSIGN-POLL and, on a changed assignment id, fetches the assignment document (DEF-5,
 bounded by P-ASSIGN-FETCH-TIMEOUT) and applies it (WP-10). An unchanged id is a no-op.
-Fetch/poll failures retry with jittered exponential backoff from P-ASSIGN-RETRY-BASE
-capped at P-ASSIGN-RETRY-MAX; retries of one stage MUST NOT starve intake of newer
-assignments indefinitely. [Non-starvation is intent, currently violated: GAP-9.]
+Fetch/poll failures retry with jittered exponential backoff from P-ASSIGN-RETRY-BASE:
+the poll stage caps at P-ASSIGN-RETRY-MAX, the document stage at P-ASSIGN-POLL, since a
+pair is announced once and that backoff is the only thing that returns to it. A poll
+failure is a state the worker cannot read at all — transport, or a body that is not a
+JSON object. A state that reads but is not applicable — no pointer for the worker's mode,
+a pointer that will not decode or names no document to fetch, or under
+for a split assignment no usable bundle reference — is not a failure: nothing is
+announced, the worker re-reads it at P-ASSIGN-POLL, and an unusable pointer alarms (OB-18)
+as an unusable bundle reference does (OB-16, FM-53d); the backoff ladder would only delay
+noticing that the scheduler has fixed it. Retries of
+one stage MUST NOT starve intake of newer assignments: any newer announcement ends the wait
+at once and supersedes the one that failed — a newer assignment, which is tried next, or the
+network back on the pair in force, which retracts the failed one. A document rejected by
+WP-2 is not retried at all — the verdict is a property of the document, not of the attempt.
 ⚠ Application timing relative to the document's declared effective time is OQ-8
 (applied immediately today).
 
@@ -42,8 +53,10 @@ completes ahead of a bulk backfill. Within a dataset, order is unspecified (02
 §explicitly-unspecified).
 
 **WP-4 — Single applier.** [MUST] At most one assignment application executes at a time;
-an application in progress is never interrupted by a newer arrival (ADR-16). Arrivals
-queue; the queue MAY coalesce to the newest.
+an application in progress is never interrupted by a newer arrival (ADR-16), however many
+arrive: a split assignment runs to its verdict — applied or stalled —
+first. Arrivals coalesce to the newest, so a pair the network has moved past is never
+started; a stalled application yields to the newest at once.
 
 ## Transition catalog
 
@@ -52,7 +65,9 @@ queue; the queue MAY coalesce to the newest.
 *Post:* `X′ = new document`, `N′ = its slice for this worker`, `P′ = N′ \ A \ D`.
 `A`, `D`, `L`, `Q` unchanged — application never deletes or interrupts anything by
 itself; deletions happen only via subsequent WP-14. Applying a document yielding
-`N′ = N` is a no-op apart from `X′`.
+`N′ = N` changes `X′` and, if fetches were given up under the previous budget (WP-13),
+returns them to `P′` — an unchanged slice is not a no-op for reconciliation, which the
+application must wake — and is otherwise a no-op.
 
 **WP-11 — fetch-start.**
 *Pre:* `c ∈ P`, `|D| < P-DL-CONC`.
@@ -70,8 +85,11 @@ then evicted by a later WP-14 (commit does not consult N).
 *Pre:* `c ∈ D`; the fetch failed, timed out (per-file bound P-DL-FILE-TIMEOUT, stall
 bound P-DL-STALL-TIMEOUT), or was cancelled (no longer desired).
 *Post:* `D′ = D \ {c}`; all partial data of `c` is transient residue (RS-6), never
-visible. If `c ∈ N′`, then `c ∈ P′` — failed fetches retry indefinitely while desired,
-under backoff from P-DL-BACKOFF-BASE capped at P-DL-BACKOFF-MAX. The backoff scope
+visible. If `c ∈ N′`, then `c ∈ P′` — failed fetches retry while desired, under backoff
+from P-DL-BACKOFF-BASE capped at P-DL-BACKOFF-MAX, until the per-assignment attempt limit
+is reached; the next assignment restores the budget. A fetch that failed because the
+document carries no address for `c` (FM-11) is given up on at once instead, since a
+document does not change between attempts. The backoff scope
 SHOULD be per-origin or per-chunk so one failing chunk does not throttle others.
 [Scope is intent, currently violated — the backoff is global: GAP-7.] Abort-path
 noise from transient-name collisions is a registered hazard (HZ-10).

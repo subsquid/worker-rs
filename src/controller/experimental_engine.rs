@@ -1,5 +1,4 @@
-//! Support for the experimental query engine (`sqd-query-engine`), which executes
-//! queries against dataset schemas periodically fetched from the CDN.
+//! Experimental query engine and schema loading.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -7,17 +6,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use arc_swap::ArcSwap;
-use rand::Rng;
 use reqwest::Url;
 use sqd_network_transport::PeerId;
 use sqd_query_engine::metadata::DatasetDescription;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
+use tower::retry::backoff::{Backoff, MakeBackoff};
 
 use crate::controller::assignments::new_reqwest_client;
+use crate::controller::schema_bundle::SchemaRegistry;
 use crate::controller::worker::OutputFormat;
 use crate::query::result::{QueryError, QueryOk, QueryResult};
+use crate::util::backoff;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -27,39 +27,8 @@ struct Manifest {
     schemas: HashMap<String, String>,
 }
 
-#[derive(Default)]
-pub struct QuerySchemaRegistry {
-    schemas: ArcSwap<HashMap<String, Arc<DatasetDescription>>>,
-    loaded: std::sync::atomic::AtomicBool,
-}
-
-impl QuerySchemaRegistry {
-    pub fn get(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
-        if !self.loaded.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(QueryError::Other(
-                "query schemas for the experimental engine have not been loaded yet".to_owned(),
-            ));
-        }
-        self.schemas
-            .load()
-            .get(dataset_type)
-            .cloned()
-            .ok_or_else(|| {
-                QueryError::BadRequest(format!(
-                    "dataset type '{dataset_type}' is not supported by the experimental engine"
-                ))
-            })
-    }
-
-    fn store(&self, schemas: HashMap<String, Arc<DatasetDescription>>) {
-        self.schemas.store(Arc::new(schemas));
-        self.loaded
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 pub async fn run_schemas_refresh_loop(
-    registry: Arc<QuerySchemaRegistry>,
+    registry: Arc<SchemaRegistry>,
     manifest_url: String,
     refresh_interval: Duration,
     peer_id: PeerId,
@@ -69,13 +38,14 @@ pub async fn run_schemas_refresh_loop(
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let client = new_reqwest_client(FETCH_TIMEOUT, peer_id);
     let mut last_manifest: Option<String> = None;
+    let mut retry = backoff::exponential(Duration::from_secs(1), refresh_interval);
 
     loop {
         tokio::select! {
             _ = timer.tick() => {}
             _ = cancellation_token.cancelled() => break,
         }
-        let mut current_delay = Duration::from_secs(1);
+        let mut backoff = retry.make_backoff();
         loop {
             match refresh_schemas(&registry, &manifest_url, &client, &mut last_manifest).await {
                 Ok(true) => {
@@ -84,16 +54,11 @@ pub async fn run_schemas_refresh_loop(
                 }
                 Ok(false) => break,
                 Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "Failed to refresh query schemas, retrying in {current_delay:?}"
-                    );
-                    let duration = rand::rng().random_range((current_delay / 2)..current_delay);
+                    tracing::warn!(error = %format!("{e:#}"), "Failed to refresh query schemas; retrying");
                     tokio::select! {
-                        _ = tokio::time::sleep(duration) => {}
+                        _ = backoff.next_backoff() => {}
                         _ = cancellation_token.cancelled() => break,
                     }
-                    current_delay = std::cmp::min(current_delay * 2, refresh_interval);
                 }
             }
         }
@@ -107,7 +72,7 @@ pub async fn run_schemas_refresh_loop(
 /// Returns `Ok(false)` if the manifest hasn't changed. On error the previously
 /// loaded schemas are kept.
 async fn refresh_schemas(
-    registry: &QuerySchemaRegistry,
+    registry: &SchemaRegistry,
     manifest_url: &str,
     client: &reqwest::Client,
     last_manifest: &mut Option<String>,
@@ -153,7 +118,7 @@ async fn refresh_schemas(
         schemas.insert(dataset_type, Arc::new(desc));
     }
 
-    registry.store(schemas);
+    registry.replace_legacy(schemas);
     *last_manifest = Some(manifest_body);
     Ok(true)
 }
@@ -244,6 +209,8 @@ pub fn execute_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::schema_bundle::BundleHash;
+    use crate::types::schema::SchemaId;
     use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -530,7 +497,7 @@ tables:
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
 
-        let registry = QuerySchemaRegistry::default();
+        let registry = SchemaRegistry::memory();
         let client = reqwest::Client::new();
         let manifest_url = format!("http://{addr}/sqd-network/mainnet/query-schemas.yml");
         let mut last_manifest = None;
@@ -539,7 +506,7 @@ tables:
             .await
             .unwrap();
         assert!(updated);
-        assert_eq!(registry.get("evm").unwrap().name, "evm");
+        assert_eq!(registry.get_by_type("evm").unwrap().name, "evm");
 
         // unchanged manifest
         let updated = refresh_schemas(&registry, &manifest_url, &client, &mut last_manifest)
@@ -557,18 +524,68 @@ tables:
         )
         .await
         .unwrap_err();
-        assert!(registry.get("evm").is_ok());
+        assert!(registry.get_by_type("evm").is_ok());
     }
 
     #[test]
-    fn registry_get() {
-        let registry = QuerySchemaRegistry::default();
-        assert!(matches!(registry.get("evm"), Err(QueryError::Other(_))));
+    fn a_missing_schema_id_is_a_worker_fault_and_a_missing_type_is_the_client_s() {
+        use sqd_messages::query_error::Err as WireErr;
 
-        registry.store(HashMap::new());
+        let registry = SchemaRegistry::memory();
         assert!(matches!(
-            registry.get("evm"),
-            Err(QueryError::BadRequest(_))
+            registry.get_by_type("evm"),
+            Err(QueryError::Other(_))
         ));
+        assert!(matches!(
+            registry.get_by_id(id(7)),
+            Err(QueryError::Other(_))
+        ));
+
+        registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0xaa));
+        registry.replace_legacy(HashMap::new());
+
+        let wire = WireErr::from;
+
+        assert!(
+            matches!(
+                wire(registry.get_by_type("solana").unwrap_err()),
+                WireErr::BadRequest(_)
+            ),
+            "the query named the type, so the query is what is wrong"
+        );
+        assert!(
+            matches!(
+                wire(registry.get_by_type("evm").unwrap_err()),
+                WireErr::BadRequest(_)
+            ),
+            "a bundle fills no type index: evm is held by id 7, not by type"
+        );
+        assert!(
+            matches!(
+                wire(registry.get_by_id(id(9)).unwrap_err()),
+                WireErr::ServerError(_)
+            ),
+            "no query names a schema id: a miss is the worker's own bookkeeping, and a \
+             client-blamed bad_request would tell routing clients not to retry elsewhere"
+        );
+    }
+
+    fn hash(tag: u8) -> BundleHash {
+        format!("sha256:{}", format!("{tag:02x}").repeat(32))
+            .parse()
+            .unwrap()
+    }
+
+    fn id(n: u32) -> SchemaId {
+        SchemaId::new(n)
+    }
+
+    fn description(name: &str) -> Arc<DatasetDescription> {
+        Arc::new(
+            sqd_query_engine::metadata::parse_dataset_description(
+                &TEST_SCHEMA.replace("name: evm", &format!("name: {name}")),
+            )
+            .unwrap(),
+        )
     }
 }

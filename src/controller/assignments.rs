@@ -1,19 +1,43 @@
-use std::{io::ErrorKind, time::Duration};
+use std::time::Duration;
 
 use async_stream::stream;
 use futures::Stream;
-use rand::Rng;
+use sqd_assignments::{AssignmentType, NetworkState, ResolvedAssignments};
 use sqd_contract_client::PeerId;
 use tokio::time::MissedTickBehavior;
+use tower::retry::backoff::{Backoff, MakeBackoff};
 
+use super::schema_bundle::{BundleHash, SchemaBundle};
+use crate::metrics;
+use crate::storage::datasets_index::AssignmentBlob;
+use crate::util::backoff;
+use crate::util::encoding::Encoding;
+
+/// Identifies an assignment and schema bundle announcement (ADR-21). Identity, not location: an
+/// id names one document for all time (IB-40b).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NetworkPair {
+    pub assignment_id: Option<String>,
+    pub bundle_hash: Option<BundleHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentUpdate {
     pub id: String,
-    pub fb_url_v1: String,
-    pub _effective_from: u64,
-    /// Whether this update was discovered via the dedicated `worker_assignment` pointer rather
-    /// than the legacy shared `assignment` (NET-1186). Always `false` outside `mvcc-chunks`.
-    #[cfg(feature = "mvcc-chunks")]
-    pub is_worker_assignment: bool,
+    /// Which of the state's assignments this came from, and so how its document reads. Resolved
+    /// per poll, so it belongs to the announcement rather than to the process.
+    pub assignment_type: AssignmentType,
+    pub fb_url: String,
+    pub schema_bundle: Option<SchemaBundle>,
+}
+
+impl AssignmentUpdate {
+    pub fn pair(&self) -> NetworkPair {
+        NetworkPair {
+            assignment_id: Some(self.id.clone()),
+            bundle_hash: self.schema_bundle.as_ref().map(|b| b.hash),
+        }
+    }
 }
 
 pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client {
@@ -26,37 +50,39 @@ pub fn new_reqwest_client(timeout: Duration, peer_id: PeerId) -> reqwest::Client
         .unwrap()
 }
 
+/// Yields each assignment-bundle pair once; the consumer owns retry policy.
+///
+/// `assignment_type` overrides the type the state names itself; unset, the state decides.
 pub fn new_assignments_stream(
     url: String,
     frequency: Duration,
     timeout: Duration,
     max_delay: Duration,
     peer_id: PeerId,
+    assignment_type: Option<AssignmentType>,
 ) -> impl Stream<Item = AssignmentUpdate> {
     let mut timer = tokio::time::interval(frequency);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let reqwest_client = new_reqwest_client(timeout, peer_id);
-
-    let mut last_id = None;
+    let mut announced: Option<AssignmentUpdate> = None;
+    let mut retry = backoff::exponential(Duration::from_secs(1), max_delay);
 
     stream! {
         loop {
             timer.tick().await;
 
-            let mut current_delay = Duration::from_secs(1);
+            let mut backoff = retry.make_backoff();
             loop {
-                match update_assignment(&url, &reqwest_client, &mut last_id).await {
+                match poll_network_state(&url, &reqwest_client, assignment_type, &mut announced).await {
                     Ok(Some(data)) => {
                         yield data;
                         break;
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::warn!(error = %e, "Failed to update assignment, retrying in {:?}", current_delay);
-                        let duration = rand::rng().random_range((current_delay / 2)..current_delay);
-                        tokio::time::sleep(duration).await;
-                        current_delay = std::cmp::min(current_delay * 2, max_delay);
+                        tracing::warn!(error = %format!("{e:#}"), "Failed to update assignment; retrying");
+                        backoff.next_backoff().await;
                     }
                 }
             }
@@ -64,243 +90,673 @@ pub fn new_assignments_stream(
     }
 }
 
-async fn update_assignment(
+async fn poll_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
-    last_id: &mut Option<String>,
+    assignment_type: Option<AssignmentType>,
+    announced: &mut Option<AssignmentUpdate>,
 ) -> anyhow::Result<Option<AssignmentUpdate>> {
-    tracing::debug!("Checking for new assignment: {url}");
-    let network_state = fetch_network_state(&url, &reqwest_client).await?;
-    #[cfg_attr(not(feature = "mvcc-chunks"), allow(unused_variables))]
-    let (visible, is_worker_assignment) = visible_assignment(&network_state);
-    let assignment_id = visible.id.clone();
-    if last_id.as_ref() == Some(&assignment_id) {
-        tracing::debug!("Assignment has not been changed");
-        return anyhow::Ok(None);
-    }
+    tracing::debug!("Checking network state: {url}");
+    let published = fetch_network_state(url, reqwest_client).await?;
 
-    let fb_url_v1 = visible
-        .fb_url_v1
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("Missing fb_url_v1"))?;
-    let _effective_from = visible.effective_from;
-    *last_id = Some(assignment_id.clone());
+    // From here on the state was read fine; what follows judges the scheduler's content, and a
+    // state that is not applicable waits at the poll cadence rather than on the fetch-retry
+    // ladder, whose backoff reaches hours between reads (WP-1, FM-53d). None of these exits
+    // touches `announced`, so a corrected state is offered whole.
+    let resolved = match published.resolve(assignment_type) {
+        Ok(resolved) => resolved,
+        Err(unresolved) => {
+            unresolved.record();
+            tracing::warn!(
+                reason = %unresolved,
+                "Network state names no assignment this worker can read; waiting"
+            );
+            return Ok(None);
+        }
+    };
 
-    tracing::debug!("Discovered assignment \"{}\"", assignment_id);
-
-    Ok(Some(AssignmentUpdate {
-        id: assignment_id,
-        fb_url_v1,
-        _effective_from,
-        #[cfg(feature = "mvcc-chunks")]
-        is_worker_assignment,
-    }))
+    Ok(published_update(resolved, announced))
 }
 
-/// Selects the assignment pointer to discover updates from.
+/// The pair as the network published it, or nothing: a pointer that names no document to fetch,
+/// or a bundle reference the worker cannot use, is unusable in the same way as one that will
+/// not decode.
 ///
-/// `mvcc-chunks` builds prefer the dedicated `worker_assignment` pointer but fall back to the
-/// legacy `assignment` so rollouts tolerate a scheduler that hasn't started publishing
-/// `worker_assignment` yet — mirrors sqd-portal's `visible_assignment` (NET-1186). Non-`mvcc-chunks`
-/// builds always use the legacy pointer; there is no other concept of assignment to prefer.
-fn visible_assignment(
-    network_state: &sqd_assignments::NetworkState,
-) -> (&sqd_assignments::NetworkAssignment, bool) {
-    #[cfg(feature = "mvcc-chunks")]
-    {
-        match network_state.worker_assignment.as_ref() {
-            Some(assignment) => (assignment, true),
-            None => {
-                tracing::debug!(
-                    "worker_assignment missing in network state; falling back to legacy assignment"
+/// `announced` is what the stream last handed over: the pair, and where it said to fetch it
+/// from. Locations are not identity, but a corrected one is the only thing that can rescue a
+/// fetch that keeps failing, so a change of *where* is announced like a change of *what* — and
+/// the applier, which is the only side that knows whether a fetch is still outstanding, decides
+/// what it means.
+fn published_update(
+    resolved: ResolvedAssignments,
+    announced: &mut Option<AssignmentUpdate>,
+) -> Option<AssignmentUpdate> {
+    let update = match resolved {
+        ResolvedAssignments::Legacy(assignment) => {
+            let Some(fb_url) = assignment.fb_url_v1 else {
+                metrics::ASSIGNMENTS_REFUSED.inc();
+                tracing::warn!(
+                    assignment_id = %assignment.id,
+                    "Network state's assignment names no fb_url_v1; waiting"
                 );
-                (&network_state.assignment, false)
+                return None;
+            };
+            AssignmentUpdate {
+                id: assignment.id,
+                assignment_type: AssignmentType::Legacy,
+                fb_url,
+                schema_bundle: None,
             }
         }
+        // `worker.version` names the document's format, and is free-form until that format
+        // settles; a document the worker cannot read fails verification as a malformed one
+        // (FM-12) rather than being gated on a string whose spelling may yet change.
+        ResolvedAssignments::Split {
+            worker,
+            schema_bundle,
+            ..
+        } => {
+            let schema_bundle = match SchemaBundle::try_from(schema_bundle) {
+                Ok(bundle) => bundle,
+                Err(e) => {
+                    metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+                    tracing::warn!(
+                        assignment_id = %worker.id,
+                        error = %e,
+                        "Network state's schema bundle reference is unusable; waiting"
+                    );
+                    return None;
+                }
+            };
+            AssignmentUpdate {
+                id: worker.id,
+                assignment_type: AssignmentType::Split,
+                fb_url: worker.fb_url,
+                schema_bundle: Some(schema_bundle),
+            }
+        }
+    };
+    if announced.as_ref() == Some(&update) {
+        return None;
     }
-    #[cfg(not(feature = "mvcc-chunks"))]
-    {
-        (&network_state.assignment, false)
+    tracing::debug!("Discovered assignment \"{}\"", update.id);
+    *announced = Some(update.clone());
+    Some(update)
+}
+
+/// The published state with every blob still JSON, decoded one at a time so that the shape of
+/// one the resolved type does not name cannot make the state unreadable (IB-40) —
+/// [`NetworkState`] refuses the whole state over a `portal_assignment` this worker never reads.
+#[derive(Debug, serde::Deserialize)]
+struct PublishedState {
+    /// Unread; carried so `resolve` sees what was published.
+    #[serde(default)]
+    network: String,
+    assignment_type: Option<serde_json::Value>,
+    assignment: Option<serde_json::Value>,
+    worker_assignment: Option<serde_json::Value>,
+    portal_assignment: Option<serde_json::Value>,
+    schema_bundle: Option<serde_json::Value>,
+}
+
+impl PublishedState {
+    /// The assignments the state names, `assignment_type` overriding the type it names itself.
+    fn resolve(
+        mut self,
+        assignment_type: Option<AssignmentType>,
+    ) -> Result<ResolvedAssignments, Unresolved> {
+        let own = match self.assignment_type.take() {
+            // Absent means the state predates the split, exactly as `NetworkState` reads it.
+            None => AssignmentType::default(),
+            Some(raw) => match serde_json::from_value(raw) {
+                Ok(own) => own,
+                // The type is what picks, so one this worker cannot read leaves it nothing to
+                // pick with — unless a pinned type has already made the state's own moot.
+                Err(_) if assignment_type.is_none() => return Err(Unresolved::AssignmentType),
+                Err(_) => AssignmentType::default(),
+            },
+        };
+        let published = [
+            ("assignment", self.assignment.is_some()),
+            ("worker_assignment", self.worker_assignment.is_some()),
+            ("portal_assignment", self.portal_assignment.is_some()),
+            ("schema_bundle", self.schema_bundle.is_some()),
+        ];
+        NetworkState {
+            network: self.network,
+            assignment_type: own,
+            assignment: decode(self.assignment),
+            worker_assignment: decode(self.worker_assignment),
+            portal_assignment: decode(self.portal_assignment),
+            schema_bundle: decode(self.schema_bundle),
+        }
+        .resolve(assignment_type)
+        // `resolve` names the blob it wanted; the state having published that key means it
+        // would not decode, which is the scheduler's to correct rather than a network migrating.
+        .map_err(|error| {
+            if published.contains(&(error.missing, true)) {
+                Unresolved::Malformed(error)
+            } else {
+                Unresolved::Absent(error)
+            }
+        })
     }
 }
 
+/// One published blob, dropped if it will not decode; `resolve` decides what the loss costs.
+fn decode<T: serde::de::DeserializeOwned>(blob: Option<serde_json::Value>) -> Option<T> {
+    serde_json::from_value(blob?).ok()
+}
+
+/// Why a state that read fine names nothing this worker can apply.
+#[derive(Debug, thiserror::Error)]
+enum Unresolved {
+    /// The state's own type, with nothing pinned to stand in for it.
+    #[error("assignment_type will not decode")]
+    AssignmentType,
+    #[error("{0}")]
+    Absent(sqd_assignments::InvalidNetworkState),
+    #[error("assignment_type is \"{}\" but {} will not decode", .0.assignment_type, .0.missing)]
+    Malformed(sqd_assignments::InvalidNetworkState),
+}
+
+impl Unresolved {
+    /// What the state failed to name, as a bounded label (OB-14).
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::AssignmentType => "assignment_type",
+            Self::Absent(error) | Self::Malformed(error) => error.missing,
+        }
+    }
+
+    /// Every unresolved poll is counted by reason (OB-19): absence is legal mid-migration, so
+    /// what marks a stalled fleet is persistence, not a single edge — and a scheduler that
+    /// declares `split` and never publishes the portal half moves nothing else at all.
+    ///
+    /// On top of that, the bundle the resolved type names is FM-53d either way, and this
+    /// worker's own document, published but undecodable, is a refused assignment (FM-12,
+    /// OB-18).
+    fn record(&self) {
+        metrics::network_state_unresolved(self.reason());
+        match self {
+            Self::Absent(e) | Self::Malformed(e) if e.missing == "schema_bundle" => {
+                metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+            }
+            Self::Malformed(e) if matches!(e.missing, "assignment" | "worker_assignment") => {
+                metrics::ASSIGNMENTS_REFUSED.inc();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Fails only when the state cannot be read at all — transport, or a body that is not a JSON
+/// object; that is the poll failure WP-1's ladder is for.
 async fn fetch_network_state(
     url: &str,
     reqwest_client: &reqwest::Client,
-) -> anyhow::Result<sqd_assignments::NetworkState> {
+) -> anyhow::Result<PublishedState> {
     let response = reqwest_client.get(url).send().await?.error_for_status()?;
-    let network_state = response.json().await?;
-    Ok(network_state)
+    let published = response.json().await?;
+    Ok(published)
 }
 
-pub async fn fetch_assignment(
+/// Reads a fetched document in the announcement's format. A split document is verified and a
+/// failure is a property of the bytes (FM-12); a legacy document is trusted (ADR-3), so reading
+/// it can panic later and callers contain that where they read.
+pub fn decode_document(
+    assignment_type: AssignmentType,
+    document: Vec<u8>,
+) -> anyhow::Result<AssignmentBlob> {
+    match assignment_type {
+        AssignmentType::Legacy => Ok(AssignmentBlob::Legacy(
+            sqd_assignments::Assignment::from_owned_unchecked(document),
+        )),
+        AssignmentType::Split => sqd_assignments::WorkerAssignment::from_owned(document)
+            .map(AssignmentBlob::Worker)
+            .map_err(|e| anyhow::anyhow!("malformed worker assignment: {e}")),
+    }
+}
+
+/// The assignment document's bytes, decompressed. Fails on transport and decoding errors only:
+/// whether the bytes are a document is a verdict on the document, decided in [`decode_document`].
+pub async fn fetch_document(
     url: &str,
     reqwest_client: &reqwest::Client,
-) -> anyhow::Result<sqd_assignments::Assignment> {
-    let buf = download_gzipped(url, reqwest_client).await?;
-    Ok(sqd_assignments::Assignment::from_owned_unchecked(buf))
-}
-
-/// Decodes the dedicated worker-oriented assignment (NET-1186). Parsing only — wiring the result
-/// into `DatasetsIndex`/serving state is out of scope until schema delivery exists (there is
-/// nothing to derive a `WorkerAssignmentChunk`'s files from yet).
-#[cfg(feature = "mvcc-chunks")]
-pub async fn fetch_worker_assignment(
-    url: &str,
-    reqwest_client: &reqwest::Client,
-) -> anyhow::Result<sqd_assignments::WorkerAssignment> {
-    let buf = download_gzipped(url, reqwest_client).await?;
-    Ok(sqd_assignments::WorkerAssignment::from_owned_unchecked(buf))
-}
-
-async fn download_gzipped(url: &str, reqwest_client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
-    use async_compression::tokio::bufread::GzipDecoder;
+) -> anyhow::Result<Vec<u8>> {
+    use async_compression::tokio::bufread::{GzipDecoder, ZstdDecoder};
     use futures::TryStreamExt;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
 
+    let encoding = Encoding::of(url);
     let response = reqwest_client.get(url).send().await?.error_for_status()?;
     let stream = response.bytes_stream();
-    let reader = StreamReader::new(stream.map_err(|e| std::io::Error::new(ErrorKind::Other, e)));
+    let reader = StreamReader::new(stream.map_err(std::io::Error::other));
     let mut buf = Vec::new();
-    let mut decoder = GzipDecoder::new(reader);
-    decoder
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to download assignment: {}", e))?;
+    match encoding {
+        Encoding::Gzip => GzipDecoder::new(reader).read_to_end(&mut buf).await,
+        Encoding::Zstd => ZstdDecoder::new(reader).read_to_end(&mut buf).await,
+    }
+    .map_err(|e| anyhow::anyhow!("Failed to read the assignment document as {encoding}: {e}"))?;
     Ok(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use crate::controller::test_support::{gzip, zstd, TestServer};
 
-    #[allow(deprecated)]
-    fn assignment(id: &str) -> sqd_assignments::NetworkAssignment {
-        sqd_assignments::NetworkAssignment {
-            url: None,
-            fb_url: None,
-            fb_url_v1: Some(format!("https://example.test/{id}.fb.gz")),
-            id: id.to_string(),
-            effective_from: 123,
-        }
+    fn published_state(json: &str) -> PublishedState {
+        serde_json::from_str(json).unwrap()
     }
 
-    fn network_state() -> sqd_assignments::NetworkState {
-        sqd_assignments::NetworkState {
-            network: "testnet".to_string(),
-            assignment: assignment("legacy"),
-            #[cfg(feature = "mvcc-chunks")]
-            worker_assignment: None,
-            #[cfg(feature = "mvcc-chunks")]
-            portal_assignment: None,
-        }
-    }
+    const LEGACY: &str = r#""assignment":{"id":"legacy","fb_url_v1":"https://example.test/legacy.fb.gz","effective_from":123}"#;
+    const WORKER: &str = r#""worker_assignment":{"id":"worker","fb_url":"https://example.test/worker.fb.gz","version":"1"}"#;
+    const PORTAL: &str = r#""portal_assignment":{"id":"portal","fb_url":"https://example.test/portal.fb.gz","version":"1"}"#;
+    const BUNDLE: &str = r#""schema_bundle":{"hash":"sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","url":"https://example.test/bundle.tar.gz"}"#;
 
-    #[test]
-    fn visible_assignment_uses_legacy_assignment() {
-        let state = network_state();
-        let (visible, is_worker_assignment) = visible_assignment(&state);
-
-        assert_eq!(visible.id, "legacy");
-        #[cfg(feature = "mvcc-chunks")]
-        assert!(!is_worker_assignment);
-        #[cfg(not(feature = "mvcc-chunks"))]
-        let _ = is_worker_assignment;
-    }
-
-    #[cfg(feature = "mvcc-chunks")]
-    #[test]
-    fn visible_assignment_prefers_worker_assignment() {
-        let mut state = network_state();
-        state.worker_assignment = Some(assignment("worker"));
-
-        let (visible, is_worker_assignment) = visible_assignment(&state);
-        assert_eq!(visible.id, "worker");
-        assert!(is_worker_assignment);
-    }
-
-    /// Serves each queued response to one connection, then stops accepting.
-    /// Returns the server's base URL.
-    async fn serve_responses(responses: Vec<Vec<u8>>) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            for response in responses {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-            }
-        });
-        url
-    }
-
-    fn http_ok(body: &[u8]) -> Vec<u8> {
-        let mut response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes();
-        response.extend_from_slice(body);
-        response
-    }
-
-    fn network_state_json(id: &str, effective_from: u64) -> Vec<u8> {
+    fn state(assignment_type: &str, blobs: &[&str]) -> String {
         format!(
-            r#"{{"network":"test","assignment":{{"id":"{id}","fb_url_v1":"http://example.com/{id}.fb.gz","effective_from":{effective_from}}}}}"#
+            r#"{{"network":"test","assignment_type":"{assignment_type}",{}}}"#,
+            blobs.join(",")
+        )
+    }
+
+    /// The id `resolve` picked, or the reason it picked nothing.
+    fn resolved(state: &str, assignment_type: Option<AssignmentType>) -> Result<String, String> {
+        match published_state(state).resolve(assignment_type) {
+            Ok(ResolvedAssignments::Legacy(assignment)) => Ok(assignment.id),
+            Ok(ResolvedAssignments::Split { worker, .. }) => Ok(worker.id),
+            Err(unresolved) => Err(unresolved.to_string()),
+        }
+    }
+
+    /// The type picks, a pin beats it, and blobs the picked type does not name may take any
+    /// shape at all (IB-40) — including one `NetworkState` would refuse.
+    #[test]
+    fn the_resolved_type_picks_the_assignment_and_ignores_the_rest() {
+        #[track_caller]
+        fn check(case: &str, state: &str, pin: Option<AssignmentType>, want: Result<&str, &str>) {
+            let picked = resolved(state, pin);
+            assert_eq!(
+                picked.as_deref().map_err(String::as_str),
+                want,
+                "{case}: {state}"
+            );
+        }
+
+        let both = state("legacy", &[LEGACY, WORKER, PORTAL, BUNDLE]);
+        let both_split = state("split", &[LEGACY, WORKER, PORTAL, BUNDLE]);
+        let odd_shapes_beside_legacy = state(
+            "legacy",
+            &[
+                LEGACY,
+                r#""worker_assignment":"not an object""#,
+                r#""portal_assignment":42"#,
+                r#""schema_bundle":{"url":"no hash here"}"#,
+            ],
+        );
+        let odd_shape_beside_split = state(
+            "split",
+            &[r#""assignment":"not an object""#, WORKER, PORTAL, BUNDLE],
+        );
+        let untyped = format!(r#"{{"network":"test",{LEGACY},{WORKER},{PORTAL},{BUNDLE}}}"#);
+        let bad_type = format!(r#"{{"network":"test","assignment_type":"combined",{LEGACY}}}"#);
+
+        check("the state's own type picks", &both, None, Ok("legacy"));
+        check(
+            "a pin beats it",
+            &both,
+            Some(AssignmentType::Split),
+            Ok("worker"),
+        );
+        check("either way round", &both_split, None, Ok("worker"));
+        check(
+            "either way round",
+            &both_split,
+            Some(AssignmentType::Legacy),
+            Ok("legacy"),
+        );
+        check(
+            "a pin still needs its blobs",
+            &state("legacy", &[LEGACY]),
+            Some(AssignmentType::Split),
+            Err(r#"assignment_type is "split" but worker_assignment is not published"#),
+        );
+        check(
+            "in both directions",
+            &state("split", &[WORKER, PORTAL, BUNDLE]),
+            Some(AssignmentType::Legacy),
+            Err(r#"assignment_type is "legacy" but assignment is not published"#),
+        );
+        check(
+            "the blobs legacy does not name are not read",
+            &odd_shapes_beside_legacy,
+            None,
+            Ok("legacy"),
+        );
+        check(
+            "nor the one split does not name",
+            &odd_shape_beside_split,
+            None,
+            Ok("worker"),
+        );
+        check(
+            "an absent type predates the split",
+            &untyped,
+            None,
+            Ok("legacy"),
+        );
+        check(
+            "a type this worker cannot read leaves nothing to pick with",
+            &bad_type,
+            None,
+            Err("assignment_type will not decode"),
+        );
+        check(
+            "unless a pin has made it moot",
+            &bad_type,
+            Some(AssignmentType::Legacy),
+            Ok("legacy"),
+        );
+    }
+
+    fn split_state_json(id: &str, bundle_hash: BundleHash) -> Vec<u8> {
+        split_state_json_at(id, bundle_hash, &format!("http://example.com/{id}.fb.gz"))
+    }
+
+    fn split_state_json_at(id: &str, bundle_hash: BundleHash, document_url: &str) -> Vec<u8> {
+        state(
+            "split",
+            &[
+                &format!(r#""worker_assignment":{{"id":"{id}","fb_url":"{document_url}","version":"1"}}"#),
+                PORTAL,
+                &format!(
+                    r#""schema_bundle":{{"hash":"{bundle_hash}","url":"http://example.com/bundle.tar.gz"}}"#
+                ),
+            ],
         )
         .into_bytes()
+    }
+
+    fn hash(tag: u8) -> BundleHash {
+        format!("sha256:{}", format!("{tag:02x}").repeat(32))
+            .parse()
+            .unwrap()
+    }
+
+    /// The update the stream would have remembered from a poll of [`split_state_json`].
+    fn announced_update(id: &str, bundle_hash: BundleHash) -> AssignmentUpdate {
+        AssignmentUpdate {
+            id: id.to_owned(),
+            assignment_type: AssignmentType::Split,
+            fb_url: format!("http://example.com/{id}.fb.gz"),
+            schema_bundle: Some(SchemaBundle {
+                hash: bundle_hash,
+                url: "http://example.com/bundle.tar.gz".to_owned(),
+            }),
+        }
     }
 
     fn test_client() -> reqwest::Client {
         new_reqwest_client(Duration::from_secs(5), PeerId::random())
     }
 
-    // Known limitation (not yet fixed): the assignment id is recorded as seen the
-    // moment the update is yielded — before anyone knows whether the assignment
-    // can actually be applied. If registration fails downstream (corrupted
-    // download, no entry for this worker, header decryption failure), the stream
-    // never offers the same id again, so the worker idles on its old assignment
-    // until the network publishes a *different* id.
     #[tokio::test]
-    async fn assignment_id_is_consumed_before_the_assignment_is_known_to_apply() {
-        let state = network_state_json("assignment-1", 0);
-        let url = serve_responses(vec![http_ok(&state), http_ok(&state)]).await;
-        let mut last_id = None;
+    async fn a_document_is_read_in_the_encoding_its_url_names() {
+        let document = b"not a real flatbuffer, but the bytes round-trip all the same".to_vec();
+        let server = TestServer::start().await;
+        let gz = server.serve("/a.fb.gz", gzip(&document), 0);
+        let zst = server.serve("/a.fb.zst", zstd(&document), 0);
+        let mislabelled = server.serve("/b.fb.zst", gzip(&document), 0);
+        let client = test_client();
 
-        let first = update_assignment(&url, &test_client(), &mut last_id)
-            .await
-            .unwrap();
-        assert_eq!(first.unwrap().id, "assignment-1");
+        assert_eq!(fetch_document(&gz, &client).await.unwrap(), document);
+        assert_eq!(fetch_document(&zst, &client).await.unwrap(), document);
 
-        // The same id is now silently skipped — there is no way to ask for a retry
-        let second = update_assignment(&url, &test_client(), &mut last_id)
-            .await
-            .unwrap();
-        assert!(second.is_none());
+        let error = fetch_document(&mislabelled, &client).await.unwrap_err();
+        assert!(format!("{error:#}").contains("zstd"), "{error:#}");
     }
 
-    // Known limitation (not yet fixed): the downloaded flatbuffer is never
-    // validated (`from_owned_unchecked`) and carries no integrity check, so a
-    // corrupted-but-gzip-valid body is accepted here and can panic or return
-    // garbage at any later access.
+    /// Either half moving re-announces the pair, and so does a change of location under an
+    /// unchanged pair — only the applier knows whether a fetch is still outstanding for it. An
+    /// unchanged poll announces nothing.
     #[tokio::test]
-    async fn fetch_assignment_accepts_bytes_that_fail_validation() {
-        use async_compression::tokio::write::GzipEncoder;
+    async fn poll_announces_each_change_of_pair_or_location_once() {
+        async fn poll(
+            url: &str,
+            client: &reqwest::Client,
+            announced: &mut Option<AssignmentUpdate>,
+        ) -> Option<AssignmentUpdate> {
+            poll_network_state(url, client, None, announced)
+                .await
+                .unwrap()
+        }
 
-        let garbage = b"definitely not a flatbuffer".to_vec();
-        let mut encoder = GzipEncoder::new(Vec::new());
-        encoder.write_all(&garbage).await.unwrap();
-        encoder.shutdown().await.unwrap();
-        let url = serve_responses(vec![http_ok(&encoder.into_inner())]).await;
+        let a1b1 = split_state_json("assignment-1", hash(0xaa));
+        let a2b1 = split_state_json("assignment-2", hash(0xaa));
+        let a2b2 = split_state_json("assignment-2", hash(0xbb));
+        let a2b2_moved =
+            split_state_json_at("assignment-2", hash(0xbb), "http://example.com/moved.fb.gz");
+        let url = TestServer::serve_sequence(vec![
+            a1b1,
+            a2b1.clone(),
+            a2b1,
+            a2b2,
+            a2b2_moved.clone(),
+            a2b2_moved,
+        ])
+        .await;
+        let client = test_client();
+        let mut announced = None;
 
-        let fetched = fetch_assignment(&url, &test_client()).await;
-        assert!(fetched.is_ok(), "unchecked parsing accepts arbitrary bytes");
-        // The checked constructor rejects the very same bytes
-        assert!(sqd_assignments::Assignment::from_owned(garbage).is_err());
+        let update = poll(&url, &client, &mut announced).await.unwrap();
+        assert_eq!(update.id, "assignment-1");
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
+
+        let update = poll(&url, &client, &mut announced).await.unwrap();
+        assert_eq!(update.id, "assignment-2", "the assignment moved");
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xaa));
+
+        assert!(
+            poll(&url, &client, &mut announced).await.is_none(),
+            "neither half moved"
+        );
+
+        let update = poll(&url, &client, &mut announced).await.unwrap();
+        assert_eq!(
+            update.id, "assignment-2",
+            "a bundle change re-offers its assignment"
+        );
+        assert_eq!(update.schema_bundle.unwrap().hash, hash(0xbb));
+
+        let update = poll(&url, &client, &mut announced).await.unwrap();
+        assert_eq!(
+            update.fb_url, "http://example.com/moved.fb.gz",
+            "the same pair, moved"
+        );
+
+        assert!(
+            poll(&url, &client, &mut announced).await.is_none(),
+            "nothing moved this time"
+        );
+    }
+
+    /// A state that reads but is not applicable waits at the poll cadence rather than erroring
+    /// onto the fetch-retry ladder, counts the fault if it is the scheduler's to resolve, and
+    /// leaves `announced` untouched so a corrected pair is offered whole. Only a body that is not a
+    /// JSON object is a failure to read the state.
+    #[tokio::test]
+    async fn a_state_that_is_not_applicable_waits_without_touching_announced() {
+        #[derive(Clone, Copy)]
+        enum Counted {
+            Nothing,
+            Mismatch,
+            Refused,
+        }
+        let remembered = || Some(announced_update("assignment-1", hash(0xaa)));
+        let worker = r#""worker_assignment":{"id":"assignment-1","fb_url":"http://example.com/a.fb.gz","version":"1"}"#;
+        let bare_hex = format!(
+            r#""schema_bundle":{{"hash":"{}","url":"http://example.com/bundle.tar.gz"}}"#,
+            "aa".repeat(32)
+        );
+        let no_hash = r#""schema_bundle":{"url":"http://example.com/bundle.tar.gz"}"#;
+        let cases: Vec<(&str, String, Option<AssignmentUpdate>, Counted)> = vec![
+            (
+                "split assignment without its bundle",
+                state("split", &[worker, PORTAL]),
+                remembered(),
+                Counted::Mismatch,
+            ),
+            (
+                "bundle reference that is not sha256:<hex>",
+                state("split", &[worker, PORTAL, &bare_hex]),
+                remembered(),
+                Counted::Mismatch,
+            ),
+            (
+                "bundle object that will not decode",
+                state("split", &[worker, PORTAL, no_hash]),
+                remembered(),
+                Counted::Mismatch,
+            ),
+            (
+                "split state whose portal half has yet to be published",
+                state("split", &[worker, BUNDLE]),
+                remembered(),
+                Counted::Nothing,
+            ),
+            (
+                "no assignment for the resolved type, whatever the rest says",
+                state("legacy", &[worker, PORTAL, BUNDLE]),
+                None,
+                Counted::Nothing,
+            ),
+            (
+                "assignment_type that will not decode, with nothing pinned",
+                format!(r#"{{"network":"test","assignment_type":"combined",{LEGACY}}}"#),
+                None,
+                Counted::Nothing,
+            ),
+            (
+                "legacy pointer without a fetch url",
+                state(
+                    "legacy",
+                    &[r#""assignment":{"id":"a1","effective_from":0}"#],
+                ),
+                None,
+                Counted::Refused,
+            ),
+            (
+                "worker pointer that will not decode",
+                state(
+                    "split",
+                    &[r#""worker_assignment":{"id":7}"#, PORTAL, BUNDLE],
+                ),
+                None,
+                Counted::Refused,
+            ),
+        ];
+
+        for (case, published, before, counted) in cases {
+            let url = TestServer::serve_once(published.into_bytes()).await;
+            let mut announced = before.clone();
+            let mismatches = metrics::SCHEMA_BUNDLE_MISMATCHES.get();
+            let refused = metrics::ASSIGNMENTS_REFUSED.get();
+
+            let update = poll_network_state(&url, &test_client(), None, &mut announced)
+                .await
+                .unwrap_or_else(|e| panic!("{case}: not a read failure: {e:#}"));
+
+            assert!(update.is_none(), "{case}");
+            // `>`, not `+ 1`: the counters are process-global.
+            match counted {
+                Counted::Mismatch => {
+                    assert!(
+                        metrics::SCHEMA_BUNDLE_MISMATCHES.get() > mismatches,
+                        "{case}"
+                    )
+                }
+                Counted::Refused => assert!(metrics::ASSIGNMENTS_REFUSED.get() > refused, "{case}"),
+                Counted::Nothing => {}
+            }
+            assert_eq!(announced, before, "{case}: nothing was announced");
+        }
+
+        let url = TestServer::serve_once(b"[]".to_vec()).await;
+        let mut announced = None;
+        let outcome = poll_network_state(&url, &test_client(), None, &mut announced).await;
+        assert!(outcome.is_err(), "not a network state at all");
+        assert_eq!(announced, None);
+    }
+
+    /// The stalls nothing else counts are still visible by reason (OB-19), so a fleet stuck on
+    /// a state that names assignments it does not publish can be alerted on by persistence.
+    #[tokio::test]
+    async fn every_unresolved_state_is_counted_by_its_reason() {
+        let cases = [
+            (
+                "the portal half a split state must publish but the worker never reads",
+                state("split", &[WORKER, BUNDLE]),
+                "portal_assignment",
+            ),
+            (
+                "no assignment for the resolved type",
+                state("legacy", &[WORKER, PORTAL, BUNDLE]),
+                "assignment",
+            ),
+            (
+                "a picker this worker cannot read",
+                format!(r#"{{"network":"test","assignment_type":"combined",{LEGACY}}}"#),
+                "assignment_type",
+            ),
+        ];
+
+        for (case, published, reason) in cases {
+            let url = TestServer::serve_once(published.into_bytes()).await;
+            // `>`, not `+ 1`: the counters are process-global.
+            let before = metrics::unresolved_count(reason);
+            let mut announced = None;
+
+            let update = poll_network_state(&url, &test_client(), None, &mut announced)
+                .await
+                .expect("a state that reads is not a poll failure");
+
+            assert!(update.is_none(), "{case}");
+            assert!(metrics::unresolved_count(reason) > before, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_ignores_the_schema_bundle() {
+        // Not even a bundle object the worker could decode: a legacy state never reads it.
+        let published = state(
+            "legacy",
+            &[
+                r#""assignment":{"id":"a1","fb_url_v1":"http://example.com/a1.fb.gz","effective_from":0}"#,
+                r#""schema_bundle":{"url":"http://example.com/b.tar.gz"}"#,
+            ],
+        )
+        .into_bytes();
+        let url = TestServer::serve_sequence(vec![published.clone(), published]).await;
+        let client = test_client();
+        let mut announced: Option<AssignmentUpdate> = None;
+
+        let update = poll_network_state(&url, &client, None, &mut announced)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.id, "a1");
+        assert_eq!(update.assignment_type, AssignmentType::Legacy);
+        assert!(
+            update.schema_bundle.is_none(),
+            "a legacy state drops the bundle, malformed object and all"
+        );
+
+        let update = poll_network_state(&url, &client, None, &mut announced)
+            .await
+            .unwrap();
+        assert!(update.is_none(), "the assignment alone is the whole pair");
     }
 }

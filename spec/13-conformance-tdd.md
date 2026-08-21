@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD program
 
-Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-07-25**
-(baseline commit `42d9aa1`). Statuses: **C** covered · **P** partial · **U** unchecked;
+Home doc for `CT`, `MG`, `HC`, `GAP`. **Mutable doc #1.** As of: **2026-08-20**
+(baseline commit `0703a3a`). Statuses: **C** covered · **P** partial · **U** unchecked;
 `⊘` marks known-violated, `?` known-suspect.
 
 ## Harness architecture
@@ -121,13 +121,15 @@ prior page, within retention (INV-5) · heartbeat: map length = assignment slice
 ones-count consistent (INV-30) · gauges nonnegative and consistent with set algebra
 (INV-1).
 
-## Traceability matrix (as of 2026-07-25)
+## Traceability matrix (as of 2026-08-20)
 
-Statuses reflect the actual test inventory: 39 inline unit tests (4 `mvcc-chunks`-gated)
-plus the conformance tier over the harness in `tests/harness/`: one binary per subject —
-`e2e` (the smoke path), `query_surface` (admission outcomes and the RP-20 taxonomy) and
-`query_concurrency` (separate by necessity, not topic: the OB signals are process-global,
-so a gauge assertion cannot share a process with other query-running tests).
+Statuses reflect the actual test inventory: inline unit tests, all built unconditionally;
+`state_pbt` / `state_regression` over the chunk state machine and assignment
+confirmation; plus the conformance tier over the harness in `tests/harness/`: one binary
+per subject — `e2e` (the smoke path, both assignment formats), `query_surface`
+(admission outcomes and the RP-20 taxonomy) and `query_concurrency` (separate by
+necessity, not topic: the OB signals are process-global, so a gauge assertion cannot
+share a process with other query-running tests).
 WP/RP/CN/RS rows are enforced through the INV/LIV rows that encode them
 (see 07 §reading the catalog).
 
@@ -139,11 +141,11 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 
 | ID | CT | Status | Note |
 |---|---|---|---|
-| REQ-1 | CT-1/5 | P | engine-level output tests, plus an end-to-end signed query over a downloaded chunk (dynamic engine, JSONL only) |
+| REQ-1 | CT-1/5 | P | engine-level output tests, plus an end-to-end signed query over a downloaded chunk (dynamic engine, JSONL only). Per-chunk schema selection unit-tested at the seam: a chunk outside the assignment in force, and one held with no assignment, are each distinct from a legacy chunk rather than resolving by dataset type |
 | REQ-2 | CT-1/2 | P | smoke drives fetch→commit and compares committed bytes against HC-2's ledger; atomicity under interruption still untested (needs HC-7) |
 | REQ-3 | CT-1/3 | P | set-algebra bookkeeping unit-tested; no eviction-under-load test |
 | REQ-4 | CT-1 | P | last_block semantics unit-tested per engine; resumption equivalence untested |
-| REQ-10 | CT-4 | P | happy-path intake driven end-to-end (IB-40 poll → IB-41 fetch → WP-2 apply); the controller's pending queue is outside the harness, and the fault corpus is unwritten |
+| REQ-10 | CT-4 | P | happy-path intake driven end-to-end in both formats (IB-40 poll → IB-41 fetch → WP-2 apply, and IB-40b → IB-44b bundle → IB-41b fetch → WP-2); the controller's pending queue is outside the harness, and the fault corpus is unwritten |
 | REQ-11 | CT-3 | U⊘ | coherence known-violated (GAP-11) |
 | REQ-12 | CT-5 | P | ordering/pagination/cleanup unit-tested in memory; smoke adds a file-backed write-then-read with the RP-22 lag observed; durability across restart untested (HC-7) |
 | REQ-13 | CT-5 | P⊘ | the running-query gauge is now CT-6-checked (rises under load, bounded by the cap, returns to zero); the GAP-17 liars remain |
@@ -151,7 +153,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
 | REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `query_concurrency`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
-| REQ-24 | CT-4/9 | U⊘ | known-violated (GAP-2, GAP-4) |
+| REQ-24 | CT-4/9 | P⊘ | one malformed input is now survivable and asserted (FM-11's unusable address); the rest of GAP-2 and GAP-4 stand |
 | REQ-25 | CT-4 | U⊘ | no floor exists (GAP-3) |
 
 ### Properties
@@ -167,7 +169,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-11 | CT-2 | U | |
 | INV-12 | CT-1/3 | P | retain-if-locked unit-tested; never raced |
 | INV-13 | CT-1 | P⊘ | smoke compares committed bytes against HC-2's ledger on the happy path; refusing corrupt origin bytes still doesn't exist (GAP-5) |
-| INV-14 | CT-3 | P | one hand-built interleaving test (feature-gated, not in shipped config — OQ-3) |
+| INV-14 | CT-3 | P | one hand-built interleaving test plus `state_pbt`'s randomized runs over the confirmation critical section, all in the default build; the CT-3 race proper — status reads against assignment flips — is still absent |
 | INV-15 | CT-1/5 | P | unit-tested (charge, refund, overload-keep, fractional put); chip-parse hole GAP-13 |
 | INV-20 | CT-5 | U | |
 | INV-21 | CT-1/3 | U | |
@@ -175,7 +177,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-23 | CT-5 | P | downgrade-agreement + log-summary unit tests |
 | INV-24 | CT-4/6 | U | boundary corpus absent |
 | INV-25 | CT-5 | P | HC-5 verifies the response signature on every response it sees, success and error alike |
-| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness) |
+| INV-26 | CT-4 | U⊘ | known-violated (GAP-5 store-fault attribution, GAP-33 freshness). The bundle path attributes correctly and is unit-tested both ways: a pinned schema id the loaded bundle lacks is `server_error`, an unknown dataset type stays `bad_request`, and a chunk with no pinned id resolves by type, which the manifest fills under every assignment type (IB-44) — unasserted for a chunk held outside a split assignment's slice. A query naming a version is driven end to end: the named copy answers, and version 0 — never assigned — is `not_found` |
 | INV-30 | CT-3 | U⊘ | known-violated (GAP-11). HC-5 checks map length and ones-count per read, but tearing needs a racing test |
 | INV-31 | CT-1/6 | P⊘ | running-query gauge covered; the remaining counters are still known-violated (GAP-17) |
 | INV-32 | CT-5/7 | P⊘ | admitted-always-logged unit-tested and now end-to-end (admitted → exactly one record; pre-admission → none); duplicate/oversize drop known (GAP-12/14) |
@@ -186,7 +188,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | INV-41 | CT-2/7 | U | |
 | INV-42 | CT-2 | U | |
 | INV-43 | CT-2 | U | |
-| LIV-1 | CT-1/6 | U | |
+| LIV-1 | CT-1/6 | U | the bound is unmeasured. One way it was violated is now pinned: an assignment the scheduler re-publishes after another one stalled settles again, where deciding from the last-applied id left the applier waiting on a verdict the channel no longer held |
 | LIV-2 | CT-1 | U | downloader has zero tests |
 | LIV-3 | CT-1/4 | U⊘ | unbounded today (GAP-8) |
 | LIV-4 | CT-1/3 | U⊘ | wake-up gap (GAP-6) |
@@ -202,9 +204,9 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | LIV-14 | CT-7 | U⊘ | log-store reclamation broken (GAP-10) |
 | FM-1 | CT-4/9 | U⊘ | known-violated (GAP-2) |
 | FM-2..3 | CT-4 | U | |
-| FM-10 | CT-4 | U | |
-| FM-11 | CT-4 | U⊘ | panic path (GAP-2) |
-| FM-12 | CT-4 | U⊘ | unbounded intake (GAP-4) |
+| FM-10 | CT-4 | P | the retry itself is unmeasured, but a corrected fetch location under an unchanged pair reaching a stalled retry is asserted at both ends — the poll announces the move, the applier replaces the waiting copy — a location moving under an applied pair re-fetches nothing, the network going back to the pair in force retracts a failing or waiting pair, which is neither retried nor applied later (asserted mid-retry in legacy mode, where nothing waits on a settle, and at the queue directly), and only the newest arrival waits while a pair settles, which it does not interrupt (WP-4, unit-tested against a settle that never ends) |
+| FM-11 | CT-4 | P | the per-chunk give-up exists in the reconciler but no corpus input reaches it: every dataset-level address fault is refused at admission (FM-12), and a per-file address that will not build is not something the builder can emit. What is driven end to end is the retriable neighbour — a chunk the origin will not serve exhausts its budget, the assignment stalls, and the next assignment naming the same slice restores the budget and fetches it (WP-13); a unit test pins that registering an unchanged slice wakes the reconciler. The credential half is FM-12's whole-document path, since neither format carries credentials per chunk |
+| FM-12 | CT-4 | P⊘ | a document that cannot be read is refused rather than fatal, asserted at the applier with a corrupted roster, and one that fails verification is refused rather than retried — fetched once, then only a different pair moves things; a dataset base url that will not parse is refused whole, end to end in both formats and at the seam (legacy too), and a version with no generation entry at the seam (the builder cannot emit it; the column is corrupted after the fact); a roster naming a table that is not a file name is refused too, so a document cannot write a chunk's data outside its directory and still commit the chunk, as is a roster table too long for a file name (unit-tested at the seam); a `temp-*.parquet` table file survives the startup sweep (manager unit test); unit-tested at the poll: a pointer that will not decode or names no fetch url is refused and waits at the poll cadence, a pointer the mode does not read may take any shape, and only a body that is not a JSON object is a read failure; oversize intake is still unbounded (GAP-4) |
 | FM-13 | CT-4 | U⊘ | no floor (GAP-3) |
 | FM-14 | CT-7 | U⊘ | no age signal (GAP-23) |
 | FM-20..21 | CT-4 | U | |
@@ -223,26 +225,29 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | FM-50 | CT-2 | U | |
 | FM-51 | CT-2 | U⊘ | sweep-before-check (GAP-16) |
 | FM-52 | CT-4 | U⊘ | fatal at startup (GAP-2) |
-| FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server |
+| FM-53 | CT-4 | P | keep-previous-schemas unit-tested with a live stub server. That a restart starts with an empty type registry — the manifest is never stored — is reasoned from ADR-22, not driven: no test restarts a worker and queries an unpinned chunk before the first load |
+| FM-53b | CT-4 | P | `e2e` drives the block end to end: an unfetchable bundle leaves the assignment unapplied and no chunk fetched. Hash mismatch, damaged cache and retry-until-installed are unit-tested, and so is the line the hash check draws: a bundle with nothing to load is refused once and not fetched again while a hash mismatch is retried (`assignment_loop` tests), with the transient/verdict split of every staging failure pinned in the `schema_bundle` unit tests; the metrics half (OB) is unasserted; `assignment_loop_pbt` adds randomized pair histories — over any sequence of refused and transient halves, neither the active assignment nor the installed bundle moves except on a pair that applied whole |
+| FM-53c | CT-4 | P | unit-tested: an assignment naming a schema the bundle lacks is refused whole, and a schema survives a later bundle that omits it (bundles merge — IB-44b). ADR-21's stricter rule is driven through the harness: a bundle that omits the schema its assignment references leaves the assignment unapplied and nothing fetched, and the test fails if coverage is judged against the accumulated store instead. The OB-16 alarm is unasserted; the same property run covers refusal atomicity. IB-40b's pair announcement is asserted at the stream by one sequence test (`poll_announces_each_change_of_pair_or_location_once`: either half moving yields an update, an unchanged pair is not offered again, a bundle change re-offers the assignment as a pair, a moved location is announced under an unchanged pair), but that a corrected bundle then gets the refused assignment reconsidered is not itself asserted |
+| FM-53d | CT-4 | P | unit-tested at the poll: a `split` state with an assignment and no bundle, and one whose bundle hash does not parse, are each answered as not-applicable rather than an error, the fault is counted, and the announced pair is left alone so the corrected state re-offers it whole. That erroring instead costs hours of backoff is reasoned, not driven — no test measures the poll cadence |
+| FM-53e | CT-4 | P | unit-tested at the poll alongside FM-53d: a `split` state without its portal half, a state whose resolved type names no assignment at all, and an `assignment_type` that will not decode with none pinned each wait with `announced` untouched, and each moves `network_state_unresolved` under its own reason (OB-19). That a pin rescues the last of those is unit-tested at `resolve`. That an operator can alert on persistence is reasoned, not driven — no test holds a state stuck |
 | FM-54 | CT-2 | U | registration wait exists by design; externally invisible (GAP-28) |
 | FM-55 | CT-4 | U⊘ | misclassified and invisible (GAP-33) |
 | SLI-1..8 | CT-6 | U | no benchmark harness on the default branch |
 
-## Gap register (as of 2026-07-25)
+## Gap register (as of 2026-08-20)
 
 Priorities: **P0** active production risk · **P1** correctness hole with plausible
 trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing test.
 
 | GAP | Statement | Violates | Pri | First test |
 |---|---|---|---|---|
-| GAP-2 | Externally supplied content can terminate the process: a malformed file address in an assignment panics the reconciler; a registry error at startup is fatal; an unparseable roster peer id panics the assignment reader; a pathological per-chunk file count overflows the download-watchdog arithmetic | FM-1, FM-11, FM-52, REQ-24 | P0 | HC-1 assignment containing one bad URL: worker must survive, alarm, and keep serving |
+| GAP-2 | Externally supplied content can terminate the process: a registry error at startup is fatal; a pathological per-chunk file count overflows the download-watchdog arithmetic (`s3_timeout * num_files as u32` — a narrowing cast into a multiply that panics). Two clauses are closed: a document with no usable address is refused at admission and a per-file address that will not build fails on its own (FM-12/FM-11, OB-18/OB-17), and a document the reader panics on is refused where the panic happens (FM-12, OB-18) — the reader still panics on a roster peer id that won't decode, which is a `sqd-assignments` fix | FM-1, FM-52, REQ-24 | P0 | HC-1 chunk listing enough files to overflow the watchdog: worker must survive, alarm, and keep serving |
 | GAP-3 | No reconciliation deletion floor: one empty/short assignment wipes the whole store next pass | REQ-25, FM-13, RS-2 | P0 | publish an assignment with zero chunks for the worker: store must survive with an alarm |
-| GAP-4 | Assignment intake is unverified and unbounded: unvalidated binary document parsed unsafely; decompression size uncapped | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
+| GAP-4 | Assignment intake is unverified and unbounded: the legacy document is parsed without verification (`from_owned_unchecked`) and its decompression is uncapped. The bundle half is bounded — its unpacked cap counts everything decompressed, so an entry ignored by name cannot inflate unbounded while the tar reader skips it | WP-2, FM-12, REQ-24, HZ-12 | P1 | HC-1 serves a decompression bomb and a truncated document: bounded memory, typed rejection, process alive |
 | GAP-5 | No payload/content verification anywhere: corrupt origin bytes commit (INV-13), power-loss-truncated chunks are adopted (CN-4), and local corruption surfaces as client-blamed `bad_request` (FM-32) | INV-13, CN-4, FM-22, FM-32 | P1 | HC-2 corrupts one file's bytes: commit must be refused (fails today) |
 | GAP-6 | Eviction is fragile: an I/O error panics the process (FM-31), and a chunk unpinned after the eviction pass is not retried until an unrelated event (LIV-4 unbounded) | LIV-4, FM-31, WP-14 | P1 | unassign a pinned chunk, release the pin, inject no further events: bytes must be reclaimed within P-EVICT-BOUND |
 | GAP-7 | Fetch retry backoff is a single global value: one failing chunk throttles every dataset's downloads to P-DL-BACKOFF-MAX | LIV-11, FM-24, WP-13 | P1 | S6: one dataset 404s; healthy dataset's commit rate must stay within LIV-2 bounds |
 | GAP-8 | No execution deadline and no disconnect cancellation: abandoned queries run to completion holding capacity; a slow-query flood converts to sustained overload | LIV-3, RP-5, FM-44, HZ-3 | P1 | disconnect mid-query; capacity slot must free within P-Q-DEADLINE |
-| GAP-9 | Assignment intake head-of-line blocking (shipped build): a persistently failing document fetch is retried at the queue front on a flat interval; newer assignments queue behind it unboundedly | WP-1, LIV-1 | P1 | HC-1: 404 assignment N's document while publishing N+1; worker must converge to N+1 |
 | GAP-20 | A committed-namespace collision (residue or unrecognized dir at a chunk's path) wedges that chunk in an eternal fail-retry loop that also pins the global backoff at max | WP-21, RS-6, LIV-13 | P1 | pre-plant a foreign dir at an assigned chunk's committed path; expect quarantine+alarm, not an infinite loop |
 | GAP-10 | Log-store space is never returned: the reclamation statement after pruning never executes; on-disk size plateaus at the high-water mark | RS-7, LIV-14 | P2 | file-backed store: burst writes, idle past retention, size must shrink |
 | GAP-11 | Status reports can be torn: the availability map is computed against one assignment and labeled with another's id when application races the (slow) snapshot | INV-30, REQ-11 | P2 | race status reads against assignment flips with injected store-walk latency |
@@ -279,8 +284,8 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 2. **Phase 1 — P0 gaps**: a failing test per gap, then the fix. MG-4 becomes meaningful
    here. The query-concurrency gap is closed (test first, then a one-token fix; the
    register row is gone and RP-4/REQ-22/INV-31/PF-1 no longer carry the exception).
-   GAP-2 and GAP-3 remain: their HC-1 fault knobs (`UnparseableFileUrl`,
-   `NoChunksForWorker`) exist, but no tests drive them yet.
+   GAP-3 remains: its HC-1 fault knob (`NoChunksForWorker`) exists and is driven, but no
+   deletion floor does. GAP-2 is down to its startup and watchdog clauses.
 3. **Phase 2 — correctness core**: HC-4 reference model; CT-1 property runs; CT-2
    kill-point matrix (HC-7); CT-5 accounting reconciliation. Burn P1 gaps.
 4. **Phase 3 — robustness**: CT-3 swarms, CT-4 full corpus, CT-9 fuzz; P2 gaps.
@@ -305,7 +310,7 @@ trigger · **P2** bounded/rare · **P3** polish. "First test" = cheapest failing
 
 | HC | Capability | Needed by | Status | Note |
 |---|---|---|---|---|
-| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP. Fault corpus holds 3 of the CT-4 cases (bad file URL, empty slice, truncated document) — the rest are unwritten |
+| HC-1 | scheduler simulator: network-state + assignment documents, fault corpus (IB-40/41 and IB-40b/41b/44b) | CT-1..4, CT-8/9, MG-4/5 | **P** | `tests/harness/scheduler.rs`; real `sqd-assignments` builder over HTTP, either format per `Config::assignment_type`, published under the matching `assignment_type` so the worker under test resolves it with nothing pinned (IB-40), the split shape serving a schema bundle and a portal pointer alongside and able to republish a chunk at a version whose files live under a generation prefix (IB-41b). Fault corpus holds 3 of the CT-4 cases (bad file URL and empty slice, both driven by `e2e`; truncated document, wired but undriven) plus two bundle faults: unfetchable (FM-53b) and not covering its assignment (FM-53c) — the rest are unwritten |
 | HC-2 | data-origin stub with byte ledger + injectors: delay, stall, error, corrupt, oversize (IB-42) | CT-1..4, CT-8, MG-4/5 | **P** | `tests/harness/origin.rs`; ledger = provenance oracle, wired into the smoke test's INV-13 check. Injectors: delay, stall, status, corrupt, truncate — oversize absent |
 | HC-3 | portal driver: keys, signed queries, disconnector, fuzzer (IB-10) | CT-1, CT-3..5, CT-9, MG-4 | **P** | `tests/harness/portal.rs`; seeded keys, genuinely signed queries, per-field deviation knobs. No disconnector (needs the transport) and no fuzzer |
 | HC-4 | reference model as executable oracle (§model) | CT-1..3 | U | |

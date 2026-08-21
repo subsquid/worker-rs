@@ -1,3 +1,5 @@
+pub mod backoff;
+pub mod encoding;
 pub mod hash;
 pub mod iterator;
 mod once;

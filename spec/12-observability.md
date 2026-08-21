@@ -65,6 +65,49 @@ worker-clock offset from authenticated queries' timestamps, so a skewed worker i
 diagnosable from its own metrics alone (FM-55) and the P-SKEW-ALARM alarm (OB-12) has
 a level-readable witness. Scalar signals only (OB-14).
 
+**OB-18 — Refused assignments.** [MUST] A counter of announced pairs rejected as
+unusable (FM-12) — no entry for this worker, a write schema with no roster, a dataset
+whose base url will not parse or a version with no generation entry, a bundle that
+doesn't cover the document, a document that cannot be read at all, a network-state pointer
+that will not decode or names no document to fetch (counted per poll while it persists,
+like FM-53d). A refusal keeps the
+previous assignment in force, so nothing else moves: the chunk gauges hold, the reported
+id holds, and a worker starved of usable documents looks exactly like one whose network
+has gone quiet. This is the signal that separates them; which refusal it was stays in the
+log. Scalar signal only (OB-14). Bound in IB-31.
+
+**OB-17 — Unaddressable chunks.** [MUST] A counter of chunks the applied assignment
+carries no usable address for — a file address that will not build for that one chunk
+(FM-11); a dataset-level fault refuses the document instead and counts under OB-18. It
+must be distinguishable from an ordinary download
+failure — both leave the chunk missing and both move `chunks_failed_download`, but one is
+an origin that may come back and the other is a document that will still be unusable after
+every retry, so without the distinction a scheduler publishing bad addresses reads exactly
+like a flaky origin. Scalar signal only (OB-14). Bound in IB-31.
+
+**OB-19 — Network-state resolution.** [MUST] A reason-coded counter of polls whose network
+state named no assignment this worker could read: the blob the resolved type wanted, or
+`assignment_type` when the picker itself will not read (FM-53d/53e). Counted per poll while it
+persists, like OB-18 — absence is a legal shape mid-migration, so what marks a fault is that it
+lasts, not that it happened once, and an alert reads persistence rather than an edge. Without it
+nothing moves at all: the previous assignment stays in force, the chunk gauges hold, and a
+scheduler that declares `split` and never publishes the portal half — which the worker requires
+but never reads — stalls the whole fleet looking exactly like a quiet network. Reasons are a
+fixed set, not scheduler-supplied text (OB-14). Bound in IB-31.
+
+**OB-16 — Schema-source health.** [MUST] Whether a schema source is loaded, a counter of
+failures to load one, and a counter of **pairs the scheduler published that do not hold
+together**: an assignment refused because its bundle does not cover it (FM-53c), or a state
+naming an assignment without a usable bundle (FM-53d). The last is the scheduler's invariant breaking
+rather than the worker's, and it must be distinguishable from an ordinary intake failure —
+a worker refusing every assignment because the pair it is served diverges looks identical
+to one that cannot reach the network. For a split assignment a bundle that never
+installs blocks every assignment (FM-53b) while no other signal moves — the chunk gauges
+simply freeze, which reads exactly like a quiet network — so this is the only witness
+that separates the two. A bundle that verifies but cannot be used is both a failed load
+and a refused pair, and counts as each (FM-53b, OB-18). Scalar signals only (OB-14). Bound in IB-31; the legacy
+manifest's fetch failures (FM-53) have no signal yet.
+
 ## Property → observable mapping
 
 Every LIV property must be decidable from exported signals:

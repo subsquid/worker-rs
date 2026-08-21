@@ -22,11 +22,14 @@ use sqd_messages::{query_error, Query, QueryExecuted, QueryLogs};
 use sqd_network_transport::{protocol, Keypair, PeerId};
 use tokio_util::sync::CancellationToken;
 
+use sqd_assignments::AssignmentType;
 use sqd_worker::cli::Args;
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
+use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
-use sqd_worker::controller::experimental_engine::{run_schemas_refresh_loop, QuerySchemaRegistry};
+use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
 use sqd_worker::controller::p2p;
+use sqd_worker::controller::schema_bundle::{SchemaManager, SchemaRegistry};
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::manager::StateManager;
@@ -50,8 +53,9 @@ use stub::HttpStub;
 /// What this harness does **not** exercise, so an absent test is never read as a pass.
 pub const UNCOVERED: &[&str] = &[
     "libp2p transport: IB-1/2 message limits, stream timeouts, the P-EVENT-QUEUE drop path",
-    "P2PController intake: P-Q-QUEUE capacity (RP-1 step 4), reject fan-out (ADR-9), \
-     assignment pending-queue and its head-of-line blocking (GAP-9)",
+    "P2PController intake: P-Q-QUEUE capacity (RP-1 step 4), reject fan-out (ADR-9); the \
+     assignment loop's retry, coalescing and settle-wait decisions are unit-tested, not driven \
+     from here",
     "HC-4 reference model, HC-6 metric scraper, HC-7 kill/restart, HC-9/10 load and benchmarks",
 ];
 
@@ -110,11 +114,11 @@ pub struct Harness {
     pub worker_id: PeerId,
 
     keypair: Keypair,
-    schemas: Arc<QuerySchemaRegistry>,
+    schemas: SchemaManager,
     schema_stub: HttpStub,
     assignment_stream:
         std::pin::Pin<Box<dyn futures::Stream<Item = assignments::AssignmentUpdate>>>,
-    assignment_client: reqwest::Client,
+    applier: AssignmentApplier,
     shutdown: CancellationToken,
     // Dropped last: the data dir must outlive every subsystem that writes into it.
     data_dir: tempfile::TempDir,
@@ -129,6 +133,8 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
+    /// What the scheduler publishes. The worker pins nothing, so it is what resolves too.
+    pub assignment_type: AssignmentType,
 }
 
 impl Default for Config {
@@ -141,6 +147,7 @@ impl Default for Config {
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
+            assignment_type: AssignmentType::Legacy,
         }
     }
 }
@@ -161,7 +168,8 @@ impl Harness {
         let mut portal_rng = seed.stream("portal-identity");
         let portal = Portal::new(&mut portal_rng);
 
-        let scheduler = Scheduler::start(seed.stream("assignment-builder")).await;
+        let scheduler =
+            Scheduler::start(seed.stream("assignment-builder"), config.assignment_type).await;
         let origin = Origin::start().await;
         let registry = Registry::new(&[portal.peer_id()], config.compute_units);
 
@@ -187,10 +195,10 @@ impl Harness {
         .await
         .expect("state manager initialises");
 
-        let schemas = Arc::new(QuerySchemaRegistry::default());
+        let schemas = SchemaManager::open(data_path.join("schemas"));
         let worker = Arc::new(Worker::new(
             state_manager,
-            schemas.clone(),
+            schemas.registry(),
             config.parallel_queries,
         ));
 
@@ -213,8 +221,7 @@ impl Harness {
         spawn_subsystems(
             &worker,
             &allocations,
-            &schemas,
-            schema_stub.url(SCHEMA_MANIFEST_PATH),
+            (schemas.registry(), schema_stub.url(SCHEMA_MANIFEST_PATH)),
             worker_id,
             shutdown.clone(),
         );
@@ -226,9 +233,19 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
+            // Unpinned: what the state names is what the worker reads.
+            None,
         ));
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
+        // Exercise the production bundle-before-assignment ordering (ADR-21).
+        let applier = AssignmentApplier::new(
+            Arc::clone(&worker),
+            schemas.clone(),
+            keypair.clone(),
+            assignment_client.clone(),
+            Duration::from_millis(200),
+        );
 
         let harness = Self {
             seed,
@@ -244,7 +261,7 @@ impl Harness {
             schemas,
             schema_stub,
             assignment_stream,
-            assignment_client,
+            applier,
             shutdown,
             data_dir,
             _reporter: reporter,
@@ -264,6 +281,14 @@ impl Harness {
     pub fn host_chunk_for(&self, chunk: &corpus::Chunk, assigned: bool) -> ChunkPlacement {
         self.origin.host(chunk);
         Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, assigned)
+    }
+
+    /// Hosts a rewritten chunk only under its generation prefix.
+    pub fn host_republished_chunk(&self, chunk: &corpus::Chunk, version: u32) -> ChunkPlacement {
+        self.origin
+            .host_generation(&Scheduler::generation_prefix(version), chunk);
+        Scheduler::placement(DATASET, &self.origin.dataset_base_url(), chunk, true)
+            .at_version(version)
     }
 
     /// Publishes an assignment on HC-1 and drives the worker's real intake path
@@ -289,22 +314,20 @@ impl Harness {
         self.scheduler.publish(id, worker_id, placements, fault)
     }
 
-    /// Waits for the next network-state change, fetches the document and applies it.
-    /// Returns what `register_assignment` reported (WP-2: a failed application changes nothing).
+    /// Waits for the next network-state change and drives the production apply step over it.
+    /// Returns whether the assignment registered (WP-2: a failed application changes nothing).
     pub async fn poll_and_apply(&mut self) -> bool {
         let update = tokio::time::timeout(CONVERGE_TIMEOUT, self.assignment_stream.next())
             .await
             .expect("HC-1 published an assignment within the convergence timeout")
             .expect("assignment stream is still open");
 
-        let document =
-            assignments::fetch_assignment(&update.fb_url_v1, &self.assignment_client).await;
-        let document = match document {
-            Ok(document) => document,
-            Err(e) => panic!("assignment {} could not be fetched: {e:?}", update.id),
-        };
-        self.worker
-            .register_assignment(document, update.id, &self.keypair)
+        match self.applier.apply(&update).await {
+            ApplyOutcome::Applied => true,
+            // The corpus serves faults that make a pair unapplicable; both verdicts leave the
+            // previous assignment in force, which is what the tests assert on.
+            ApplyOutcome::Refused | ApplyOutcome::Failed => false,
+        }
     }
 
     /// Blocks until every assigned chunk is locally available (LIV-1 convergence).
@@ -381,8 +404,19 @@ impl Harness {
 
     /// A JSONL dynamic-engine query selecting every block header in the range.
     pub fn all_blocks_query(&self, chunk_id: &str, range: (u64, u64)) -> Query {
+        self.all_blocks_query_at_version(chunk_id, range, 0)
+    }
+
+    /// The same query, naming which copy of the chunk to read (IB-13).
+    pub fn all_blocks_query_at_version(
+        &self,
+        chunk_id: &str,
+        range: (u64, u64),
+        chunk_version: u32,
+    ) -> Query {
         self.portal
             .query(self.worker_id, DATASET, chunk_id, range)
+            .chunk_version(chunk_version)
             .body(
                 serde_json::json!({
                     "type": "evm",
@@ -466,7 +500,7 @@ impl Harness {
 
     async fn await_schemas_loaded(&self) {
         self.await_condition("query schemas loaded", || async {
-            self.schemas.get("evm").is_ok()
+            self.schemas.registry().get_by_type("evm").is_ok()
         })
         .await;
     }
@@ -495,11 +529,22 @@ impl Harness {
 
     /// The on-disk directory a committed chunk lives in — for comparing against HC-2's ledger.
     pub fn chunk_dir(&self, chunk_id: &str) -> std::path::PathBuf {
+        self.dataset_dir().join(chunk_id)
+    }
+
+    /// Where a chunk republished at `version` lives: its own subtree, so it neither overwrites
+    /// the ingested copy nor is mistaken for it.
+    pub fn chunk_dir_at_version(&self, chunk_id: &str, version: u32) -> std::path::PathBuf {
+        self.dataset_dir()
+            .join(format!("_v{version}"))
+            .join(chunk_id)
+    }
+
+    fn dataset_dir(&self) -> std::path::PathBuf {
         self.data_dir
             .path()
             .join("worker")
             .join(sqd_worker::types::dataset::encode_dataset(DATASET))
-            .join(chunk_id)
     }
 }
 
@@ -512,8 +557,7 @@ impl Drop for Harness {
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    schemas: &Arc<QuerySchemaRegistry>,
-    manifest_url: String,
+    cdn_schemas: (Arc<SchemaRegistry>, String),
     worker_id: PeerId,
     shutdown: CancellationToken,
 ) {
@@ -525,7 +569,7 @@ fn spawn_subsystems(
     let alloc_token = shutdown.clone();
     tokio::spawn(async move { alloc.run(alloc_token).await });
 
-    let registry = schemas.clone();
+    let (registry, manifest_url) = cdn_schemas;
     tokio::spawn(async move {
         run_schemas_refresh_loop(
             registry,

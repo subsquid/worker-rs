@@ -4,9 +4,11 @@
 //! Built with the real `sqd-assignments` builder, so the worker parses the layout production
 //! emits, encrypted headers included. Fault knobs corrupt *inputs*, never the encoder.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
-use sqd_assignments::{AssignmentBuilder, WorkerStatus};
+use sha2::{Digest, Sha256};
+use sqd_assignments::{AssignmentBuilder, AssignmentType, WorkerAssignmentBuilder, WorkerStatus};
 use sqd_network_transport::PeerId;
 
 use super::corpus::Chunk;
@@ -14,7 +16,11 @@ use super::seed::SplitMix64;
 use super::stub::{Fault, HttpStub};
 
 const NETWORK_STATE_PATH: &str = "/network-state.json";
+const SCHEMA_BUNDLE_PATH: &str = "/schema-bundle.tar.gz";
 const STORAGE_SECRET: &str = "conformance-storage-secret";
+
+pub const WRITE_SCHEMA_ID: u32 = 7;
+const WRITE_SCHEMA_TABLES: [&str; 2] = ["blocks", "logs"];
 
 /// How an assignment deviates from well-formed. One knob per registered fault so a test
 /// names the defect it is provoking (spec/13 CT-4).
@@ -22,7 +28,8 @@ const STORAGE_SECRET: &str = "conformance-storage-secret";
 pub enum AssignmentFault {
     #[default]
     None,
-    /// A chunk whose dataset base address doesn't parse — GAP-2's reconciler panic.
+    /// A dataset base address that doesn't parse — a document that contradicts itself, refused
+    /// whole at admission (FM-12; once GAP-2's reconciler panic).
     UnparseableFileUrl,
     /// The worker is in the roster but holds no chunks — GAP-3's deletion floor.
     NoChunksForWorker,
@@ -50,21 +57,52 @@ pub struct ChunkPlacement {
     pub files: Vec<String>,
     /// Whether this worker is assigned the chunk.
     pub assigned: bool,
+    /// Zero for the ingested copy.
+    pub version: u32,
+}
+
+impl ChunkPlacement {
+    pub fn at_version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
+    }
 }
 
 pub struct Scheduler {
     stub: HttpStub,
     rng: SplitMix64,
     published: Option<String>,
+    assignment_type: AssignmentType,
+    bundle_hash: Option<String>,
 }
 
 impl Scheduler {
-    pub async fn start(rng: SplitMix64) -> Self {
+    pub async fn start(rng: SplitMix64, assignment_type: AssignmentType) -> Self {
+        let stub = HttpStub::start().await;
+        let bundle_hash = (assignment_type == AssignmentType::Split).then(|| {
+            let archive = schema_bundle(&[(WRITE_SCHEMA_ID, super::corpus::SCHEMA_YAML)]);
+            let hash = format!("sha256:{:x}", Sha256::digest(&archive));
+            stub.put(SCHEMA_BUNDLE_PATH, archive);
+            hash
+        });
         Self {
-            stub: HttpStub::start().await,
+            stub,
             rng,
             published: None,
+            assignment_type,
+            bundle_hash,
         }
+    }
+
+    pub fn break_schema_bundle(&self, status: u16) {
+        self.stub.inject(SCHEMA_BUNDLE_PATH, Fault::Status(status));
+    }
+
+    /// Publishes a bundle that omits the assignment's schema (FM-53c).
+    pub fn publish_bundle_missing_the_assignment_schema(&mut self) {
+        let archive = schema_bundle(&[(WRITE_SCHEMA_ID + 1, super::corpus::SCHEMA_YAML)]);
+        self.bundle_hash = Some(format!("sha256:{:x}", Sha256::digest(&archive)));
+        self.stub.put(SCHEMA_BUNDLE_PATH, archive);
     }
 
     /// The `--assignment-url` the worker under test should be pointed at.
@@ -92,7 +130,12 @@ impl Scheduler {
             size: chunk.size_bytes(),
             files: chunk.files.iter().map(|(n, _)| n.clone()).collect(),
             assigned,
+            version: 0,
         }
+    }
+
+    pub fn generation_prefix(version: u32) -> String {
+        format!("_gen/{version}")
     }
 
     /// Builds, gzips and serves an assignment, then points the network-state document at
@@ -104,7 +147,10 @@ impl Scheduler {
         placements: &[ChunkPlacement],
         fault: AssignmentFault,
     ) -> Assignment {
-        let doc = self.build_document(worker, placements, fault);
+        let doc = match self.assignment_type {
+            AssignmentType::Legacy => self.build_document(worker, placements, fault),
+            AssignmentType::Split => self.build_worker_document(worker, placements, fault),
+        };
         let path = format!("/assignments/{id}.fb.gz");
 
         let gz = gzip(&doc);
@@ -115,14 +161,33 @@ impl Scheduler {
         };
         self.stub.put(path.clone(), body);
 
-        let state = serde_json::json!({
-            "network": "conformance",
-            "assignment": {
-                "id": id,
-                "fb_url_v1": self.stub.url(&path),
-                "effective_from": 0,
-            }
-        });
+        let state = match self.assignment_type {
+            AssignmentType::Legacy => serde_json::json!({
+                "network": "conformance",
+                "assignment_type": "legacy",
+                "assignment": {
+                    "id": id,
+                    "fb_url_v1": self.stub.url(&path),
+                    "effective_from": 0,
+                },
+            }),
+            // Never fetched, but a split state that omits the portal half resolves to
+            // nothing (IB-40b).
+            AssignmentType::Split => serde_json::json!({
+                "network": "conformance",
+                "assignment_type": "split",
+                "worker_assignment": {"id": id, "fb_url": self.stub.url(&path), "version": "1"},
+                "portal_assignment": {
+                    "id": id,
+                    "fb_url": self.stub.url("/portal-assignment.fb.gz"),
+                    "version": "1",
+                },
+                "schema_bundle": {
+                    "hash": self.bundle_hash.as_deref().expect("a split state publishes a bundle"),
+                    "url": self.stub.url(SCHEMA_BUNDLE_PATH),
+                },
+            }),
+        };
         self.stub
             .put(NETWORK_STATE_PATH, serde_json::to_vec(&state).unwrap());
         self.published = Some(id.to_owned());
@@ -134,7 +199,6 @@ impl Scheduler {
         }
     }
 
-    /// Makes the assignment document unfetchable (GAP-9's head-of-line blocking).
     pub fn break_document(&self, assignment: &Assignment, status: u16) {
         self.stub
             .inject(assignment.path.clone(), Fault::Status(status));
@@ -161,6 +225,10 @@ impl Scheduler {
             } else {
                 &placement.dataset_base_url
             };
+            assert_eq!(
+                placement.version, 0,
+                "the legacy format has no chunk versions"
+            );
             // `iter_chunks` resolves membership here, not from the worker's chunk list.
             let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
             builder
@@ -190,6 +258,80 @@ impl Scheduler {
 
         builder.finish()
     }
+
+    fn build_worker_document(
+        &mut self,
+        worker: PeerId,
+        placements: &[ChunkPlacement],
+        fault: AssignmentFault,
+    ) -> Vec<u8> {
+        let mut builder = WorkerAssignmentBuilder::new_with_rng(STORAGE_SECRET, self.rng.clone())
+            .check_continuity(false);
+        builder
+            .register_write_schema(WRITE_SCHEMA_ID, &WRITE_SCHEMA_TABLES)
+            .expect("roster is sorted");
+
+        // BTreeMap preserves the dataset order expected by the reader.
+        let mut by_dataset: BTreeMap<&str, Vec<&ChunkPlacement>> = BTreeMap::new();
+        for placement in placements {
+            by_dataset
+                .entry(&placement.dataset_id)
+                .or_default()
+                .push(placement);
+        }
+        for (dataset_id, placements) in by_dataset {
+            let base_url = if fault == AssignmentFault::UnparseableFileUrl {
+                "not a url"
+            } else {
+                &placements[0].dataset_base_url
+            };
+            let mut dataset = builder.new_dataset(dataset_id, base_url);
+            for placement in placements {
+                if placement.version != 0 {
+                    dataset
+                        .register_generation(
+                            placement.version,
+                            &Self::generation_prefix(placement.version),
+                        )
+                        .expect("generation is well-formed");
+                }
+                let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
+                dataset
+                    .new_chunk()
+                    .id(&placement.chunk_id)
+                    .block_range(placement.first_block..=placement.last_block)
+                    .size(placement.size)
+                    .version(placement.version)
+                    .write_schema_id(WRITE_SCHEMA_ID)
+                    .worker_indexes(if assigned { &[0] } else { &[] })
+                    .finish()
+                    .expect("chunk is well-formed");
+            }
+            dataset.finish().expect("dataset is well-formed");
+        }
+        builder.add_worker_with_timestamp(worker, WorkerStatus::Ok, 1_700_000_000);
+
+        builder.finish()
+    }
+}
+
+fn schema_bundle(schemas: &[(u32, &str)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (id, yaml) in schemas {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(yaml.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, format!("{id}.yaml"), yaml.as_bytes())
+            .expect("tar entry is well-formed");
+    }
+    tar.into_inner()
+        .expect("tar finish")
+        .finish()
+        .expect("gzip finish")
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {

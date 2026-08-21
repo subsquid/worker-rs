@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use clap::Parser;
+use sqd_assignments::AssignmentType;
 use sqd_network_transport::TransportArgs;
 
 /// Default for `--max-download-attempts`: how many times a chunk download may
@@ -56,6 +57,10 @@ pub struct Args {
     #[clap(long, env, default_value = "")]
     pub assignment_url: String,
 
+    /// Overrides the type the network state names itself (IB-40); unset, the state decides.
+    #[clap(long, env, hide(true), value_parser = parse_assignment_type)]
+    pub assignment_source: Option<AssignmentType>,
+
     /// URL of the query schemas manifest for the experimental query engine
     /// (defaults to a per-network CDN location)
     #[clap(long, env, default_value = "")]
@@ -98,6 +103,14 @@ pub struct Args {
 
 fn parse_seconds(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(s.parse()?))
+}
+
+fn parse_assignment_type(value: &str) -> Result<AssignmentType> {
+    match value {
+        "legacy" => Ok(AssignmentType::Legacy),
+        "split" => Ok(AssignmentType::Split),
+        _ => anyhow::bail!("expected \"legacy\" or \"split\", got \"{value}\""),
+    }
 }
 
 impl Args {
@@ -173,6 +186,45 @@ impl Args {
 
         if self.sentry_dsn.is_none() {
             self.sentry_dsn = Some("https://f97ffef7e96eb533d4c527ce62e4cfbf@o1149243.ingest.us.sentry.io/4507056936779776".to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        let base = [
+            "sqd-worker",
+            "--data-dir",
+            "/tmp",
+            "--key",
+            "/tmp/key",
+            "--rpc-url",
+            "http://127.0.0.1:1/unused",
+            "--l1-rpc-url",
+            "http://127.0.0.1:1/unused",
+        ];
+        Args::try_parse_from(base.into_iter().chain(args.iter().copied()))
+    }
+
+    /// The pin is optional — unset, the state decides — and takes the state's own values.
+    #[test]
+    fn the_assignment_pin_takes_the_wire_vocabulary_or_nothing() {
+        assert_eq!(parse(&[]).unwrap().assignment_source, None);
+        for (value, pinned) in [
+            ("legacy", AssignmentType::Legacy),
+            ("split", AssignmentType::Split),
+        ] {
+            let args = parse(&["--assignment-source", value]).unwrap();
+            assert_eq!(args.assignment_source, Some(pinned), "{value}");
+        }
+        for refused in ["worker", "Legacy", ""] {
+            assert!(
+                parse(&["--assignment-source", refused]).is_err(),
+                "{refused:?}"
+            );
         }
     }
 }

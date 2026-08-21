@@ -15,7 +15,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,8 +26,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use sqd_network_transport::{get_agent_info, AgentInfo, P2PTransportBuilder};
 
 use sqd_worker::cli::Args;
-use sqd_worker::controller::experimental_engine::QuerySchemaRegistry;
 use sqd_worker::controller::p2p::create_p2p_controller;
+use sqd_worker::controller::schema_bundle::SchemaManager;
 use sqd_worker::controller::worker::Worker;
 use sqd_worker::http_server::Server as HttpServer;
 use sqd_worker::metrics;
@@ -113,16 +112,19 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
+    let schemas = SchemaManager::open(args.data_dir.join("schemas"));
+
     let _sentry_guard = if args_clone.sentry_is_enabled {
         setup_sentry(&args_clone, peer_id.to_string())
     } else {
         None
     };
 
-    let query_schemas = Arc::new(QuerySchemaRegistry::default());
-    let worker = Worker::new(state_manager, query_schemas, args.parallel_queries);
+    // Both faces of one registry: the schemas a pair installs are the ones its chunks are
+    // then queried against (ADR-21).
+    let worker = Worker::new(state_manager, schemas.registry(), args.parallel_queries);
 
-    let controller = create_p2p_controller(worker, transport_builder, args_clone).await?;
+    let controller = create_p2p_controller(worker, schemas, transport_builder, args_clone).await?;
     // Leaked to give the subsystem tasks `&'static` access; lives until process exit anyway
     let controller = &*Box::leak(Box::new(controller));
 

@@ -9,7 +9,7 @@ use crate::{
     compute_units::allocations_checker::AllocationsChecker,
     controller::worker::{QueryType, Worker},
     query::result::QueryResult,
-    types::dataset::Dataset,
+    types::state::ChunkRef,
 };
 
 /// The refund half of compute-unit accounting. A unit is spent at admission on the concrete
@@ -30,9 +30,8 @@ pub trait QueryRunner {
     async fn run_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult;
@@ -43,22 +42,12 @@ impl QueryRunner for Worker {
     async fn run_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult {
-        Worker::run_query(
-            self,
-            query_str,
-            dataset,
-            block_range,
-            chunk_id,
-            client_id,
-            query_type,
-        )
-        .await
+        Worker::run_query(self, query_str, chunk, block_range, client_id, query_type).await
     }
 }
 
@@ -72,7 +61,7 @@ pub mod mocks {
 
     use crate::{
         compute_units::RateLimitStatus, controller::worker::QueryType, query::result::QueryResult,
-        types::dataset::Dataset,
+        types::state::ChunkRef,
     };
 
     use super::{CuChecker, QueryRunner};
@@ -136,9 +125,8 @@ pub mod mocks {
         async fn run_query(
             &self,
             _query_str: &str,
-            _dataset: Dataset,
+            _chunk: ChunkRef,
             _block_range: (u64, u64),
-            _chunk_id: &str,
             _client_id: Option<PeerId>,
             _query_type: QueryType,
         ) -> QueryResult {

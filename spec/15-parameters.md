@@ -1,6 +1,6 @@
 # 15 — Parameter registry
 
-**Mutable doc #2.** As of: 2026-07-25, baseline `42d9aa1`. Every `P-*` symbol used
+**Mutable doc #2.** As of: 2026-08-19, baseline `6689f75`. Every `P-*` symbol used
 anywhere in the suite has a row. **Observed** = what the implementation does today
 (configuration default where operator-settable). **Target** = the intended bound; ⚠ =
 proposed, unratified — ratification lands via the ADR named in the row (ADR-19 for the
@@ -12,8 +12,8 @@ batch unless stated).
 |---|---|---|---|
 | P-ASSIGN-POLL | network-state poll period (WP-1) | 60 s | same |
 | P-ASSIGN-FETCH-TIMEOUT | assignment document fetch timeout (WP-1) | 300 s | same |
-| P-ASSIGN-RETRY-BASE | intake retry backoff base (WP-1) | 1 s (poll stage); document stage retries flat at 1 s — GAP-9 | jittered exponential both stages ⚠ |
-| P-ASSIGN-RETRY-MAX | intake retry backoff cap (WP-1) | 14 400 s | same |
+| P-ASSIGN-RETRY-BASE | intake retry backoff base (WP-1) | 1 s, jittered exponential in both stages | same |
+| P-ASSIGN-RETRY-MAX | intake retry backoff cap (WP-1) | 14 400 s (poll stage; the document stage caps at P-ASSIGN-POLL) | same |
 | P-ASSIGN-SIZE-MAX | decompressed assignment size bound (WP-2, HZ-12) | **unbounded** — GAP-4 | 512 MiB ⚠ (ADR-18) |
 
 ## Downloads
@@ -67,7 +67,7 @@ batch unless stated).
 | P-LOGS-RESP-MAX | log response page budget (RP-22) | 10 MiB − 100 KiB (margin unexplained — OQ-2) | derive from P-LOGS-RESP-CEIL ⚠ |
 | P-LOGS-RESP-CEIL | transport ceiling for log/status responses (IB-2) | 10 MiB | same |
 | P-LOGS-QUEUE | log-read queue depth (RP-22) | 4 | same |
-| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44) | 3 600 s | same |
+| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44); polled whatever type is in force, since the type-keyed registry answers for chunks no assignment pins (ADR-23) | 3 600 s | same |
 
 ## Lifecycle and reconciliation bounds
 

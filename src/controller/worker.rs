@@ -3,31 +3,30 @@ use std::sync::{
     Arc,
 };
 
+use crate::storage::datasets_index::{ChunkSchema, DatasetsIndex};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64, Engine};
 use polars::{
     io::SerWriter,
     prelude::{JsonFormat, JsonWriter},
 };
 use prost::Message;
-use sqd_assignments::Assignment;
 use sqd_query::ParquetChunk;
 use sql_query_plan::plan;
 use substrait::proto::Plan;
 use tokio_util::sync::CancellationToken;
 
-use sqd_network_transport::{Keypair, PeerId};
+use sqd_network_transport::PeerId;
 use tracing::instrument;
 
 use crate::{
     controller::{
-        experimental_engine::{self, QuerySchemaRegistry},
-        polars_target,
+        experimental_engine, polars_target, schema_bundle::SchemaRegistry,
         sql_request::WorkerChunkStore,
     },
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
     storage::manager::{self, StateManager},
-    types::dataset::Dataset,
+    types::state::ChunkRef,
 };
 
 // Use the maximum value for the uncompressed result. After compression, the result will be smaller.
@@ -48,7 +47,7 @@ pub enum OutputFormat {
 
 pub struct Worker {
     state_manager: Arc<StateManager>,
-    query_schemas: Arc<QuerySchemaRegistry>,
+    query_schemas: Arc<SchemaRegistry>,
     queries_running: AtomicUsize,
     max_parallel_queries: usize,
 }
@@ -56,7 +55,7 @@ pub struct Worker {
 impl Worker {
     pub fn new(
         state_manager: StateManager,
-        query_schemas: Arc<QuerySchemaRegistry>,
+        query_schemas: Arc<SchemaRegistry>,
         parallel_queries: usize,
     ) -> Self {
         Self {
@@ -67,17 +66,16 @@ impl Worker {
         }
     }
 
-    pub fn query_schemas(&self) -> Arc<QuerySchemaRegistry> {
-        self.query_schemas.clone()
+    pub fn query_schemas(&self) -> Arc<SchemaRegistry> {
+        Arc::clone(&self.query_schemas)
     }
 
-    pub fn register_assignment(
-        &self,
-        assignment: Assignment,
-        id: impl Into<String>,
-        key: &Keypair,
-    ) -> bool {
-        self.state_manager.set_assignment(assignment, id, key)
+    pub fn register_prepared_assignment(&self, assignment: DatasetsIndex) {
+        self.state_manager.set_prepared_assignment(assignment);
+    }
+
+    pub fn registered_assignment_id(&self) -> Option<String> {
+        self.state_manager.registered_assignment_id()
     }
 
     /// Waits until the given assignment settles — fully applied or stalled.
@@ -111,9 +109,8 @@ impl Worker {
     pub async fn run_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
         client_id: Option<PeerId>,
         query_type: QueryType,
     ) -> QueryResult {
@@ -144,21 +141,12 @@ impl Worker {
         // Arrow IPC output is only produced by the dynamic engine; the pairing is
         // enforced at admission, so it can only reach the experimental path here.
         match query_type {
-            QueryType::PlainQuery => {
-                self.execute_query(query_str, dataset, block_range, chunk_id)
+            QueryType::PlainQuery => self.execute_query(query_str, chunk, block_range).await,
+            QueryType::ExperimentalQuery { output_format } => {
+                self.execute_experimental_query(query_str, chunk, block_range, output_format)
                     .await
             }
-            QueryType::ExperimentalQuery { output_format } => {
-                self.execute_experimental_query(
-                    query_str,
-                    dataset,
-                    block_range,
-                    chunk_id,
-                    output_format,
-                )
-                .await
-            }
-            QueryType::SqlQuery => self.execute_sql_query(query_str, dataset, chunk_id).await,
+            QueryType::SqlQuery => self.execute_sql_query(query_str, chunk).await,
         }
     }
 
@@ -170,9 +158,8 @@ impl Worker {
     async fn execute_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
     ) -> QueryResult {
         let mut query = sqd_query::Query::from_json_bytes(query_str.as_bytes())
             .map_err(|e| QueryError::BadRequest(format!("Couldn't parse query: {e:?}")))?;
@@ -181,83 +168,80 @@ impl Worker {
         query.set_first_block(from_block);
         query.set_last_block(Some(to_block));
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk_id) else {
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(chunk) else {
             return Err(QueryError::NotFound);
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sqd_polars::POOL.spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let data_chunk = ParquetChunk::new(chunk_guard.as_str());
-                let parse_timer = std::time::Instant::now();
-                let plan = query.compile();
-                let parse_duration = parse_timer.elapsed();
-                let exec_timer = std::time::Instant::now();
-                let data = Vec::with_capacity(1024 * 1024);
-                let mut writer = sqd_query::JsonLinesWriter::new(data);
-                let blocks = plan.execute(&data_chunk)?;
-                let exec_duration = exec_timer.elapsed();
-                let serialization_timer = std::time::Instant::now();
-                let last_block = if let Some(mut blocks) = blocks {
-                    writer.write_blocks(&mut blocks)?;
-                    blocks.last_block()
-                } else {
-                    // No matching rows in this chunk. We used to fall back to
-                    // the chunk's last_block (parsed from the chunk_id) so the
-                    // portal could see progress. After NET-385 the worker
-                    // treats chunk_id as opaque, so we report the query's
-                    // upper bound
-                    to_block
-                };
-                let bytes = writer.finish()?;
-                let serialization_duration = serialization_timer.elapsed();
+        run_in_pool(move || {
+            let data_chunk = ParquetChunk::new(chunk_guard.as_str());
+            let parse_timer = std::time::Instant::now();
+            let plan = query.compile();
+            let parse_duration = parse_timer.elapsed();
+            let exec_timer = std::time::Instant::now();
+            let data = Vec::with_capacity(1024 * 1024);
+            let mut writer = sqd_query::JsonLinesWriter::new(data);
+            let blocks = plan.execute(&data_chunk)?;
+            let exec_duration = exec_timer.elapsed();
+            let serialization_timer = std::time::Instant::now();
+            let last_block = if let Some(mut blocks) = blocks {
+                writer.write_blocks(&mut blocks)?;
+                blocks.last_block()
+            } else {
+                // No matching rows in this chunk. We used to fall back to
+                // the chunk's last_block (parsed from the chunk_id) so the
+                // portal could see progress. After NET-385 the worker
+                // treats chunk_id as opaque, so we report the query's
+                // upper bound
+                to_block
+            };
+            let bytes = writer.finish()?;
+            let serialization_duration = serialization_timer.elapsed();
 
-                if bytes.len() > RESPONSE_LIMIT {
-                    return Err(QueryError::from(anyhow::anyhow!("Response too large")));
-                }
+            if bytes.len() > RESPONSE_LIMIT {
+                return Err(QueryError::from(anyhow::anyhow!("Response too large")));
+            }
 
-                Ok(QueryOk::new(
-                    bytes,
-                    1,
-                    last_block,
-                    parse_duration,
-                    exec_duration,
-                    serialization_duration,
-                ))
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
-            });
-            tx.send(result).unwrap_or_else(|_| {
-                tracing::warn!("Query runner didn't wait for the result");
-            })
-        });
-        rx.await.unwrap_or_else(|_| {
-            Err(QueryError::from(anyhow::anyhow!(
-                "Query processor didn't produce a result"
-            )))
+            Ok(QueryOk::new(
+                bytes,
+                1,
+                last_block,
+                parse_duration,
+                exec_duration,
+                serialization_duration,
+            ))
         })
+        .await
     }
 
     #[instrument(skip_all)]
     async fn execute_experimental_query(
         &self,
         query_str: &str,
-        dataset: Dataset,
+        chunk: ChunkRef,
         block_range: (u64, u64),
-        chunk_id: &str,
         output_format: OutputFormat,
     ) -> QueryResult {
         let dataset_type = experimental_engine::extract_dataset_type(query_str)?;
-        let schema = self.query_schemas.get(&dataset_type)?;
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(dataset, chunk_id) else {
+        let Some(chunk) = self.state_manager.clone().get_query_chunk(chunk) else {
             return Err(QueryError::NotFound);
+        };
+
+        // Prefer the assignment's pinned write schema.
+        let schema = match chunk.schema {
+            ChunkSchema::Pinned(schema_id) => {
+                let schema = self.query_schemas.get_by_id(schema_id)?;
+                if schema.name != dataset_type {
+                    return Err(QueryError::BadRequest(format!(
+                        "chunk was written with dataset type '{}' (schema {schema_id}), \
+                         but the query asks for '{dataset_type}'",
+                        schema.name
+                    )));
+                }
+                schema
+            }
+            // Legacy assignments resolve through the type registry.
+            ChunkSchema::ByType => self.query_schemas.get_by_type(&dataset_type)?,
         };
 
         let query_str = query_str.to_owned();
@@ -266,7 +250,7 @@ impl Worker {
                 &query_str,
                 &schema,
                 block_range,
-                chunk_guard.as_str(),
+                chunk.path.as_str(),
                 output_format,
             )
         })
@@ -274,12 +258,7 @@ impl Worker {
     }
 
     #[instrument(skip_all)]
-    async fn execute_sql_query(
-        &self,
-        query_str: &str,
-        dataset: Dataset,
-        chunk_id: &str,
-    ) -> QueryResult {
+    async fn execute_sql_query(&self, query_str: &str, chunk: ChunkRef) -> QueryResult {
         let Ok(query_bytes) = base64.decode(query_str) else {
             return Err(QueryError::BadRequest(format!(
                 "Can't decode plan '{query_str}'"
@@ -291,81 +270,57 @@ impl Worker {
             )));
         };
 
-        let Some(chunk_guard) = self
-            .state_manager
-            .clone()
-            .get_chunk(dataset.clone(), chunk_id)
-        else {
+        let dataset = Arc::clone(&chunk.dataset);
+        let chunk_ids = [chunk.chunk.to_string()];
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(chunk) else {
             return Err(QueryError::NotFound);
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let local_chunk_id = chunk_id.to_owned().clone();
-        sqd_polars::POOL.spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let data_source = WorkerChunkStore {
-                    path: chunk_guard.as_str().to_owned(),
-                };
-                let parse_timer = std::time::Instant::now();
-                let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
-                    .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
-                let lf = target
-                    .compile(&context, &dataset, &[local_chunk_id], &data_source)
-                    .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
-                let parse_duration = parse_timer.elapsed();
-                let exec_timer = std::time::Instant::now();
-                let mut df = match lf {
-                    Some(lf) => {
-                        tracing::debug!("LF Plan: {:?}", lf.describe_plan());
-                        lf.collect()
-                            .map_err(|err| anyhow::anyhow!("Planning error: {:?}", err))?
-                    }
-                    None => {
-                        return Err(QueryError::from(anyhow::anyhow!("Planning error: No data")))
-                    }
-                };
-                let exec_duration = exec_timer.elapsed();
-                let serialization_timer = std::time::Instant::now();
-                let mut buf = std::io::BufWriter::new(Vec::new());
-                JsonWriter::new(&mut buf)
-                    .with_json_format(JsonFormat::JsonLines)
-                    .finish(&mut df)
-                    .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
-                let bytes = buf
-                    .into_inner()
-                    .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
-                let serialization_duration = serialization_timer.elapsed();
+        run_in_pool(move || {
+            let data_source = WorkerChunkStore {
+                path: chunk_guard.as_str().to_owned(),
+            };
+            let parse_timer = std::time::Instant::now();
+            let (context, target) = plan::transform_plan::<polars_target::PolarsTarget>(&plan)
+                .map_err(|err| anyhow::anyhow!("Transform error: {:?}", err))?;
+            let lf = target
+                .compile(&context, dataset.as_str(), &chunk_ids, &data_source)
+                .map_err(|err| anyhow::anyhow!("Compile error: {:?}", err))?;
+            let parse_duration = parse_timer.elapsed();
+            let exec_timer = std::time::Instant::now();
+            let Some(lf) = lf else {
+                return Err(QueryError::from(anyhow::anyhow!("Planning error: No data")));
+            };
+            tracing::debug!("LF Plan: {:?}", lf.describe_plan());
+            let mut df = lf
+                .collect()
+                .map_err(|err| anyhow::anyhow!("Planning error: {:?}", err))?;
+            let exec_duration = exec_timer.elapsed();
+            let serialization_timer = std::time::Instant::now();
+            let mut buf = std::io::BufWriter::new(Vec::new());
+            JsonWriter::new(&mut buf)
+                .with_json_format(JsonFormat::JsonLines)
+                .finish(&mut df)
+                .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+            let bytes = buf
+                .into_inner()
+                .map_err(|err| anyhow::anyhow!("Serialization error: {:?}", err))?;
+            let serialization_duration = serialization_timer.elapsed();
 
-                if bytes.len() > RESPONSE_LIMIT {
-                    return Err(QueryError::from(anyhow::anyhow!("Response too large")));
-                }
+            if bytes.len() > RESPONSE_LIMIT {
+                return Err(QueryError::from(anyhow::anyhow!("Response too large")));
+            }
 
-                Ok(QueryOk::new(
-                    bytes,
-                    1,
-                    0,
-                    parse_duration,
-                    exec_duration,
-                    serialization_duration,
-                ))
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                Err(QueryError::from(anyhow::anyhow!("Query panicked: {msg}")))
-            });
-            tx.send(result).unwrap_or_else(|_| {
-                tracing::warn!("Query runner didn't wait for the result");
-            })
-        });
-        rx.await.unwrap_or_else(|_| {
-            Err(QueryError::from(anyhow::anyhow!(
-                "Query processor didn't produce a result"
-            )))
+            Ok(QueryOk::new(
+                bytes,
+                1,
+                0,
+                parse_duration,
+                exec_duration,
+                serialization_duration,
+            ))
         })
+        .await
     }
 }
 

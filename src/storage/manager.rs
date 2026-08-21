@@ -5,20 +5,19 @@ use camino::Utf8PathBuf as PathBuf;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use sqd_contract_client::PeerId;
-use sqd_network_transport::Keypair;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::{
     metrics,
     types::{
-        dataset::{self, Dataset},
+        dataset,
         state::{ChunkRef, ChunkSet},
     },
 };
 
 use super::{
-    datasets_index::DatasetsIndex,
+    datasets_index::{ChunkSchema, DatasetsIndex, UnresolvedChunk},
     downloader::{ChunkDownloader, DownloadConfig},
     layout::{self, DataChunk},
     local_fs::{add_temp_prefix, LocalFs},
@@ -35,6 +34,9 @@ const CONCURRENT_REMOVALS: usize = 4;
 
 pub struct StateManager {
     fs: LocalFs,
+    // Locked index → application → state, and `parking_lot` is not reentrant: a holder must
+    // release before calling anything that locks again — `mark_current_assignment_settled_if_ready`
+    // does, which is why `set_prepared_assignment` drops all three explicitly.
     datasets_index: Mutex<Option<DatasetsIndex>>,
     state: Mutex<State>,
     assignment_application: Mutex<AssignmentApplicationStatus>,
@@ -43,6 +45,11 @@ pub struct StateManager {
     concurrent_downloads: usize,
     worker_id: PeerId,
     download_config: DownloadConfig,
+}
+
+pub struct QueryChunk<F: FnOnce(PathBuf)> {
+    pub path: scopeguard::ScopeGuard<PathBuf, F>,
+    pub schema: ChunkSchema,
 }
 
 #[derive(Debug)]
@@ -115,8 +122,8 @@ impl StateManager {
     /// # Panics
     ///
     /// Panics — taking the whole worker down under the fail-fast subsystem
-    /// tree — if a chunk removal fails on disk or an assigned chunk's file
-    /// URLs cannot be resolved from the current assignment.
+    /// tree — if a chunk removal fails on disk, or if a chunk taken from the
+    /// download queue is absent from the assignment that queued it.
     pub async fn run(&self, cancellation_token: CancellationToken) {
         let mut downloader = ChunkDownloader::new(self.worker_id, self.download_config);
         loop {
@@ -148,10 +155,7 @@ impl StateManager {
             }
 
             let removals = self.state.lock().take_removals();
-            // Concurrent, but a barrier for this batch: the downloads below
-            // start only after every already-deletable chunk is gone. Draining
-            // chunks are not in the batch — they stay on disk until their last
-            // query ends and a later pass collects them.
+            // Finish deletions before starting downloads to preserve the storage bound.
             futures::stream::iter(&removals)
                 .for_each_concurrent(CONCURRENT_REMOVALS, |chunk| async move {
                     info!("Removing chunk {chunk}");
@@ -168,27 +172,40 @@ impl StateManager {
                 continue;
             };
             while downloader.download_count() < self.concurrent_downloads {
-                if let Some(chunk_ref) = self.state.lock().take_next_download() {
-                    info!("Downloading chunk {chunk_ref}");
-                    let dst = self.chunk_path(&chunk_ref);
-                    let files = dataset_index
-                        .list_files(&chunk_ref)
-                        .unwrap_or_else(|| panic!("Dataset {} not found", chunk_ref.dataset));
-                    let headers = dataset_index.get_headers().clone();
-                    downloader.start_download(chunk_ref, dst, files, headers);
-                } else {
+                // Bind before matching so the non-reentrant state lock is released.
+                let next = self.state.lock().take_next_download();
+                let Some(chunk_ref) = next else {
                     break;
-                }
+                };
+                info!("Downloading chunk {chunk_ref}");
+                let dst = self.chunk_path(&chunk_ref);
+                let files = match dataset_index.list_files(&chunk_ref) {
+                    Ok(files) => files,
+                    // The queue and lookup use the same locked index, so a miss is an invariant bug.
+                    Err(UnresolvedChunk::NotAssigned) => panic!(
+                        "chunk {chunk_ref} was queued from an assignment that doesn't carry it"
+                    ),
+                    // Admission refuses a document whose dataset-level addresses are unusable
+                    // (FM-12), so only a per-file address that won't build reaches here, one
+                    // chunk at a time. The document cannot change between attempts: fail the
+                    // chunk at once rather than over its budget (FM-11).
+                    Err(e) => {
+                        warn!(chunk = %chunk_ref, error = %e, "Can't address chunk");
+                        metrics::CHUNKS_UNADDRESSABLE.inc();
+                        metrics::CHUNKS_FAILED_DOWNLOAD.inc();
+                        self.state.lock().give_up_download(&chunk_ref);
+                        continue;
+                    }
+                };
+                let headers = dataset_index.headers().clone();
+                downloader.start_download(chunk_ref, dst, files, headers);
             }
             self.mark_current_assignment_settled_if_ready();
         }
         info!("State manager loop finished");
     }
 
-    /// Subscribe to the "assignment settled" signal: an event fires when the
-    /// current assignment becomes fully applied (all chunks present) or stalls
-    /// (some chunks exhausted their download attempts). Used to refresh the
-    /// reported status promptly instead of waiting for the periodic timer.
+    /// Subscribes to applied and stalled assignment outcomes.
     pub fn subscribe_assignment_settled(
         &self,
     ) -> tokio::sync::watch::Receiver<Option<AssignmentSettled>> {
@@ -240,45 +257,25 @@ impl StateManager {
         }
     }
 
-    pub fn set_assignment(
-        &self,
-        assignment: sqd_assignments::Assignment,
-        id: impl Into<String>,
-        key: &Keypair,
-    ) -> bool {
-        let id = id.into();
-        let current_assignment_id = id.clone();
-        let datasets_index = match DatasetsIndex::new(assignment, id, key) {
-            Ok(result) => result,
-            Err(e) => {
-                metrics::set_status(metrics::WorkerStatus::NotRegistered);
-                error!("Can not get assigned chunks: {e}");
-                return false;
-            }
-        };
+    pub fn set_prepared_assignment(&self, datasets_index: DatasetsIndex) {
+        let current_assignment_id = datasets_index.assignment_id().to_owned();
         let status = datasets_index.status();
         let chunks: ChunkSet = datasets_index.chunks().keys().cloned().collect();
 
         let mut index = self.datasets_index.lock();
-        // The settled-check correlates current_assignment_id with the chunk
-        // state, so both must change under the application lock (lock order:
-        // index → application → state); otherwise the check could pair the new
-        // desired set with the old id and confirm a never-applied assignment
-        // (see `super::regression`).
+        // All three at once: the ID and the desired set must change atomically.
         let mut assignment_application = self.assignment_application.lock();
         let mut state = self.state.lock();
 
-        match state.set_desired_chunks(chunks) {
-            UpdateStatus::Unchanged => {}
-            UpdateStatus::Updated => {
-                info!("Got new assignment");
-                self.notify.notify_one();
-            }
+        if let UpdateStatus::Updated = state.set_desired_chunks(chunks) {
+            info!("Got new assignment");
         }
+        // Registration always wakes the reconciler: an unchanged slice still restores the budget
+        // of chunks given up on (WP-13), and only the reconciler starts them. A spurious wake is
+        // one idle pass.
+        self.notify.notify_one();
         *index = Some(datasets_index);
-        {
-            assignment_application.current_assignment_id = Some(current_assignment_id);
-        }
+        assignment_application.current_assignment_id = Some(current_assignment_id);
         drop(state);
         drop(assignment_application);
         drop(index);
@@ -303,7 +300,6 @@ impl StateManager {
                 metrics::set_status(metrics::WorkerStatus::UnsupportedVersion);
             }
         }
-        true
     }
 
     /// Waits until the given assignment settles — fully applied or stalled.
@@ -336,28 +332,43 @@ impl StateManager {
         }
     }
 
-    /// Returns the on-disk path to a locally available chunk, or `None` if
-    /// the chunk isn't present. The chunk is reference-counted for the
-    /// lifetime of the returned guard — it won't be evicted by the state
-    /// manager until every guard for it is dropped.
+    /// Pins an available chunk against eviction for the lifetime of the returned guard.
     pub fn get_chunk(
         self: Arc<Self>,
-        dataset: Dataset,
-        chunk_id: &str,
+        chunk: ChunkRef,
     ) -> Option<scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>> {
-        let chunk = self
-            .state
-            .lock()
-            .get_and_lock_chunk(Arc::new(dataset), Arc::from(chunk_id.to_string()))?;
+        Some(self.get_query_chunk(chunk)?.path)
+    }
+
+    /// Lock order: index, then state. Version zero is the ingested copy (IB-13).
+    pub fn get_query_chunk(
+        self: Arc<Self>,
+        chunk: ChunkRef,
+    ) -> Option<QueryChunk<impl FnOnce(PathBuf)>> {
+        let index = self.datasets_index.lock();
+        let chunk = self.state.lock().get_and_lock_chunk(chunk)?;
+        let schema = index
+            .as_ref()
+            .map_or(ChunkSchema::ByType, |index| index.chunk_schema(&chunk));
+        drop(index);
+
         let path = self.chunk_path(&chunk);
         let guard = scopeguard::guard(path, move |_| {
             if self.state.lock().unlock_chunk(&chunk) {
-                // The last query holding a removable chunk finished — wake the
-                // state loop to delete it promptly.
                 self.notify.notify_one();
             }
         });
-        Some(guard)
+        Some(QueryChunk {
+            path: guard,
+            schema,
+        })
+    }
+
+    pub fn registered_assignment_id(&self) -> Option<String> {
+        self.datasets_index
+            .lock()
+            .as_ref()
+            .map(|index| index.assignment_id().to_owned())
     }
 
     #[instrument(err, skip(self))]
@@ -369,10 +380,7 @@ impl StateManager {
         Ok(())
     }
 
-    /// Prunes now-empty ancestor dirs after a removal pass. Deduplicated per
-    /// parent dir — a mass removal touches each directory once, not once per
-    /// chunk — and run off the async thread. Best-effort housekeeping: an
-    /// empty leftover dir is harmless, so failures only warn.
+    /// Prunes empty ancestors once per parent on the blocking pool.
     async fn sweep_removal_ancestors(&self, removals: &[ChunkRef]) {
         let mut seen_parents = std::collections::BTreeSet::new();
         let representatives: Vec<PathBuf> = removals
@@ -386,9 +394,10 @@ impl StateManager {
         if representatives.is_empty() {
             return;
         }
+        let root = self.fs.root.clone();
         tokio::task::spawn_blocking(move || {
             for path in representatives {
-                layout::clean_chunk_ancestors(&path)
+                layout::clean_chunk_ancestors(&path, &root)
                     .unwrap_or_else(|e| warn!("Couldn't clean chunk ancestors: {e:?}"));
             }
         })
@@ -400,7 +409,7 @@ impl StateManager {
         self.fs
             .root
             .join(dataset::encode_dataset(&chunk_ref.dataset))
-            .join(chunk_ref.chunk.as_ref())
+            .join(chunk_ref.store_path().as_ref())
     }
 
     fn mark_current_assignment_settled_if_ready(&self) {
@@ -412,8 +421,6 @@ impl StateManager {
     }
 }
 
-// Free function so tests can drive the check-and-mark critical section without
-// constructing a full `StateManager`.
 #[doc(hidden)]
 pub fn mark_assignment_settled_if_ready(
     state: &Mutex<State>,
@@ -424,17 +431,21 @@ pub fn mark_assignment_settled_if_ready(
     let Some(current_assignment_id) = assignment_application.current_assignment_id.clone() else {
         return;
     };
-    if assignment_application.last_applied_assignment_id.as_deref()
-        == Some(current_assignment_id.as_str())
-    {
+    // Check the published verdict, not historical last-applied state. Drop the watch guard before
+    // send_replace to avoid deadlock.
+    let verdict_is_published = assignment_settled_tx
+        .borrow()
+        .as_ref()
+        .is_some_and(|settled| settled.id == current_assignment_id);
+    // A verdict remains terminal until a new desired set is installed.
+    if verdict_is_published {
         return;
     }
     let (applied, stalled) = {
         let state = state.lock();
         (state.is_fully_applied(), state.is_stalled())
     };
-    // send_replace, not send: send stores nothing without subscribers, and the
-    // guards above never re-send a verdict — it would be lost forever.
+    // `send` loses the value when there are no subscribers; `send_replace` retains it.
     if applied {
         assignment_application.last_applied_assignment_id = Some(current_assignment_id.clone());
         assignment_settled_tx.send_replace(Some(AssignmentSettled {
@@ -442,14 +453,10 @@ pub fn mark_assignment_settled_if_ready(
             outcome: AssignmentOutcome::Applied,
         }));
     } else if stalled {
-        let settled = AssignmentSettled {
+        assignment_settled_tx.send_replace(Some(AssignmentSettled {
             id: current_assignment_id,
             outcome: AssignmentOutcome::Stalled,
-        };
-        // watch notifies on every send; don't wake subscribers with duplicates
-        if assignment_settled_tx.borrow().as_ref() != Some(&settled) {
-            assignment_settled_tx.send_replace(Some(settled));
-        }
+        }));
     }
 }
 
@@ -457,11 +464,13 @@ pub fn mark_assignment_settled_if_ready(
 fn remove_temps(fs: &LocalFs) -> Result<()> {
     for entry in glob::glob(fs.root.join("**/temp-*").as_str())? {
         match entry {
+            // Residue is always a directory; a `temp-*` file is data — a chunk table named so.
+            Ok(path) if !path.is_dir() => {}
             Ok(path) => {
                 info!("Removing temp dir '{}'", path.display());
                 std::fs::remove_dir_all(&path)
                     .context(format!("Couldn't remove dir '{}'", path.display()))?;
-                layout::clean_chunk_ancestors(PathBuf::try_from(path)?)?;
+                layout::clean_chunk_ancestors(PathBuf::try_from(path)?, &fs.root)?;
             }
             Err(e) => warn!("Couldn't read dir: {}", e),
         };
@@ -479,14 +488,15 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
         }
         let dirname = dir.file_name().unwrap();
         if let Some(dataset) = dataset::decode_dataset(dirname) {
-            let chunks: Vec<DataChunk> = layout::read_all_chunks(&fs.cd(dirname))
+            let chunks: Vec<(u32, DataChunk)> = layout::read_all_versions(&fs.cd(dirname))
                 .await
                 .context(format!("Invalid layout in '{dir}'"))?;
             let dataset = Arc::new(dataset);
-            for chunk in chunks {
+            for (version, chunk) in chunks {
                 result.insert(ChunkRef {
                     dataset: dataset.clone(),
                     chunk: Arc::from(chunk.id),
+                    version,
                 });
             }
         } else {
@@ -496,9 +506,7 @@ async fn load_state(fs: &LocalFs) -> Result<ChunkSet> {
     Ok(result)
 }
 
-/// Walks the entire directory tree, so it also accounts for files not tracked by the worker.
-/// The walk runs on the blocking thread pool — a full scan of a large workdir may take minutes
-/// and must never run directly on the async runtime.
+/// Counts all files on the blocking pool, including files not tracked by the worker.
 async fn get_directory_size(path: PathBuf) -> u64 {
     tokio::task::spawn_blocking(move || {
         let mut result = 0;
@@ -533,10 +541,18 @@ mod tests {
     use sqd_network_transport::Keypair;
     use tokio_util::sync::CancellationToken;
 
-    use super::{DownloadConfig, StateManager};
+    use super::{DatasetsIndex, DownloadConfig, StateManager};
+    use crate::storage::datasets_index::AssignmentBlob;
     use crate::types::dataset::encode_dataset;
 
-    /// A valid assignment that assigns no chunks to `peer_id`.
+    /// A legacy document, admitted: it references no write schemas, so none can be missing.
+    fn prepared(assignment: sqd_assignments::Assignment, id: &str, key: &Keypair) -> DatasetsIndex {
+        DatasetsIndex::new(AssignmentBlob::Legacy(assignment), id, key, |_| {
+            unreachable!("a legacy assignment references no write schemas")
+        })
+        .expect("the document lists this worker")
+    }
+
     fn empty_assignment_for(peer_id: sqd_contract_client::PeerId) -> sqd_assignments::Assignment {
         let mut builder = sqd_assignments::AssignmentBuilder::new("test-secret");
         builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[]);
@@ -547,52 +563,196 @@ mod tests {
         workdir: PathBuf,
         worker_id: sqd_contract_client::PeerId,
     ) -> StateManager {
+        test_manager_with_attempts(
+            workdir,
+            worker_id,
+            crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+        )
+        .await
+    }
+
+    async fn test_manager_with_attempts(
+        workdir: PathBuf,
+        worker_id: sqd_contract_client::PeerId,
+        max_download_attempts: u8,
+    ) -> StateManager {
         let config = DownloadConfig {
             s3_timeout: Duration::from_secs(1),
             s3_read_timeout: Duration::from_secs(1),
             downloads_max_delay: Duration::from_secs(1),
-            max_download_attempts: crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
+            max_download_attempts,
         };
         StateManager::new(workdir, 1, worker_id, config)
             .await
             .unwrap()
     }
 
-    // Known limitation (not yet fixed): when registering an assignment fails
-    // (here: the assignment has no entry for this worker), the worker silently
-    // stays on the previous assignment. Combined with the id dedup in the
-    // assignments stream (see `assignment_id_is_consumed_before_the_assignment_
-    // is_known_to_apply` in controller::assignments), the failed assignment is
-    // never offered again — the worker idles on stale data until the network
-    // publishes a *different* assignment id.
+    /// Stored chunks without a pinned schema resolve through the legacy type registry.
     #[tokio::test]
-    async fn failed_set_assignment_leaves_the_worker_on_the_old_assignment() {
+    async fn a_chunk_outside_the_assignment_still_resolves_by_type() {
+        use std::sync::Arc;
+
+        use super::super::datasets_index::ChunkSchema;
+        use super::super::state::State;
+        use crate::types::state::{ChunkRef, ChunkSet};
+
         let keypair = Keypair::generate_ed25519();
         let worker_id = keypair.public().to_peer_id();
         let dir = tempfile::tempdir().unwrap();
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
-        let manager = test_manager(workdir, worker_id).await;
+        let manager = Arc::new(test_manager(workdir, worker_id).await);
 
-        assert!(manager.set_assignment(empty_assignment_for(worker_id), "A", &keypair));
-        assert_eq!(
-            manager.current_status().await.assignment_id.as_deref(),
-            Some("A")
+        let dataset = "s3://test".to_owned();
+        let chunk = ChunkRef::new(
+            Arc::new(dataset.clone()),
+            Arc::from("0000000000/0000000000-0000000010-aaaaaaaa"),
+        );
+        *manager.state.lock() = State::new(
+            ChunkSet::from([chunk.clone()]),
+            crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
         );
 
-        // Assignment B doesn't include this worker, so registration fails...
-        let other_worker = Keypair::generate_ed25519().public().to_peer_id();
-        assert!(!manager.set_assignment(empty_assignment_for(other_worker), "B", &keypair));
-
-        // ...and the worker keeps reporting A, with no retry path for B
+        let held = manager
+            .clone()
+            .get_query_chunk(chunk.clone())
+            .expect("the chunk is available");
         assert_eq!(
-            manager.current_status().await.assignment_id.as_deref(),
-            Some("A")
+            held.schema,
+            ChunkSchema::ByType,
+            "the bytes are on disk and readable; nothing about an absent assignment changes that"
+        );
+        drop(held);
+
+        manager.set_prepared_assignment(prepared(empty_assignment_for(worker_id), "A", &keypair));
+
+        let held = manager
+            .clone()
+            .get_query_chunk(chunk.clone())
+            .expect("still available: removal is a later pass");
+        assert_eq!(
+            held.schema,
+            ChunkSchema::ByType,
+            "assignment A covers no chunks, which says what to keep, not what to answer for"
         );
     }
 
-    // Known limitation (not yet fixed): a failed chunk removal panics the state
-    // loop — and with it the whole worker — instead of being retried or surfaced
-    // as an error. Any transient FS hiccup during cleanup is fatal.
+    /// A rewrite lands beside the ingested copy, and a restart reads back what the manager writes.
+    #[tokio::test]
+    async fn a_restart_recovers_each_chunk_at_the_version_it_is_stored_under() {
+        use std::sync::Arc;
+
+        use crate::types::state::ChunkRef;
+
+        let dataset = Arc::new("s3://test".to_owned());
+        let id = "0000000000/0000000000-0000000010-aaaaaaaa";
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let dataset_dir = workdir.join(encode_dataset(&dataset));
+        let versioned = |version| ChunkRef {
+            dataset: Arc::clone(&dataset),
+            chunk: Arc::from(id),
+            version,
+        };
+        let worker_id = Keypair::generate_ed25519().public().to_peer_id();
+
+        let manager = test_manager(workdir.clone(), worker_id).await;
+        let ingested = manager.chunk_path(&versioned(0));
+        let rewritten = manager.chunk_path(&versioned(4));
+        assert_eq!(ingested, dataset_dir.join(id), "where a legacy chunk is");
+        assert_eq!(rewritten, dataset_dir.join("_v4").join(id));
+        drop(manager);
+        std::fs::create_dir_all(&ingested).unwrap();
+        std::fs::create_dir_all(&rewritten).unwrap();
+
+        let manager = test_manager(workdir, worker_id).await;
+
+        let available = manager.state.lock().status().available;
+        assert_eq!(
+            available.into_iter().collect::<Vec<_>>(),
+            [versioned(0), versioned(4)],
+            "one id, two copies — distinct chunks the worker holds independently"
+        );
+    }
+
+    /// One chunk this worker holds, at an origin that answers 404: addressable, never fetchable.
+    fn unfetchable_assignment_for(
+        peer_id: sqd_contract_client::PeerId,
+        origin: &str,
+    ) -> sqd_assignments::Assignment {
+        let mut builder =
+            sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
+        builder
+            .new_chunk()
+            .id("0000000000/0000000000-0000000010-aaaaaaaa")
+            .dataset_id("s3://test")
+            .dataset_base_url(origin)
+            .block_range(0..=10)
+            .size(1)
+            .worker_indexes(&[0])
+            .files(&["blocks.parquet".to_owned()])
+            .finish()
+            .unwrap();
+        builder.finish_dataset();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0]);
+        sqd_assignments::Assignment::from_owned(builder.finish()).unwrap()
+    }
+
+    /// A successor that changes nothing about the slice still restores the budget of chunks
+    /// given up on (WP-13), and only the reconciler can spend it: registering it must wake the
+    /// loop, or the chunk is never retried and the assignment never settles. The chunk is
+    /// addressable but its origin answers 404, and the budget is one attempt, so each
+    /// assignment stalls after one fetch.
+    #[tokio::test]
+    async fn a_same_slice_successor_wakes_the_reconciler() {
+        use std::sync::Arc;
+
+        use super::AssignmentOutcome;
+        use crate::controller::test_support::TestServer;
+
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let origin = TestServer::start().await;
+        let manager = Arc::new(test_manager_with_attempts(workdir, worker_id, 1).await);
+        let token = CancellationToken::new();
+        let running = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let token = token.clone();
+            async move { manager.run(token).await }
+        });
+
+        for id in ["A", "B"] {
+            manager.set_prepared_assignment(prepared(
+                unfetchable_assignment_for(worker_id, &origin.url("/")),
+                id,
+                &keypair,
+            ));
+            let verdict = tokio::time::timeout(
+                Duration::from_secs(5),
+                manager.wait_until_assignment_settled(id, token.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("assignment {id} was never judged: the reconciler was not woken")
+            });
+            assert_eq!(
+                verdict,
+                Some(AssignmentOutcome::Stalled),
+                "the chunk cannot be fetched, so {id} stalls — but it is judged"
+            );
+        }
+        assert_eq!(
+            origin.hits("/0000000000/0000000000-0000000010-aaaaaaaa/blocks.parquet"),
+            2,
+            "one attempt per assignment: the successor restored the budget and spent it"
+        );
+
+        token.cancel();
+        running.await.unwrap();
+    }
+
+    /// Documents the current fatal response to a chunk-removal failure.
     #[tokio::test]
     #[should_panic(expected = "Couldn't remove chunk")]
     async fn removal_failure_panics_the_state_loop() {
@@ -601,7 +761,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
 
-        // One chunk is on disk at startup, so it is loaded as available
         let chunk_dir = workdir
             .join(encode_dataset("s3://ds"))
             .join("0000000000/0000000000-0000000001-abcdef");
@@ -609,13 +768,43 @@ mod tests {
 
         let manager = test_manager(workdir, worker_id).await;
 
-        // The new assignment holds no chunks, scheduling the local one for removal
-        assert!(manager.set_assignment(empty_assignment_for(worker_id), "A", &keypair));
+        manager.set_prepared_assignment(prepared(empty_assignment_for(worker_id), "A", &keypair));
 
-        // Sabotage the removal: the chunk dir vanishes behind the manager's back
         std::fs::remove_dir_all(&chunk_dir).unwrap();
 
         manager.run(CancellationToken::new()).await;
+    }
+
+    /// Startup cleanup sweeps `temp-*` residue. A roster may name a table `temp-x`, which makes
+    /// a `temp-x.parquet` inside a committed chunk: data, not residue — removing it as a
+    /// directory used to fail the start, and that chunk is held by every worker on the schema.
+    #[tokio::test]
+    async fn a_temp_named_table_file_is_data_not_residue() {
+        let keypair = Keypair::generate_ed25519();
+        let worker_id = keypair.public().to_peer_id();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let top = workdir
+            .join(crate::types::dataset::encode_dataset("s3://test"))
+            .join("0000001000");
+        let chunk_dir = top.join("0000001000-0000001999-abcdef12");
+        std::fs::create_dir_all(&chunk_dir).unwrap();
+        std::fs::write(chunk_dir.join("temp-x.parquet"), b"data").unwrap();
+        let residue = top.join("temp-123-0000002000-0000002999-bbbbbbbb");
+        std::fs::create_dir_all(&residue).unwrap();
+
+        let manager = test_manager(workdir, worker_id).await;
+
+        assert!(
+            chunk_dir.join("temp-x.parquet").exists(),
+            "a chunk's table file is data"
+        );
+        assert!(!residue.exists(), "a temp directory is residue");
+        assert_eq!(
+            manager.state.lock().status().available.len(),
+            1,
+            "the chunk is adopted, table file and all"
+        );
     }
 
     #[test]
@@ -631,9 +820,7 @@ mod tests {
         })
     }
 
-    // One specific interleaving between `set_assignment` and the state loop's
-    // periodic check that must not report a not-yet-applied assignment as
-    // applied. Not an exhaustive test of every interleaving.
+    /// A settled check must not combine a new desired set with the previous assignment ID.
     #[test]
     fn does_not_misattribute_applied_state_to_a_newer_assignment() {
         use std::sync::Arc;
@@ -646,15 +833,10 @@ mod tests {
         use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
-        let chunk = |id: &str| ChunkRef {
-            dataset: Arc::new("ds".to_owned()),
-            chunk: Arc::from(id),
-        };
+        let chunk = |id: &str| ChunkRef::new(Arc::new("ds".to_owned()), Arc::from(id));
         let chunk_a = chunk("a");
         let chunk_b = chunk("b");
 
-        // Assignment A only needs `chunk_a`, which is already available, and is
-        // already marked as applied (steady state before the race begins).
         let state = Mutex::new(State::new(
             [chunk_a.clone()].into_iter().collect(),
             DEFAULT_MAX_DOWNLOAD_ATTEMPTS,
@@ -666,26 +848,19 @@ mod tests {
         let (assignment_settled_tx, assignment_settled_rx) =
             tokio::sync::watch::channel(settled("A", AssignmentOutcome::Applied));
 
-        // Step 1: `set_assignment(B)` updates the desired chunks first. B additionally
-        // needs `chunk_b`, which isn't available yet, so state stops being fully applied.
         let desired: ChunkSet = [chunk_a.clone(), chunk_b.clone()].into_iter().collect();
         state.lock().set_desired_chunks(desired);
         assert!(!state.lock().is_fully_applied());
 
-        // Step 2: the state loop's own check races in before `current_assignment_id`
-        // has been updated to B. `current_assignment_id` is still A, which is already
-        // marked applied, so this must be a no-op.
+        // Simulate the state-loop check between desired-set and ID updates.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
             Some("A".to_owned())
         );
 
-        // Step 3: `set_assignment` now points `current_assignment_id` at B.
         assignment_application.lock().current_assignment_id = Some("B".to_owned());
 
-        // Step 4: `set_assignment`'s own post-update check runs. `chunk_b` is
-        // still missing, so B must NOT be marked applied here.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
@@ -697,12 +872,10 @@ mod tests {
             settled("A", AssignmentOutcome::Applied)
         );
 
-        // Step 5: `chunk_b` finishes downloading, so B genuinely becomes fully applied.
         state.lock().take_next_download();
         state.lock().complete_download(&chunk_b, true);
         assert!(state.lock().is_fully_applied());
 
-        // Step 6: only now should B be marked applied.
         mark_assignment_settled_if_ready(&state, &assignment_application, &assignment_settled_tx);
         assert_eq!(
             assignment_application.lock().last_applied_assignment_id,
@@ -711,6 +884,68 @@ mod tests {
         assert_eq!(
             *assignment_settled_rx.borrow(),
             settled("B", AssignmentOutcome::Applied)
+        );
+    }
+
+    /// Re-registering an older assignment must republish its displaced verdict (LIV-1).
+    #[test]
+    fn a_reregistered_assignment_settles_again_though_it_applied_before() {
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+
+        use super::{
+            mark_assignment_settled_if_ready, AssignmentApplicationStatus, AssignmentOutcome, State,
+        };
+        use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
+        use crate::types::state::{ChunkRef, ChunkSet};
+
+        let chunk_a = ChunkRef::new(Arc::new("ds".to_owned()), Arc::from("a"));
+
+        let state = Mutex::new(State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS));
+        let application = Mutex::new(AssignmentApplicationStatus {
+            current_assignment_id: Some("A0".to_owned()),
+            last_applied_assignment_id: None,
+        });
+        let (settled_tx, settled_rx) = tokio::sync::watch::channel(None);
+        mark_assignment_settled_if_ready(&state, &application, &settled_tx);
+        assert_eq!(
+            *settled_rx.borrow(),
+            settled("A0", AssignmentOutcome::Applied)
+        );
+
+        {
+            let mut application = application.lock();
+            state
+                .lock()
+                .set_desired_chunks([chunk_a.clone()].into_iter().collect());
+            application.current_assignment_id = Some("A1".to_owned());
+        }
+        for _ in 0..DEFAULT_MAX_DOWNLOAD_ATTEMPTS {
+            assert_eq!(state.lock().take_next_download(), Some(chunk_a.clone()));
+            state.lock().complete_download(&chunk_a, false);
+        }
+        mark_assignment_settled_if_ready(&state, &application, &settled_tx);
+        assert_eq!(
+            *settled_rx.borrow(),
+            settled("A1", AssignmentOutcome::Stalled)
+        );
+        assert_eq!(
+            application.lock().last_applied_assignment_id,
+            Some("A0".to_owned())
+        );
+
+        {
+            let mut application = application.lock();
+            state.lock().set_desired_chunks(ChunkSet::new());
+            application.current_assignment_id = Some("A0".to_owned());
+        }
+        mark_assignment_settled_if_ready(&state, &application, &settled_tx);
+
+        assert_eq!(
+            *settled_rx.borrow(),
+            settled("A0", AssignmentOutcome::Applied),
+            "the loop waits for A0's verdict, and the channel was still holding A1's"
         );
     }
 
@@ -729,10 +964,7 @@ mod tests {
         use crate::cli::DEFAULT_MAX_DOWNLOAD_ATTEMPTS;
         use crate::types::state::{ChunkRef, ChunkSet};
 
-        let chunk_a = ChunkRef {
-            dataset: Arc::new("ds".to_owned()),
-            chunk: Arc::from("a"),
-        };
+        let chunk_a = ChunkRef::new(Arc::new("ds".to_owned()), Arc::from("a"));
 
         let mut state = State::new(ChunkSet::new(), DEFAULT_MAX_DOWNLOAD_ATTEMPTS);
         state.set_desired_chunks([chunk_a.clone()].into_iter().collect());

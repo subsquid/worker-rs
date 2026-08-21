@@ -24,9 +24,10 @@ serves queries from nothing.
 read's implied A against a direct store scan.
 
 **INV-3 — Layout well-formedness.** [state]
-Within a dataset, the block ranges of any two distinct committed chunks are either
-disjoint or identical (suffix forks, ADR-4). Partial overlaps never exist among adopted
-chunks.
+Within one dataset and version, the block ranges of any two distinct committed chunks are
+either disjoint or identical (suffix forks, ADR-4). Partial overlaps never exist among
+adopted chunks of a version. Across versions nothing is required: a rewrite may re-cut
+ranges, and each version's subtree is adopted on its own terms (DEF-6).
 *Why:* overlapping ranges make coverage (RP-11) ambiguous and progress unsound.
 *Check:* CT-2/CT-4 — recovery over corpus stores with crafted overlaps must refuse
 adoption; property tests never produce an overlapping store.

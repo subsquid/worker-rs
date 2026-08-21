@@ -30,8 +30,27 @@ impl Origin {
         }
     }
 
+    /// Publishes a rewritten chunk only under its generation prefix.
+    pub fn host_generation(&self, prefix: &str, chunk: &Chunk) {
+        for (name, bytes) in &chunk.files {
+            self.stub.put(
+                Self::generation_path(prefix, &chunk.id, name),
+                bytes.clone(),
+            );
+        }
+    }
+
     pub fn path(chunk_id: &str, file: &str) -> String {
         format!("/{chunk_id}/{file}")
+    }
+
+    pub fn generation_path(prefix: &str, chunk_id: &str, file: &str) -> String {
+        format!("/{prefix}{}", Self::path(chunk_id, file))
+    }
+
+    pub fn served_bytes_in(&self, prefix: &str, chunk_id: &str, file: &str) -> Option<Vec<u8>> {
+        self.stub
+            .last_served(&Self::generation_path(prefix, chunk_id, file))
     }
 
     pub fn inject(&self, chunk_id: &str, file: &str, fault: Fault) {

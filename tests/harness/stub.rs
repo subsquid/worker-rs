@@ -21,7 +21,7 @@ use parking_lot::Mutex;
 pub enum Fault {
     /// Serve the registered bytes.
     None,
-    /// Answer with this status and an empty body (FM-20/23, GAP-9's 404).
+    /// Answer with this status and an empty body (FM-10, FM-20/23).
     Status(u16),
     /// Serve `n` bytes then end the body — a power-loss-shaped short read (CN-4).
     Truncate(usize),
