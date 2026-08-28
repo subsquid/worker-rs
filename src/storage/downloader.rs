@@ -1,8 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use futures::{future::FusedFuture, stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
+use parquet::file::metadata::ParquetMetaDataReader;
 use rand::Rng;
 use reqwest::Url;
 use sqd_contract_client::PeerId;
@@ -188,9 +189,33 @@ pub async fn download_one(
         .send()
         .await?
         .error_for_status()?;
+    // `error_for_status` passes 3xx, and no redirect is followed, so the response would be
+    // the redirect page rather than the file.
+    let status = response.status();
+    if !status.is_success() {
+        bail!("Unexpected status {status} for '{dst_path}'");
+    }
     let stream = response.bytes_stream();
     let mut reader =
         StreamReader::new(stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
     tokio::io::copy(&mut reader, &mut writer).await?;
+
+    if dst_path.extension() == Some(PARQUET_EXTENSION) {
+        let path = dst_path.to_owned();
+        tokio::task::spawn_blocking(move || verify_parquet(&path))
+            .await?
+            .with_context(|| format!("Invalid parquet file '{dst_path}'"))?;
+    }
+    Ok(())
+}
+
+const PARQUET_EXTENSION: &str = "parquet";
+
+/// Parses the footer, the same read that opens a chunk at query time, so a committed file is
+/// one the read path can open. Page data is not decoded — the assignment carries no size or
+/// digest to check the body itself against (GAP-5).
+fn verify_parquet(path: &Path) -> Result<()> {
+    let file = std::fs::File::open(path)?;
+    ParquetMetaDataReader::new().parse_and_finish(&file)?;
     Ok(())
 }
