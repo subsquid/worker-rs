@@ -180,7 +180,13 @@ pub async fn download_one(
     client: &reqwest::Client,
     headers: reqwest::header::HeaderMap,
 ) -> Result<()> {
-    let mut writer = tokio::fs::File::create(dst_path)
+    // Read+write: the parquet check below reads the footer back through the same handle.
+    let mut writer = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst_path)
         .await
         .with_context(|| format!("Couldn't create file '{dst_path}'"))?;
     let response = client
@@ -201,21 +207,15 @@ pub async fn download_one(
     tokio::io::copy(&mut reader, &mut writer).await?;
 
     if dst_path.extension() == Some(PARQUET_EXTENSION) {
-        let path = dst_path.to_owned();
-        tokio::task::spawn_blocking(move || verify_parquet(&path))
-            .await?
+        // Parses the footer, the same read that opens a chunk at query time, so a committed
+        // file is one the read path can open. Page data is not decoded — the assignment
+        // carries no size or digest to check the body itself against (GAP-5). Two small
+        // reads of a file just written, so it is done inline like the other fs ops here.
+        ParquetMetaDataReader::new()
+            .parse_and_finish(&writer.into_std().await)
             .with_context(|| format!("Invalid parquet file '{dst_path}'"))?;
     }
     Ok(())
 }
 
 const PARQUET_EXTENSION: &str = "parquet";
-
-/// Parses the footer, the same read that opens a chunk at query time, so a committed file is
-/// one the read path can open. Page data is not decoded — the assignment carries no size or
-/// digest to check the body itself against (GAP-5).
-fn verify_parquet(path: &Path) -> Result<()> {
-    let file = std::fs::File::open(path)?;
-    ParquetMetaDataReader::new().parse_and_finish(&file)?;
-    Ok(())
-}
