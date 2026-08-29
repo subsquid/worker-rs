@@ -121,7 +121,7 @@ pub async fn create_p2p_controller(
     let allocations_checker = allocations_checker::AllocationsChecker::new(
         transport_builder.contract_client(),
         worker_id,
-        args.network_polling_interval,
+        (&args).into(),
     )
     .await?;
 

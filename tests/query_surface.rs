@@ -6,7 +6,7 @@
 
 mod harness;
 
-use harness::{corpus, validators, Harness};
+use harness::{corpus, validators, Config, Harness};
 use sqd_messages::query_result;
 
 /// RP-10: a range disjoint from the chunk is not an error — it is an empty result whose
@@ -91,4 +91,98 @@ async fn bad_signature_is_rejected_pre_admission() {
         page.queries_executed.is_empty(),
         "RP-1: pre-admission failures produce no log record"
     );
+}
+
+/// RP-1 step 5 / REQ-21: a portal whose operator holds no allocation is turned away before
+/// admission, and without a retry hint — only an on-chain change can bring it back. Enforcement
+/// makes no difference here: the switch drops the pacing, never the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_portal_without_an_allocation_is_rejected() {
+    for rate_limiting in [true, false] {
+        let mut h = Harness::with_config(Config {
+            rate_limiting,
+            ..Config::default()
+        })
+        .await;
+
+        let chunk = corpus::chunk(4_000, 4_004, 1);
+        let placement = h.host_chunk(&chunk);
+        h.publish_and_apply("assignment-1", &[placement]).await;
+
+        // Buckets are re-read only when the observed epoch advances (DEF-22).
+        h.registry.revoke_allocations();
+        h.registry.advance_epoch();
+        h.await_condition(
+            "the revoked allocation reaches the admission bar",
+            || async {
+                let query = h.all_blocks_query(&chunk.id, (4_000, 4_005));
+                matches!(h.serve(query).await, harness::Served::PreAdmission { .. })
+            },
+        )
+        .await;
+
+        let served = h.serve(h.all_blocks_query(&chunk.id, (4_000, 4_005))).await;
+        let harness::Served::PreAdmission { response, reason } = &served else {
+            panic!("rate_limiting = {rate_limiting}: an unallocated portal must not be admitted");
+        };
+        assert!(
+            matches!(reason, sqd_messages::query_error::Err::TooManyRequests(_)),
+            "RP-20: expected too_many_requests, got {reason:?}"
+        );
+        assert_eq!(
+            response.retry_after_ms, None,
+            "RP-20: no hint exists while the operator has no allocation"
+        );
+    }
+}
+
+/// P-CU-ENFORCE off: an allocated portal that has spent its epoch budget keeps being served,
+/// and is never told to wait. The registry is read throughout — the epoch is reported and
+/// follows the chain — so what the switch drops is the pacing, not the accounting.
+#[tokio::test(flavor = "multi_thread")]
+async fn unenforced_worker_serves_a_spent_allocation() {
+    let mut h = Harness::with_config(Config {
+        // One CU for a 20-minute epoch, and buckets start empty: enforcing, not one of the
+        // queries below would get through.
+        compute_units: 1,
+        rate_limiting: false,
+        ..Config::default()
+    })
+    .await;
+
+    let chunk = corpus::chunk(5_000, 5_004, 1);
+    let placement = h.host_chunk(&chunk);
+    h.publish_and_apply("assignment-1", &[placement]).await;
+    h.await_all_chunks_available().await;
+
+    for i in 0..10 {
+        let query = h.all_blocks_query(&chunk.id, (5_000, 5_005));
+        let served = h.serve(query.clone()).await;
+        let (response, _) = served.expect_admitted();
+
+        validators::query_response(response, &query, h.worker_id)
+            .assert_none("unenforced response");
+        assert!(
+            matches!(response.result, Some(query_result::Result::Ok(_))),
+            "query {i} must be served, got {:?}",
+            response.result
+        );
+        assert_eq!(
+            response.retry_after_ms, None,
+            "query {i}: nothing is being paced, so nothing is hinted"
+        );
+    }
+
+    let epoch = h.registry.epoch();
+    h.await_condition("the observed epoch reaches the status report", || async {
+        h.status().await.current_epoch == Some(epoch)
+    })
+    .await;
+
+    h.registry.advance_epoch();
+    let advanced = h.registry.epoch();
+    h.await_condition("the status report follows the chain", || async {
+        h.status().await.current_epoch == Some(advanced)
+    })
+    .await;
 }
