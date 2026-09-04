@@ -31,6 +31,9 @@ lazy_static = "1.4.0"
 mimalloc = "0.1.43"
 parking_lot = "0.12.1"
 prometheus-client = "0.23"
+# The parquet the query engine opens chunks with: a downloaded file is verified with the
+# same reader that will later read it.
+parquet = "54.2.1"
 polars-plan = "0.43.1"
 polars = { version = "0.43.1", features = ["json", "parquet"] }
 prost = "0.13.5"
