@@ -4,10 +4,12 @@ use sqd_contract_client::{Address, PortalCluster};
 use sqd_network_transport::PeerId;
 use tokio::time::Instant;
 
-#[derive(Default)]
 pub struct RateLimiter {
     operators: HashMap<Address, Bucket>,
     operator_by_portal_id: HashMap<PeerId, Address>,
+    /// False drops the pacing only: a portal still needs a registered, allocated operator to be
+    /// admitted, and its budget is still drawn down — an exhausted one just no longer waits.
+    enforcing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,14 @@ impl Bucket {
 }
 
 impl RateLimiter {
+    pub fn new(enforcing: bool) -> Self {
+        Self {
+            operators: HashMap::default(),
+            operator_by_portal_id: HashMap::default(),
+            enforcing,
+        }
+    }
+
     pub fn update_allocations(&mut self, clusters: Vec<PortalCluster>, epoch_length: Duration) {
         self.operator_by_portal_id.clear();
         let mut new_operators = HashMap::default();
@@ -109,7 +119,15 @@ impl RateLimiter {
 
         let now = Instant::now();
         bucket.update(now);
-        if bucket.take(allocation_chip) {
+        let within_budget = bucket.take(allocation_chip);
+
+        // Unenforced, the budget is still drawn down but never gates: an exhausted operator is
+        // served on, and no wait is hinted at either, since a hint paces just as a pause does.
+        if !self.enforcing {
+            return RateLimitStatus::Spent(None);
+        }
+
+        if within_budget {
             let retry_after = if bucket.can_serve_one_token() {
                 Some(bucket.until_next_token(now))
             } else {
@@ -132,7 +150,45 @@ impl RateLimiter {
 
 #[cfg(test)]
 mod tests {
+    use sqd_contract_client::U256;
+
     use super::*;
+
+    const OPERATOR: &str = "0x0000000000000000000000000000000000000042";
+    const EPOCH: Duration = Duration::from_secs(1200);
+
+    fn portal() -> PeerId {
+        "12D3KooWSRvKpvNbsrGbLXGFZV7GYdcrYNh4W2nipwHHMYikzV58"
+            .parse()
+            .expect("valid peer id")
+    }
+
+    /// The only way to put tokens in a fresh bucket without waiting out a refill interval.
+    fn fund(limiter: &mut RateLimiter, tokens: f32) {
+        limiter
+            .operators
+            .values_mut()
+            .next()
+            .expect("an allocated operator")
+            .tokens = tokens;
+    }
+
+    fn tokens(limiter: &RateLimiter) -> f32 {
+        limiter
+            .operators
+            .values()
+            .next()
+            .expect("an allocated operator")
+            .tokens
+    }
+
+    fn cluster(cus: u64) -> PortalCluster {
+        PortalCluster {
+            operator_addr: OPERATOR.parse().expect("valid operator address"),
+            portal_ids: vec![portal()],
+            allocated_computation_units: U256::from(cus),
+        }
+    }
 
     #[test]
     fn test_bucket() {
@@ -182,5 +238,71 @@ mod tests {
             "put(0.5) should add 0.5 tokens, got {}",
             bucket.tokens
         );
+    }
+
+    #[test]
+    fn a_portal_with_no_allocation_is_rejected() {
+        for enforcing in [true, false] {
+            let mut limiter = RateLimiter::new(enforcing);
+
+            assert_eq!(
+                limiter.try_run_request(portal(), 1.),
+                RateLimitStatus::NoAllocation,
+                "enforcing = {enforcing}: an unallocated operator is nobody's customer"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unenforcing_limiter_serves_an_exhausted_budget() {
+        let mut limiter = RateLimiter::new(false);
+        limiter.update_allocations(vec![cluster(1)], EPOCH);
+
+        // One CU per 20-minute epoch, and a fresh bucket starts empty: enforcing, every one of
+        // these would be paused.
+        for i in 0..100 {
+            assert_eq!(
+                limiter.try_run_request(portal(), 1.),
+                RateLimitStatus::Spent(None),
+                "request {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unenforcing_limiter_hints_no_wait_within_budget_either() {
+        let mut limiter = RateLimiter::new(false);
+        limiter.update_allocations(vec![cluster(1)], EPOCH);
+        fund(&mut limiter, 1.5);
+
+        // Enforcing, the half token left over would come back as a retry hint — pacing by
+        // another name.
+        assert_eq!(
+            limiter.try_run_request(portal(), 1.),
+            RateLimitStatus::Spent(None)
+        );
+    }
+
+    #[test]
+    fn the_budget_is_still_charged_and_refunded_while_unenforced() {
+        let mut limiter = RateLimiter::new(false);
+        limiter.update_allocations(vec![cluster(1)], EPOCH);
+        fund(&mut limiter, 2.);
+
+        limiter.try_run_request(portal(), 1.);
+        assert_eq!(tokens(&limiter), 1., "the unit is charged");
+
+        limiter.refund(portal(), 1.);
+        assert_eq!(tokens(&limiter), 2., "and the unused fraction comes back");
+    }
+
+    #[test]
+    fn allocations_are_tracked_even_while_unenforced() {
+        let mut limiter = RateLimiter::new(false);
+
+        limiter.update_allocations(vec![cluster(1_000)], EPOCH);
+
+        assert_eq!(limiter.operator_by_portal_id.len(), 1);
+        assert_eq!(limiter.operators.len(), 1, "the bucket is kept warm");
     }
 }

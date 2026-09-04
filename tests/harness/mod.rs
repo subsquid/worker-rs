@@ -24,7 +24,10 @@ use tokio_util::sync::CancellationToken;
 
 use sqd_assignments::AssignmentType;
 use sqd_worker::cli::Args;
-use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
+use sqd_worker::compute_units::{
+    allocations_checker::{AllocationsChecker, MeteringConfig},
+    RateLimitStatus,
+};
 use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
 use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
@@ -131,6 +134,8 @@ pub struct Config {
     pub concurrent_downloads: usize,
     /// Portal allocation for the epoch, in compute units.
     pub compute_units: u64,
+    /// False starts the worker with the pacing switched off (P-CU-ENFORCE off).
+    pub rate_limiting: bool,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
     /// What the scheduler publishes. The worker pins nothing, so it is what resolves too.
@@ -144,6 +149,7 @@ impl Default for Config {
             concurrent_downloads: 3,
             // Refill interval is epoch_length / CUs; keep it ~1 ms so tests aren't paced by it.
             compute_units: 1_000_000,
+            rate_limiting: true,
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
@@ -202,15 +208,14 @@ impl Harness {
             config.parallel_queries,
         ));
 
+        let mut metering = MeteringConfig::from(&args);
+        // Fast enough that a test that advances the epoch doesn't wait on P-EPOCH-POLL.
+        metering.polling_interval = Duration::from_millis(20);
+
         let allocations = Arc::new(
-            AllocationsChecker::new(
-                registry.client(),
-                worker_id,
-                // Fast enough that a test that advances the epoch doesn't wait on P-EPOCH-POLL.
-                Duration::from_millis(20),
-            )
-            .await
-            .expect("registry stub answers the worker-id lookup"),
+            AllocationsChecker::new(registry.client(), worker_id, metering)
+                .await
+                .expect("registry stub answers the worker-id lookup"),
         );
 
         let logs = LogsStorage::new(data_path.join("logs.db").as_str())
@@ -592,7 +597,7 @@ fn build_args(
 
     // Parsed, not constructed: `TransportArgs`/`RpcArgs` have private fields, and the CLI is
     // how IB-32 says an operator configures this. Transport/RPC settings are inert here.
-    let mut args = Args::parse_from([
+    let mut argv: Vec<String> = [
         "sqd-worker",
         "--data-dir",
         data_dir.as_str(),
@@ -610,7 +615,16 @@ fn build_args(
         "http://127.0.0.1:1/unused",
         "--l1-rpc-url",
         "http://127.0.0.1:1/unused",
-    ]);
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+
+    if !config.rate_limiting {
+        argv.push("--disable-rate-limiting".to_owned());
+    }
+
+    let mut args = Args::parse_from(argv);
 
     // Positional/env-only settings (IB-32) have no flag to pass; set them directly.
     args.s3_timeout = config.file_timeout;

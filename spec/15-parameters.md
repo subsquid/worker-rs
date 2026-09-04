@@ -55,6 +55,7 @@ batch unless stated).
 |---|---|---|---|
 | P-CU-BURST | token-bucket capacity (DEF-23) | 3.0; latent edge defects tracked in GAP-21 | same |
 | P-EPOCH-POLL | registry poll period (LIV-12) | 30 s | same |
+| P-CU-ENFORCE | bucket-pacing switch (DEF-23, RP-1 step 5) | on; a hidden operator switch drops the pacing only — an allocated operator is served past its budget and never hinted a wait, while the allocation gate, the polling and the CU accounting all stand | same |
 
 ## Status and logs
 

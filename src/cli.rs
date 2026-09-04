@@ -73,6 +73,23 @@ pub struct Args {
     )]
     pub network_polling_interval: Duration,
 
+    /// Stop pacing portals: an allocated operator is served past its epoch budget and is never
+    /// told to wait. Registration and allocation still gate admission, and the budget is still
+    /// charged and refunded.
+    // `ArgAction::Set` over an optional value, so `DISABLE_RATE_LIMITING=false` is read as a
+    // value rather than as "flag present" (the trap `sentry_is_enabled` documents), while the
+    // bare `--disable-rate-limiting` still works.
+    #[clap(
+        long,
+        env,
+        hide(true),
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true"
+    )]
+    pub disable_rate_limiting: bool,
+
     #[clap(long, env = "ASSIGNMENT_CHECK_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "60")]
     pub assignment_check_interval: Duration,
 
@@ -192,7 +209,10 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+
     use super::*;
+    use crate::compute_units::allocations_checker::MeteringConfig;
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         let base = [
@@ -226,5 +246,41 @@ mod tests {
                 "{refused:?}"
             );
         }
+    }
+
+    #[test]
+    fn rate_limiting_is_enforced_unless_asked_otherwise() {
+        let args = parse(&[]).unwrap();
+
+        assert!(!args.disable_rate_limiting);
+        assert!(MeteringConfig::from(&args).enforce);
+    }
+
+    #[test]
+    fn the_bare_flag_turns_enforcement_off() {
+        let args = parse(&["--disable-rate-limiting"]).unwrap();
+
+        assert!(args.disable_rate_limiting);
+        assert!(!MeteringConfig::from(&args).enforce);
+    }
+
+    /// The value is read, not merely counted as "flag present" — which is what makes
+    /// `DISABLE_RATE_LIMITING=false` mean what an operator reading it would expect.
+    #[test]
+    fn an_explicit_false_leaves_enforcement_on() {
+        let args = parse(&["--disable-rate-limiting=false"]).unwrap();
+
+        assert!(MeteringConfig::from(&args).enforce);
+    }
+
+    #[test]
+    fn the_flag_stays_out_of_the_help_text() {
+        let command = Args::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "disable_rate_limiting")
+            .expect("the flag is defined");
+
+        assert!(arg.is_hide_set(), "the flag is deliberately undocumented");
     }
 }
