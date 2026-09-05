@@ -791,6 +791,9 @@ pub(crate) mod test_support {
 name: evm
 tables:
   blocks:
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
     columns:

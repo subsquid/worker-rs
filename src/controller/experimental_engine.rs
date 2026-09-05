@@ -224,16 +224,22 @@ mod tests {
 name: evm
 tables:
   blocks:
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
-    field_name: block
     sort_key: [number]
     columns:
       number:
         type: uint64
   logs:
+    request:
+      name: logs
+      filters: []
+    output:
+      name: log
+      fields: [transaction_index, log_index, data]
     block_number_column: block_number
-    query_name: logs
-    field_name: log
     item_order_keys: [transaction_index, log_index]
     sort_key: [block_number, transaction_index, log_index]
     columns:
@@ -245,7 +251,7 @@ tables:
         type: uint32
       data:
         type: string
-        json_encoding: hex
+        encoding: hex_bytes
         weight: data_size
       data_size:
         type: uint64
@@ -473,14 +479,17 @@ tables:
 name: evm
 tables:
   blocks:
+    output:
+      name: block
+      fields: [number, hash]
     block_number_column: number
     sort_key: [number]
     columns:
       number:
         type: uint64
-        stats: true
       hash:
         type: string
+        encoding: hex_bytes
 "#;
         let app = axum::Router::new()
             .route(
