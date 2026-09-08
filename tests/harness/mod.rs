@@ -20,6 +20,7 @@ use camino::Utf8PathBuf;
 use futures::StreamExt;
 use sqd_messages::{query_error, Query, QueryExecuted, QueryLogs};
 use sqd_network_transport::{protocol, Keypair, PeerId};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use sqd_assignments::AssignmentType;
@@ -217,11 +218,26 @@ impl Harness {
             .await
             .expect("log store opens");
 
+        let assignment_client =
+            assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
+        // Exercise the production bundle-before-assignment ordering (ADR-21).
+        let applier = AssignmentApplier::new(
+            Arc::clone(&worker),
+            schemas.clone(),
+            keypair.clone(),
+            assignment_client.clone(),
+            Duration::from_millis(200),
+        );
+
         let shutdown = CancellationToken::new();
         spawn_subsystems(
             &worker,
             &allocations,
-            (schemas.registry(), schema_stub.url(SCHEMA_MANIFEST_PATH)),
+            (
+                schemas.registry(),
+                schema_stub.url(SCHEMA_MANIFEST_PATH),
+                applier.type_schemas_wanted(),
+            ),
             worker_id,
             shutdown.clone(),
         );
@@ -236,17 +252,6 @@ impl Harness {
             // Unpinned: what the state names is what the worker reads.
             None,
         ));
-        let assignment_client =
-            assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
-        // Exercise the production bundle-before-assignment ordering (ADR-21).
-        let applier = AssignmentApplier::new(
-            Arc::clone(&worker),
-            schemas.clone(),
-            keypair.clone(),
-            assignment_client.clone(),
-            Duration::from_millis(200),
-        );
-
         let harness = Self {
             seed,
             scheduler,
@@ -557,7 +562,7 @@ impl Drop for Harness {
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    cdn_schemas: (Arc<SchemaRegistry>, String),
+    cdn_schemas: (Arc<SchemaRegistry>, String, watch::Receiver<bool>),
     worker_id: PeerId,
     shutdown: CancellationToken,
 ) {
@@ -569,13 +574,14 @@ fn spawn_subsystems(
     let alloc_token = shutdown.clone();
     tokio::spawn(async move { alloc.run(alloc_token).await });
 
-    let (registry, manifest_url) = cdn_schemas;
+    let (registry, manifest_url, type_schemas_wanted) = cdn_schemas;
     tokio::spawn(async move {
         run_schemas_refresh_loop(
             registry,
             manifest_url,
             Duration::from_secs(3600),
             worker_id,
+            type_schemas_wanted,
             shutdown,
         )
         .await

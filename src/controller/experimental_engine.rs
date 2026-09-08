@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context};
 use reqwest::Url;
 use sqd_network_transport::PeerId;
 use sqd_query_engine::metadata::DatasetDescription;
+use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tower::retry::backoff::{Backoff, MakeBackoff};
@@ -27,11 +28,14 @@ struct Manifest {
     schemas: HashMap<String, String>,
 }
 
+/// Polls the manifest only while `wanted` is true (the assignment in force resolves schemas by
+/// type); a resume refreshes at once. Schemas loaded before a pause stay in the registry.
 pub async fn run_schemas_refresh_loop(
     registry: Arc<SchemaRegistry>,
     manifest_url: String,
     refresh_interval: Duration,
     peer_id: PeerId,
+    mut wanted: watch::Receiver<bool>,
     cancellation_token: CancellationToken,
 ) {
     let mut timer = tokio::time::interval(refresh_interval);
@@ -41,8 +45,27 @@ pub async fn run_schemas_refresh_loop(
     let mut retry = backoff::exponential(Duration::from_secs(1), refresh_interval);
 
     loop {
+        if !*wanted.borrow_and_update() {
+            tracing::info!("Query schemas refresh paused: the assignment pins schemas by id");
+            tokio::select! {
+                resumed = wanted.wait_for(|wanted| *wanted) => {
+                    if resumed.is_err() {
+                        break;
+                    }
+                }
+                _ = cancellation_token.cancelled() => break,
+            }
+            tracing::info!("Query schemas refresh resumed");
+            timer.reset_immediately();
+        }
         tokio::select! {
             _ = timer.tick() => {}
+            changed = wanted.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                continue;
+            }
             _ = cancellation_token.cancelled() => break,
         }
         let mut backoff = retry.make_backoff();
@@ -57,6 +80,7 @@ pub async fn run_schemas_refresh_loop(
                     tracing::warn!(error = %format!("{e:#}"), "Failed to refresh query schemas; retrying");
                     tokio::select! {
                         _ = backoff.next_backoff() => {}
+                        _ = wanted.changed() => break,
                         _ = cancellation_token.cancelled() => break,
                     }
                 }
@@ -534,6 +558,85 @@ tables:
         .await
         .unwrap_err();
         assert!(registry.get_by_type("evm").is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_refresh_loop_follows_whether_type_schemas_are_wanted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const SCHEMA: &str = r#"
+name: evm
+tables:
+  blocks:
+    output:
+      name: block
+      fields: [number]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number:
+        type: uint64
+"#;
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/query-schemas.yml",
+                axum::routing::get({
+                    let fetches = Arc::clone(&fetches);
+                    move || {
+                        fetches.fetch_add(1, Ordering::SeqCst);
+                        async { "schemas:\n  evm: /evm.yaml\n" }
+                    }
+                }),
+            )
+            .route("/evm.yaml", axum::routing::get(|| async { SCHEMA }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let registry = Arc::new(SchemaRegistry::memory());
+        let (wanted, watched) = watch::channel(false);
+        let token = CancellationToken::new();
+        let running = tokio::spawn(run_schemas_refresh_loop(
+            Arc::clone(&registry),
+            format!("http://{addr}/query-schemas.yml"),
+            Duration::from_millis(20),
+            PeerId::random(),
+            watched,
+            token.clone(),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(fetches.load(Ordering::SeqCst), 0, "paused from the start");
+        assert!(registry.get_by_type("evm").is_err());
+
+        wanted.send(true).unwrap();
+        let resumed_at = tokio::time::Instant::now();
+        while registry.get_by_type("evm").is_err() {
+            assert!(
+                resumed_at.elapsed() < Duration::from_secs(5),
+                "the manifest was not fetched after resuming"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(resumed_at.elapsed() < Duration::from_secs(1));
+
+        wanted.send(false).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let at_pause = fetches.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            at_pause,
+            "no manifest fetch while paused"
+        );
+        assert!(
+            registry.get_by_type("evm").is_ok(),
+            "what was loaded stays available across a pause"
+        );
+
+        token.cancel();
+        running.await.unwrap();
     }
 
     #[test]

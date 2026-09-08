@@ -42,6 +42,13 @@ assignment in force does not pin — held from an earlier assignment, or held be
 applies — which happens under `split` as much as under `legacy`. Gating it on the type was
 costing a pinned worker the chunks it holds and could serve.
 
+*Revised 2026-09-08.* The manifest is polled while the assignment in force resolves by type —
+from startup until a `split` assignment applies, and again whenever a `legacy` one does — and
+paused while a `split` one is in force, whose chunks every one pin a schema id. The loop follows
+the applied type rather than the type at startup, so a per-poll type no longer forces
+unconditional polling; what the registry loaded before a pause stays available, which keeps the
+chunks a pinned worker held before the switch servable by type. Resuming refreshes at once.
+
 The cost is that a `split` state that omits the portal's half stalls every worker. That shape is
 indistinguishable from a migration still under way, so it is counted by reason at every poll
 rather than alarmed on once (OB-19) — what an operator acts on is how long it lasts (FM-53e).

@@ -8,6 +8,7 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use sqd_assignments::AssignmentType;
 use sqd_network_transport::Keypair;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tower::retry::backoff::{Backoff, ExponentialBackoff, ExponentialBackoffMaker, MakeBackoff};
 use tracing::{debug, info, warn, Instrument};
@@ -42,6 +43,7 @@ pub struct AssignmentApplier {
     keypair: Keypair,
     client: reqwest::Client,
     retry_cap: Duration,
+    type_schemas_wanted: watch::Sender<bool>,
 }
 
 impl AssignmentApplier {
@@ -58,7 +60,14 @@ impl AssignmentApplier {
             keypair,
             client,
             retry_cap,
+            type_schemas_wanted: watch::channel(true).0,
         }
+    }
+
+    /// Whether the applied assignment resolves chunk schemas by dataset type: true until a split
+    /// assignment applies, true again once a legacy one does.
+    pub fn type_schemas_wanted(&self) -> watch::Receiver<bool> {
+        self.type_schemas_wanted.subscribe()
     }
 
     pub async fn run(
@@ -160,6 +169,12 @@ impl AssignmentApplier {
             }
         }
         self.register(update, index).await;
+        self.type_schemas_wanted.send_if_modified(|wanted| {
+            let now = update.assignment_type == AssignmentType::Legacy;
+            let changed = *wanted != now;
+            *wanted = now;
+            changed
+        });
         ApplyOutcome::Applied
     }
 
@@ -637,6 +652,56 @@ mod tests {
             "the schemas are in force by the time the assignment is"
         );
         assert!(f.worker.query_schemas().get_by_id(SchemaId::new(7)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_applied_pair_decides_whether_type_schemas_are_wanted() {
+        let f = fixture().await;
+        let wanted = f.applier.type_schemas_wanted();
+        assert!(*wanted.borrow(), "by type until the network says otherwise");
+
+        let bundle = bundle(&f.stub);
+        let split = f
+            .stub
+            .serve("/split.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
+        let outcome = f.applier.apply(&update("split", split, bundle)).await;
+        assert_eq!(outcome, ApplyOutcome::Applied);
+        assert!(
+            !*wanted.borrow(),
+            "a split assignment pins every chunk by id"
+        );
+
+        let legacy = f
+            .stub
+            .serve("/legacy.fb.gz", gzip(&legacy_assignment(f.peer_id)), 0);
+        let outcome = f.applier.apply(&legacy_update("legacy", legacy)).await;
+        assert_eq!(outcome, ApplyOutcome::Applied);
+        assert!(
+            *wanted.borrow(),
+            "a legacy assignment resolves by type again"
+        );
+
+        let unusable = f
+            .stub
+            .serve("/unusable.fb.gz", gzip(b"not a worker assignment"), 0);
+        let empty_bundle = f.stub.serve(
+            "/empty.tar.gz",
+            targz(&[("readme.txt", b"no schemas here")]),
+            0,
+        );
+        let refused = update(
+            "refused",
+            unusable,
+            (
+                BundleHash::of(&targz(&[("readme.txt", b"no schemas here")])),
+                empty_bundle,
+            ),
+        );
+        assert_eq!(f.applier.apply(&refused).await, ApplyOutcome::Refused);
+        assert!(
+            *wanted.borrow(),
+            "a refused pair leaves the legacy assignment, and its resolution, in force"
+        );
     }
 
     /// An unusable pair is a verdict on its bytes (FM-12) — refused once, counted (OB-18), and

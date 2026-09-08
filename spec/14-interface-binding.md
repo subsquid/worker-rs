@@ -202,12 +202,15 @@ and per-operator CU allocations polled every P-EPOCH-POLL. HC-8 stubs these.
 
 **IB-44 — Schema registry.** HTTPS GET YAML manifest mapping dataset types to schema
 documents, refreshed every P-SCHEMA-REFRESH with unchanged-body short-circuit; fetch
-failure keeps previous schemas (FM-53). Polled whatever type is in force: a chunk the assignment
-in force pins reads its schema by id instead (IB-44b), but a chunk it does not pin — one held
-from an earlier assignment, or held before any assignment applies — resolves by the query's
-dataset type under every type, so the registry is not legacy-only. The manifest is read into
-memory and never stored (ADR-22), so it is empty after every restart until the first fetch
-lands, and dynamic-engine queries against unpinned chunks are `server_error` until then (FM-53).
+failure keeps previous schemas (FM-53). Polled while the assignment in force resolves chunks
+by type: from startup, since which type the network names is not yet known, and under
+`legacy`. Paused while a `split` assignment is in force — every chunk of one reads its schema by
+id instead (IB-44b) — and resumed, with an immediate refresh rather than a wait for the next
+period, when a `legacy` one applies again (ADR-23, revised). What was loaded before a pause
+stays in the registry, so a chunk held from an earlier assignment still resolves by type under
+`split` if its type had loaded by then. The manifest is read into memory and never stored
+(ADR-22), so it is empty after every restart until the first fetch lands, and dynamic-engine
+queries against unpinned chunks are `server_error` until then (FM-53).
 
 ### Split input bindings (`assignment_type: split`)
 
@@ -313,14 +316,14 @@ deliberately malformed bundles.
 A bundle is **merged** into `<data-dir>/schemas/<id>.yaml`, not installed as a unit: ids
 accumulate across bundles and nothing is removed by a merge. Only the current bundle is
 published, and no schema is addressable by id or hash, so a dropped schema is
-unrecoverable and every chunk on disk written with it becomes unreadable. Schema ids are
-immutable; republishing an id with different contents refuses the update (FM-53b) rather than
-changing the meaning of existing chunks. Merging per file makes an interrupted merge a
-smaller store rather than a false one, and the store is adopted at startup, so schemas
-already held answer queries before any download. A stored file that won't read is
-*removed* at startup rather than skipped: it names no meaning any chunk can be served
-with, and while it sits there it is neither absent nor equal, so it reads as a
-republished id and refuses every bundle carrying it.
+unrecoverable and every chunk on disk written with it becomes unreadable. The bundle in force
+is the meaning of its ids: an id it republishes with different contents replaces the stored
+copy and the schema queries read, so chunks written under that id are read with the republished
+meaning from then on; an identical file is left where it is. Merging per file makes an
+interrupted merge a smaller store rather than a false one, and the store is adopted at startup,
+so schemas already held answer queries before any download. A stored file that won't read is
+*removed* at startup rather than skipped: it names no meaning any chunk can be served with,
+and the next bundle carrying the id installs it afresh.
 
 Coverage is judged against the ids of the bundle in force, never against the accumulated
 store (ADR-21): what the worker can *serve* and what may *admit an assignment* are

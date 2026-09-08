@@ -767,6 +767,7 @@ async fn load_dir(
     )
 }
 
+/// Ids the store lacks or holds with different contents; a republished id replaces the stored copy.
 async fn classify_cached(
     store: Utf8PathBuf,
     staged: Utf8PathBuf,
@@ -785,11 +786,8 @@ async fn classify_cached(
                 let cached = std::fs::read(&stored).map_err(BundleFault::transient)?;
                 let fresh = std::fs::read(staged.join(&name)).map_err(BundleFault::transient)?;
                 if cached != fresh {
-                    // An id names its contents for all time, so no re-fetch of this bundle can
-                    // produce anything but the bytes that already disagree with the store.
-                    return Err(BundleFault::permanent(anyhow::anyhow!(
-                        "schema {id} was republished with different contents"
-                    )));
+                    tracing::info!(%id, "Schema was republished with different contents; replacing it");
+                    missing.insert(id);
                 }
             }
             Ok(missing)
@@ -1088,55 +1086,25 @@ mod tests {
     #[tokio::test]
     async fn staging_faults_split_into_transient_and_permanent() {
         #[derive(Clone, Copy, Debug)]
-        enum Seed {
-            Nothing,
-            Installed,
-            OnDisk,
-        }
-        #[derive(Clone, Copy, Debug)]
         enum Fault {
             Unreachable,
             HashMismatch,
             NoEntries,
             Unparseable,
-            Republished,
         }
-        use {Fault::*, Seed::*};
+        use Fault::*;
 
         let client = reqwest::Client::new();
         let cases = [
-            (Unreachable, Nothing, false, "couldn't download"),
-            (HashMismatch, Nothing, false, "hash mismatch"),
-            (NoEntries, Nothing, true, "no <id>.yaml entries"),
-            (Unparseable, Nothing, true, "couldn't load"),
-            (
-                Republished,
-                Installed,
-                true,
-                "republished with different contents",
-            ),
-            (
-                Republished,
-                OnDisk,
-                true,
-                "republished with different contents",
-            ),
+            (Unreachable, false, "couldn't download"),
+            (HashMismatch, false, "hash mismatch"),
+            (NoEntries, true, "no <id>.yaml entries"),
+            (Unparseable, true, "couldn't load"),
         ];
 
-        for (fault, seed, permanent, fragment) in cases {
+        for (fault, permanent, fragment) in cases {
             let dir = tempfile::tempdir().unwrap();
-            if let OnDisk = seed {
-                std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
-            }
             let store = store(&dir);
-            let installed = match seed {
-                Installed => {
-                    let original = served_bundle(targz(&[("7.yaml", SCHEMA.as_bytes())])).await;
-                    store.ensure(&original, &client).await.unwrap();
-                    Some(original.hash)
-                }
-                Nothing | OnDisk => None,
-            };
             let bundle = match fault {
                 Unreachable => SchemaBundle {
                     hash: BundleHash::of(b"whatever"),
@@ -1150,10 +1118,6 @@ mod tests {
                 Unparseable => {
                     served_bundle(targz(&[("7.yaml", b"this is not a dataset description")])).await
                 }
-                Republished => {
-                    let changed = SCHEMA.replace("name: evm", "name: evm2");
-                    served_bundle(targz(&[("7.yaml", changed.as_bytes())])).await
-                }
             };
 
             let verdict = store.prepare_bundle(&bundle, &client).await.unwrap_err();
@@ -1163,31 +1127,60 @@ mod tests {
                 format!("{verdict:#}").contains(fragment),
                 "{fault:?}: {verdict:#}"
             );
-            assert_eq!(store.installed_hash(), installed, "{fault:?}/{seed:?}");
-            match seed {
-                Nothing => {
-                    assert!(store.get_by_id(SchemaId::new(7)).is_err(), "{fault:?}");
-                    assert!(stored(&dir).is_empty(), "{fault:?}: {:?}", stored(&dir));
-                }
-                Installed | OnDisk => {
-                    assert_eq!(
-                        store.get_by_id(SchemaId::new(7)).unwrap().name,
-                        "evm",
-                        "{seed:?}"
-                    );
-                    assert_eq!(stored(&dir), vec!["7.yaml"], "{seed:?}");
-                    assert_eq!(
-                        std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
-                        SCHEMA,
-                        "{seed:?}: the store is as it was"
-                    );
-                }
-            }
+            assert_eq!(store.installed_hash(), None, "{fault:?}");
+            assert!(store.get_by_id(SchemaId::new(7)).is_err(), "{fault:?}");
+            assert!(stored(&dir).is_empty(), "{fault:?}: {:?}", stored(&dir));
             assert!(
                 stored_all(&dir)
                     .iter()
                     .all(|name| !name.starts_with(TEMP_PREFIX)),
                 "{fault:?}: staging left behind: {:?}",
+                stored_all(&dir)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_republished_id_replaces_the_stored_schema() {
+        let client = reqwest::Client::new();
+        for seeded_by_bundle in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            if !seeded_by_bundle {
+                std::fs::write(dir.path().join("7.yaml"), SCHEMA).unwrap();
+            }
+            let store = store(&dir);
+            if seeded_by_bundle {
+                let original = served_bundle(targz(&[("7.yaml", SCHEMA.as_bytes())])).await;
+                store.ensure(&original, &client).await.unwrap();
+            }
+            assert_eq!(store.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+
+            let changed = SCHEMA.replace("name: evm", "name: evm2");
+            let republished = served_bundle(targz(&[
+                ("7.yaml", changed.as_bytes()),
+                ("9.yaml", SCHEMA.as_bytes()),
+            ]))
+            .await;
+            store.ensure(&republished, &client).await.unwrap();
+
+            assert_eq!(
+                store.get_by_id(SchemaId::new(7)).unwrap().name,
+                "evm2",
+                "seeded_by_bundle={seeded_by_bundle}: queries read the republished schema"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("7.yaml")).unwrap(),
+                changed,
+                "seeded_by_bundle={seeded_by_bundle}: the store holds the republished bytes"
+            );
+            assert!(store.get_by_id(SchemaId::new(9)).is_ok());
+            assert_eq!(store.installed_hash(), Some(republished.hash));
+            assert_eq!(stored(&dir), vec!["7.yaml", "9.yaml"]);
+            assert!(
+                stored_all(&dir)
+                    .iter()
+                    .all(|name| !name.starts_with(TEMP_PREFIX)),
+                "staging left behind: {:?}",
                 stored_all(&dir)
             );
         }
