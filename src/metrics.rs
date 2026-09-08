@@ -69,6 +69,7 @@ lazy_static::lazy_static! {
     pub static ref SCHEMA_BUNDLE_LOADED: Gauge = Default::default();
     pub static ref SCHEMA_BUNDLE_FAILURES: Counter = Default::default();
     pub static ref SCHEMA_BUNDLE_MISMATCHES: Counter = Default::default();
+    pub static ref SCHEMA_BUNDLE_SCHEMAS_SKIPPED: Counter = Default::default();
 
     static ref QUERY_EXECUTED: Family<QueryExecutedLabels, Counter> = Default::default();
     static ref QUERY_RESULT_SIZE: Histogram = Histogram::new(std::iter::empty());
@@ -192,6 +193,11 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "schema_bundle_failures",
         "Number of times a schema bundle failed to install",
         SCHEMA_BUNDLE_FAILURES.clone(),
+    );
+    registry.register(
+        "schema_bundle_schemas_skipped",
+        "Number of schemas dropped from a bundle because they could not be parsed",
+        SCHEMA_BUNDLE_SCHEMAS_SKIPPED.clone(),
     );
     registry.register(
         "schema_bundle_mismatches",

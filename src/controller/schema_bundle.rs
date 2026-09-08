@@ -719,6 +719,7 @@ async fn load_dir(
     joined(
         tokio::task::spawn_blocking(move || {
             let mut schemas = HashMap::new();
+            let mut skipped = Vec::new();
             // Reading back what was just staged is disk; what the yaml says is the bundle.
             for entry in std::fs::read_dir(&dir).map_err(BundleFault::transient)? {
                 let path = entry.map_err(BundleFault::transient)?.path();
@@ -732,18 +733,31 @@ async fn load_dir(
                 let yaml = std::fs::read_to_string(&path)
                     .with_context(|| format!("couldn't read schema {}", path.display()))
                     .map_err(BundleFault::transient)?;
-                let description = sqd_query_engine::metadata::parse_dataset_description(&yaml)
-                    .map_err(|e| {
-                        BundleFault::permanent(anyhow::anyhow!(
-                            "couldn't parse schema {}: {e:?}",
-                            path.display()
-                        ))
-                    })?;
-                schemas.insert(id, Arc::new(description));
+                // A schema is load-bearing only for the chunks that name it, and the assignment
+                // check downstream already refuses those. Failing the bundle instead would let
+                // one unreadable schema — a kind this worker holds no chunk of — stop it serving
+                // the datasets it does hold.
+                match sqd_query_engine::metadata::parse_dataset_description(&yaml) {
+                    Ok(description) => {
+                        schemas.insert(id, Arc::new(description));
+                    }
+                    Err(e) => {
+                        metrics::SCHEMA_BUNDLE_SCHEMAS_SKIPPED.inc();
+                        tracing::warn!(
+                            %id,
+                            error = ?e,
+                            "Dropping a schema the bundle carries but this engine can't parse",
+                        );
+                        skipped.push(format!("{id}: {e:?}"));
+                    }
+                }
             }
             if schemas.is_empty() {
+                // `unpack` has already refused a bundle with no `<id>.yaml` entries, so there
+                // were some and every one of them failed: nothing here can serve a query.
                 return Err(BundleFault::permanent(anyhow::anyhow!(
-                    "no schemas found in {dir}"
+                    "no schema in {dir} could be parsed: {}",
+                    skipped.join("; ")
                 )));
             }
             Ok(schemas)
@@ -791,6 +805,9 @@ pub(crate) mod test_support {
 name: evm
 tables:
   blocks:
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
     columns:
@@ -932,6 +949,65 @@ mod tests {
             .unwrap_err();
         assert!(!fault.is_permanent(), "a corrected url still rescues it");
         assert!(format!("{fault:#}").contains("zstd"), "{fault:#}");
+    }
+
+    /// A stale catalog for a kind this worker holds no chunk of used to stop it serving the
+    /// kinds it does hold: one parse fault was a verdict on the whole bundle.
+    #[tokio::test]
+    async fn one_unparseable_schema_leaves_the_rest_of_the_bundle_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = store(&dir);
+        let solana = SCHEMA.replace("name: evm", "name: solana");
+        let archive = targz(&[
+            ("7.yaml", SCHEMA.as_bytes()),
+            (
+                "9.yaml",
+                b"name: fuel\ntables:\n  blocks:\n    field_name: block\n",
+            ),
+            ("12.yaml", solana.as_bytes()),
+        ]);
+        let bundle = served_bundle(archive).await;
+
+        registry
+            .ensure(&bundle, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert_eq!(registry.get_by_id(SchemaId::new(7)).unwrap().name, "evm");
+        assert_eq!(
+            registry.get_by_id(SchemaId::new(12)).unwrap().name,
+            "solana"
+        );
+        assert!(registry.get_by_id(SchemaId::new(9)).is_err());
+
+        // The id the bundle carries but cannot serve is not one it offers, so an assignment
+        // whose chunks need it is refused rather than answered from a schema that never loaded.
+        assert_eq!(
+            *registry.bundle_ids(),
+            HashSet::from([SchemaId::new(7), SchemaId::new(12)]),
+        );
+        assert_eq!(stored(&dir), vec!["12.yaml", "7.yaml"]);
+        assert_eq!(registry.installed_hash(), Some(bundle.hash));
+    }
+
+    #[tokio::test]
+    async fn a_bundle_no_schema_of_which_parses_is_still_a_permanent_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = store(&dir);
+        let archive = targz(&[(
+            "9.yaml",
+            b"name: fuel\ntables:\n  blocks:\n    field_name: block\n",
+        )]);
+        let bundle = served_bundle(archive).await;
+
+        let fault = registry
+            .prepare_bundle(&bundle, &reqwest::Client::new())
+            .await
+            .unwrap_err();
+
+        assert!(fault.is_permanent(), "{fault:#?}");
+        assert!(format!("{:#}", fault.into_error()).contains("field_name"));
+        assert!(stored(&dir).is_empty());
     }
 
     #[tokio::test]
