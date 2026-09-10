@@ -208,7 +208,10 @@ by type: from startup, since which type the network names is not yet known, and 
 id instead (IB-44b) — and resumed, with an immediate refresh rather than a wait for the next
 period, when a `legacy` one applies again (ADR-23, revised). What was loaded before a pause
 stays in the registry, so a chunk held from an earlier assignment still resolves by type under
-`split` if its type had loaded by then. The manifest is read into memory and never stored
+`split` if its type had loaded by then. The assignment applier owns the refresh task: a successful
+split application cancels and joins it, including any in-flight HTTP request or retry wait; a
+successful legacy application starts it if absent. Refused or failed applications leave it alone.
+The manifest is read into memory and never stored
 (ADR-22), so it is empty after every restart until the first fetch lands, and dynamic-engine
 queries against unpinned chunks are `server_error` until then (FM-53).
 

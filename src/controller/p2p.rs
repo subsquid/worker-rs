@@ -38,7 +38,7 @@ use crate::{
 };
 
 use super::assignment_loop::AssignmentApplier;
-use super::experimental_engine;
+use super::experimental_engine::SchemaRefresh;
 use super::query_deps::{CuChecker, QueryRunner};
 use super::schema_bundle::SchemaManager;
 use super::worker::Worker;
@@ -94,7 +94,7 @@ pub struct P2PController<EventStream> {
     keypair: Keypair,
     assignment_url: String,
     assignment_type: Option<AssignmentType>,
-    applier: AssignmentApplier,
+    schemas: SchemaManager,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
     queries_tx: mpsc::Sender<AdmittedQuery>,
@@ -135,14 +135,6 @@ pub async fn create_p2p_controller(
     let (log_requests_tx, log_requests_rx) = mpsc::channel(LOG_REQUESTS_QUEUE_SIZE);
 
     let worker = Arc::new(worker);
-    let applier = AssignmentApplier::new(
-        Arc::clone(&worker),
-        schemas,
-        keypair.clone(),
-        super::assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id),
-        args.assignment_check_interval,
-    );
-
     Ok(P2PController {
         worker,
         worker_status: RwLock::new(worker_status),
@@ -157,7 +149,7 @@ pub async fn create_p2p_controller(
         keypair,
         assignment_url: args.assignment_url,
         assignment_type: args.assignment_source,
-        applier,
+        schemas,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
         queries_tx,
@@ -197,17 +189,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         start_loop(s, "sql_queries", |t| self.run_sql_queries_loop(t));
         start_loop(s, "assignments", |t| {
             self.run_assignments_loop(t, self.assignment_check_interval)
-        });
-        // Paused while a split assignment is in force: its chunks pin schemas by id (IB-44).
-        start_loop(s, "query_schemas", |t| {
-            experimental_engine::run_schemas_refresh_loop(
-                self.worker.query_schemas(),
-                self.query_schemas_url.clone(),
-                self.query_schemas_refresh_interval,
-                self.worker_id,
-                self.applier.type_schemas_wanted(),
-                t,
-            )
         });
         start_loop(s, "logs", |t| self.run_logs_loop(t));
         start_loop(s, "logs_cleanup", |t| {
@@ -296,7 +277,23 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             self.worker_id,
             self.assignment_type,
         );
-        self.applier.run(updates, cancellation_token).await
+        let type_schemas = SchemaRefresh::new(
+            self.worker.query_schemas(),
+            self.query_schemas_url.clone(),
+            self.query_schemas_refresh_interval,
+            self.worker_id,
+            cancellation_token.clone(),
+        );
+        AssignmentApplier::new(
+            Arc::clone(&self.worker),
+            self.schemas.clone(),
+            self.keypair.clone(),
+            super::assignments::new_reqwest_client(self.assignment_fetch_timeout, self.worker_id),
+            assignment_check_interval,
+            type_schemas,
+        )
+        .run(updates, cancellation_token)
+        .await
     }
 
     async fn run_logs_loop(&self, cancellation_token: CancellationToken) {

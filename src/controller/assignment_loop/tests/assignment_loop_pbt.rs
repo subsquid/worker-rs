@@ -50,7 +50,7 @@ proptest! {
 }
 
 async fn check_pair_history(history: Vec<PublishedPair>) {
-    let f = fixture().await;
+    let mut f = fixture().await;
     let stranger = Keypair::generate_ed25519().public().to_peer_id();
     let mut expected_assignment = None;
     let mut expected_bundle = None;

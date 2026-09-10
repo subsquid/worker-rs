@@ -20,7 +20,6 @@ use camino::Utf8PathBuf;
 use futures::StreamExt;
 use sqd_messages::{query_error, Query, QueryExecuted, QueryLogs};
 use sqd_network_transport::{protocol, Keypair, PeerId};
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use sqd_assignments::AssignmentType;
@@ -28,9 +27,9 @@ use sqd_worker::cli::Args;
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
 use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
-use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
+use sqd_worker::controller::experimental_engine::SchemaRefresh;
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::{SchemaManager, SchemaRegistry};
+use sqd_worker::controller::schema_bundle::SchemaManager;
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::manager::StateManager;
@@ -218,6 +217,14 @@ impl Harness {
             .await
             .expect("log store opens");
 
+        let shutdown = CancellationToken::new();
+        let type_schemas = SchemaRefresh::new(
+            schemas.registry(),
+            schema_stub.url(SCHEMA_MANIFEST_PATH),
+            Duration::from_secs(3600),
+            worker_id,
+            shutdown.clone(),
+        );
         let assignment_client =
             assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
         // Exercise the production bundle-before-assignment ordering (ADR-21).
@@ -227,20 +234,10 @@ impl Harness {
             keypair.clone(),
             assignment_client.clone(),
             Duration::from_millis(200),
+            type_schemas,
         );
 
-        let shutdown = CancellationToken::new();
-        spawn_subsystems(
-            &worker,
-            &allocations,
-            (
-                schemas.registry(),
-                schema_stub.url(SCHEMA_MANIFEST_PATH),
-                applier.type_schemas_wanted(),
-            ),
-            worker_id,
-            shutdown.clone(),
-        );
+        spawn_subsystems(&worker, &allocations, shutdown.clone());
 
         let assignment_stream = Box::pin(assignments::new_assignments_stream(
             scheduler.network_state_url(),
@@ -562,8 +559,6 @@ impl Drop for Harness {
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    cdn_schemas: (Arc<SchemaRegistry>, String, watch::Receiver<bool>),
-    worker_id: PeerId,
     shutdown: CancellationToken,
 ) {
     let state_worker = worker.clone();
@@ -573,19 +568,6 @@ fn spawn_subsystems(
     let alloc = allocations.clone();
     let alloc_token = shutdown.clone();
     tokio::spawn(async move { alloc.run(alloc_token).await });
-
-    let (registry, manifest_url, type_schemas_wanted) = cdn_schemas;
-    tokio::spawn(async move {
-        run_schemas_refresh_loop(
-            registry,
-            manifest_url,
-            Duration::from_secs(3600),
-            worker_id,
-            type_schemas_wanted,
-            shutdown,
-        )
-        .await
-    });
 }
 
 fn build_args(

@@ -8,12 +8,12 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use sqd_assignments::AssignmentType;
 use sqd_network_transport::Keypair;
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tower::retry::backoff::{Backoff, ExponentialBackoff, ExponentialBackoffMaker, MakeBackoff};
 use tracing::{debug, info, warn, Instrument};
 
 use super::assignments::{self, AssignmentUpdate, NetworkPair};
+use super::experimental_engine::SchemaRefresh;
 use super::schema_bundle::{BundleFault, PreparedSchemaUpdate, SchemaManager};
 use super::worker::Worker;
 use crate::metrics;
@@ -43,7 +43,7 @@ pub struct AssignmentApplier {
     keypair: Keypair,
     client: reqwest::Client,
     retry_cap: Duration,
-    type_schemas_wanted: watch::Sender<bool>,
+    type_schemas: SchemaRefresh,
 }
 
 impl AssignmentApplier {
@@ -53,6 +53,7 @@ impl AssignmentApplier {
         keypair: Keypair,
         client: reqwest::Client,
         retry_cap: Duration,
+        type_schemas: SchemaRefresh,
     ) -> Self {
         Self {
             worker,
@@ -60,18 +61,12 @@ impl AssignmentApplier {
             keypair,
             client,
             retry_cap,
-            type_schemas_wanted: watch::channel(true).0,
+            type_schemas,
         }
     }
 
-    /// Whether the applied assignment resolves chunk schemas by dataset type: true until a split
-    /// assignment applies, true again once a legacy one does.
-    pub fn type_schemas_wanted(&self) -> watch::Receiver<bool> {
-        self.type_schemas_wanted.subscribe()
-    }
-
     pub async fn run(
-        &self,
+        mut self,
         updates: impl Stream<Item = AssignmentUpdate>,
         cancellation_token: CancellationToken,
     ) {
@@ -83,19 +78,25 @@ impl AssignmentApplier {
         let mut intake = Intake::new(self.retry_cap);
 
         loop {
-            let event = match &intake.in_flight {
-                InFlight::Idle => match intake.pending.take() {
-                    Some(update) => Event::Apply(update),
-                    None => announcement(&mut updates, &cancellation_token).await,
-                },
-                InFlight::Stalled(_) if intake.pending.is_some() => Event::SkipStalled,
-                InFlight::Stalled(_) => announcement(&mut updates, &cancellation_token).await,
-                InFlight::Settling(id) => tokio::select! {
-                    update = updates.next() => update.map_or(Event::Stop, Event::Announced),
-                    settled = self.worker.wait_until_assignment_settled(id, cancellation_token.clone()) => {
-                        settled.map_or(Event::Stop, Event::Settled)
-                    }
-                },
+            let next_event = async {
+                match &intake.in_flight {
+                    InFlight::Idle => match intake.pending.take() {
+                        Some(update) => Event::Apply(update),
+                        None => announcement(&mut updates, &cancellation_token).await,
+                    },
+                    InFlight::Stalled(_) if intake.pending.is_some() => Event::SkipStalled,
+                    InFlight::Stalled(_) => announcement(&mut updates, &cancellation_token).await,
+                    InFlight::Settling(id) => tokio::select! {
+                        update = updates.next() => update.map_or(Event::Stop, Event::Announced),
+                        settled = self.worker.wait_until_assignment_settled(id, cancellation_token.clone()) => {
+                            settled.map_or(Event::Stop, Event::Settled)
+                        }
+                    },
+                }
+            };
+            let event = tokio::select! {
+                _ = self.type_schemas.wait_until_stopped() => break,
+                event = next_event => event,
             };
             match event {
                 Event::Stop => break,
@@ -112,11 +113,12 @@ impl AssignmentApplier {
                 Event::SkipStalled => intake.skip_stalled(),
             }
         }
+        self.type_schemas.stop().await;
         info!("Assignment processing task finished");
     }
 
     async fn apply_next(
-        &self,
+        &mut self,
         update: AssignmentUpdate,
         intake: &mut Intake,
         updates: &mut (impl Stream<Item = AssignmentUpdate> + Unpin),
@@ -149,7 +151,7 @@ impl AssignmentApplier {
 
     /// Downloads the pair, validates the assignment against the bundle, installs the schemas,
     /// and registers the assignment — in that order (ADR-21).
-    pub async fn apply(&self, update: &AssignmentUpdate) -> ApplyOutcome {
+    pub async fn apply(&mut self, update: &AssignmentUpdate) -> ApplyOutcome {
         debug!(assignment_id = %update.id, "Downloading assignment");
         let (document, bundle) = match self.download(update).await {
             Ok(fetched) => fetched,
@@ -169,12 +171,10 @@ impl AssignmentApplier {
             }
         }
         self.register(update, index).await;
-        self.type_schemas_wanted.send_if_modified(|wanted| {
-            let now = update.assignment_type == AssignmentType::Legacy;
-            let changed = *wanted != now;
-            *wanted = now;
-            changed
-        });
+        match update.assignment_type {
+            AssignmentType::Legacy => self.type_schemas.start(),
+            AssignmentType::Split => self.type_schemas.stop().await,
+        }
         ApplyOutcome::Applied
     }
 
@@ -474,7 +474,7 @@ mod tests {
     mod pbt;
 
     struct Fixture {
-        applier: Arc<AssignmentApplier>,
+        applier: AssignmentApplier,
         worker: Arc<Worker>,
         schemas: SchemaManager,
         peer_id: PeerId,
@@ -503,20 +503,29 @@ mod tests {
         .unwrap();
         let schemas = SchemaManager::open(root.join("schemas"));
         let worker = Arc::new(Worker::new(state_manager, schemas.registry(), 1));
-        let applier = Arc::new(AssignmentApplier::new(
+        let stub = TestServer::start().await;
+        let type_schemas = SchemaRefresh::new(
+            schemas.registry(),
+            stub.serve("/manifest.yaml", b"schemas: {}\n".to_vec(), 0),
+            Duration::from_secs(3600),
+            peer_id,
+            CancellationToken::new(),
+        );
+        let applier = AssignmentApplier::new(
             Arc::clone(&worker),
             schemas.clone(),
             keypair,
             assignments::new_reqwest_client(Duration::from_secs(5), peer_id),
             // Caps the retry backoff, and with it the base, in test time.
             Duration::from_millis(40),
-        ));
+            type_schemas,
+        );
         Fixture {
             applier,
             worker,
             schemas,
             peer_id,
-            stub: TestServer::start().await,
+            stub,
             _dir: dir,
         }
     }
@@ -618,11 +627,10 @@ mod tests {
     /// Drives the real loop over a fixed set of updates, then leaves it waiting like production
     /// (the network never closes the stream) until the returned token is cancelled.
     fn run_loop(
-        applier: &Arc<AssignmentApplier>,
+        applier: AssignmentApplier,
         updates: Vec<AssignmentUpdate>,
     ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
         let token = CancellationToken::new();
-        let applier = Arc::clone(applier);
         let stream = futures::stream::iter(updates).chain(futures::stream::pending());
         let running = tokio::spawn({
             let token = token.clone();
@@ -633,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_installs_its_schemas_and_registers() {
-        let f = fixture().await;
+        let mut f = fixture().await;
         let bundle = bundle(&f.stub);
         let document = f
             .stub
@@ -655,52 +663,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_applied_pair_decides_whether_type_schemas_are_wanted() {
-        let f = fixture().await;
-        let wanted = f.applier.type_schemas_wanted();
-        assert!(*wanted.borrow(), "by type until the network says otherwise");
+    async fn only_applied_assignments_change_the_cdn_task() {
+        async fn await_fetches(stub: &TestServer, expected: usize) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while stub.hits("/manifest.yaml") < expected {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .expect("CDN refresh starts immediately, not after the one-hour interval");
+            assert_eq!(stub.hits("/manifest.yaml"), expected);
+        }
 
+        let mut f = fixture().await;
+        await_fetches(&f.stub, 1).await;
         let bundle = bundle(&f.stub);
         let split = f
             .stub
             .serve("/split.fb.gz", gzip(&worker_assignment(f.peer_id)), 0);
-        let outcome = f.applier.apply(&update("split", split, bundle)).await;
-        assert_eq!(outcome, ApplyOutcome::Applied);
-        assert!(
-            !*wanted.borrow(),
-            "a split assignment pins every chunk by id"
-        );
-
         let legacy = f
             .stub
             .serve("/legacy.fb.gz", gzip(&legacy_assignment(f.peer_id)), 0);
-        let outcome = f.applier.apply(&legacy_update("legacy", legacy)).await;
-        assert_eq!(outcome, ApplyOutcome::Applied);
-        assert!(
-            *wanted.borrow(),
-            "a legacy assignment resolves by type again"
+        let invalid = f.stub.serve("/invalid.fb.gz", gzip(b"invalid"), 0);
+
+        assert_eq!(
+            f.applier
+                .apply(&update("split", split.clone(), bundle.clone()))
+                .await,
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            f.applier
+                .apply(&legacy_update("refused", invalid.clone()))
+                .await,
+            ApplyOutcome::Refused
+        );
+        assert_eq!(
+            f.applier
+                .apply(&legacy_update("failed", f.stub.url("/missing.fb.gz")))
+                .await,
+            ApplyOutcome::Failed
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            f.stub.hits("/manifest.yaml"),
+            1,
+            "unsuccessful legacy updates must not restart the task"
         );
 
-        let unusable = f
-            .stub
-            .serve("/unusable.fb.gz", gzip(b"not a worker assignment"), 0);
-        let empty_bundle = f.stub.serve(
-            "/empty.tar.gz",
-            targz(&[("readme.txt", b"no schemas here")]),
-            0,
+        assert_eq!(
+            f.applier
+                .apply(&legacy_update("legacy", legacy.clone()))
+                .await,
+            ApplyOutcome::Applied
         );
-        let refused = update(
-            "refused",
-            unusable,
-            (
-                BundleHash::of(&targz(&[("readme.txt", b"no schemas here")])),
-                empty_bundle,
-            ),
+        await_fetches(&f.stub, 2).await;
+        assert_eq!(
+            f.applier
+                .apply(&legacy_update("legacy-again", legacy.clone()))
+                .await,
+            ApplyOutcome::Applied
         );
-        assert_eq!(f.applier.apply(&refused).await, ApplyOutcome::Refused);
-        assert!(
-            *wanted.borrow(),
-            "a refused pair leaves the legacy assignment, and its resolution, in force"
+        assert_eq!(
+            f.applier
+                .apply(&update("refused-split", invalid, bundle.clone()))
+                .await,
+            ApplyOutcome::Refused
+        );
+        f.schemas.registry().fail_next_install();
+        assert_eq!(
+            f.applier
+                .apply(&update("failed-split", split.clone(), bundle.clone()))
+                .await,
+            ApplyOutcome::Failed
+        );
+        assert_eq!(
+            f.applier
+                .apply(&legacy_update("legacy-after-fault", legacy))
+                .await,
+            ApplyOutcome::Applied
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            f.stub.hits("/manifest.yaml"),
+            2,
+            "failed split updates must leave the task running for the next legacy update"
+        );
+
+        assert_eq!(
+            f.applier.apply(&update("split-again", split, bundle)).await,
+            ApplyOutcome::Applied
         );
     }
 
@@ -738,7 +790,7 @@ mod tests {
         ];
 
         for (case, document, unusable_bundle) in cases {
-            let f = fixture().await;
+            let mut f = fixture().await;
             let good_bundle = bundle(&f.stub);
             let bad_bundle = unusable_bundle.map(|archive| {
                 (
@@ -769,7 +821,7 @@ mod tests {
                 "{case}"
             );
 
-            let (token, running) = run_loop(&f.applier, vec![bad, update("a2", mine, good_bundle)]);
+            let (token, running) = run_loop(f.applier, vec![bad, update("a2", mine, good_bundle)]);
             await_registered(&f.worker, "a2").await;
             token.cancel();
             running.await.unwrap();
@@ -794,7 +846,7 @@ mod tests {
     /// would drop that correction. It has to stay retryable.
     #[tokio::test]
     async fn a_bundle_whose_hash_does_not_match_is_retried_not_refused() {
-        let f = fixture().await;
+        let mut f = fixture().await;
         let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
         let mislabelled = (
             BundleHash::of(b"not what this url serves"),
@@ -827,7 +879,7 @@ mod tests {
         }
 
         for fails in [Fails::Document, Fails::Bundle, Fails::Activation] {
-            let f = fixture().await;
+            let mut f = fixture().await;
             let archive = targz(&[("7.yaml", SCHEMA.as_bytes())]);
             let bundle = (
                 BundleHash::of(&archive),
@@ -847,7 +899,7 @@ mod tests {
                 assert!(f.schemas.registry().installed_hash().is_none());
             }
 
-            let (token, running) = run_loop(&f.applier, vec![update]);
+            let (token, running) = run_loop(f.applier, vec![update]);
             await_registered(&f.worker, "a1").await;
             token.cancel();
             running.await.unwrap();
@@ -923,7 +975,7 @@ mod tests {
                 .serve(rescue_path, gzip(&worker_assignment(f.peer_id)), 0);
 
             let (token, running) = run_loop(
-                &f.applier,
+                f.applier,
                 vec![
                     update(failing_id, failing_url, bundle.clone()),
                     update(rescue_id, rescue_url, bundle),
@@ -953,7 +1005,7 @@ mod tests {
         let corrected_bundle = bundle(&f.stub);
 
         let (token, running) = run_loop(
-            &f.applier,
+            f.applier,
             vec![
                 update("a1", document.clone(), wrong_bundle),
                 update("a1", document, corrected_bundle),
@@ -984,7 +1036,7 @@ mod tests {
         let x_again = f.stub.serve("/x-again.fb.gz", document, 0);
 
         let (token, running) = run_loop(
-            &f.applier,
+            f.applier,
             vec![
                 legacy_update("x", x),
                 legacy_update("y", y),
@@ -1033,7 +1085,7 @@ mod tests {
     /// that pair is no longer published.
     #[tokio::test]
     async fn the_queue_holds_the_newest_outstanding_announcement() {
-        let f = fixture().await;
+        let mut f = fixture().await;
         let bundle = bundle(&f.stub);
         let at = |id: &str, path: &str| update(id, f.stub.url(path), bundle.clone());
         let nothing_applied = NetworkPair::default();
@@ -1095,7 +1147,7 @@ mod tests {
                 .enumerate()
                 .map(|(n, url)| update(&format!("y{}", n + 1), url.clone(), bundle.clone())),
         );
-        let (token, running) = run_loop(&f.applier, updates);
+        let (token, running) = run_loop(f.applier, updates);
         await_registered(&f.worker, "x").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         token.cancel();

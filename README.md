@@ -88,7 +88,9 @@ alertable rather than silent. This changes five things:
   `--query-schemas-url`, which the assignment's own chunks no longer consult. That manifest is
   polled only while the assignment in force resolves chunks by type — from startup until a split
   assignment applies, and again whenever a legacy one does — and paused while a split one is in
-  force; what it loaded stays available across a pause. Unlike the bundle it is never stored, so
+  force. The assignment applier owns the refresh task: switching to split cancels and waits for
+  any in-flight refresh; switching back to legacy starts a new task and refreshes immediately.
+  What it loaded stays available across a pause. Unlike the bundle it is never stored, so
   it is empty after a restart until the first fetch lands. Bundles are *merged* into
   `<data-dir>/schemas/<id>.yaml` rather than replacing what is there: chunks on disk outlive the
   bundle that described them, only the current bundle is published, and no schema can be fetched
