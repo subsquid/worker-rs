@@ -27,9 +27,9 @@ use sqd_worker::cli::Args;
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
 use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
 use sqd_worker::controller::assignments;
-use sqd_worker::controller::experimental_engine::run_schemas_refresh_loop;
+use sqd_worker::controller::experimental_engine::SchemaRefresh;
 use sqd_worker::controller::p2p;
-use sqd_worker::controller::schema_bundle::{SchemaManager, SchemaRegistry};
+use sqd_worker::controller::schema_bundle::SchemaManager;
 use sqd_worker::controller::worker::{OutputFormat, QueryType, Worker};
 use sqd_worker::logs_storage::LogsStorage;
 use sqd_worker::storage::manager::StateManager;
@@ -218,13 +218,26 @@ impl Harness {
             .expect("log store opens");
 
         let shutdown = CancellationToken::new();
-        spawn_subsystems(
-            &worker,
-            &allocations,
-            (schemas.registry(), schema_stub.url(SCHEMA_MANIFEST_PATH)),
+        let type_schemas = SchemaRefresh::new(
+            schemas.registry(),
+            schema_stub.url(SCHEMA_MANIFEST_PATH),
+            Duration::from_secs(3600),
             worker_id,
             shutdown.clone(),
         );
+        let assignment_client =
+            assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
+        // Exercise the production bundle-before-assignment ordering (ADR-21).
+        let applier = AssignmentApplier::new(
+            Arc::clone(&worker),
+            schemas.clone(),
+            keypair.clone(),
+            assignment_client.clone(),
+            Duration::from_millis(200),
+            type_schemas,
+        );
+
+        spawn_subsystems(&worker, &allocations, shutdown.clone());
 
         let assignment_stream = Box::pin(assignments::new_assignments_stream(
             scheduler.network_state_url(),
@@ -236,17 +249,6 @@ impl Harness {
             // Unpinned: what the state names is what the worker reads.
             None,
         ));
-        let assignment_client =
-            assignments::new_reqwest_client(args.assignment_fetch_timeout, worker_id);
-        // Exercise the production bundle-before-assignment ordering (ADR-21).
-        let applier = AssignmentApplier::new(
-            Arc::clone(&worker),
-            schemas.clone(),
-            keypair.clone(),
-            assignment_client.clone(),
-            Duration::from_millis(200),
-        );
-
         let harness = Self {
             seed,
             scheduler,
@@ -557,8 +559,6 @@ impl Drop for Harness {
 fn spawn_subsystems(
     worker: &Arc<Worker>,
     allocations: &Arc<AllocationsChecker>,
-    cdn_schemas: (Arc<SchemaRegistry>, String),
-    worker_id: PeerId,
     shutdown: CancellationToken,
 ) {
     let state_worker = worker.clone();
@@ -568,18 +568,6 @@ fn spawn_subsystems(
     let alloc = allocations.clone();
     let alloc_token = shutdown.clone();
     tokio::spawn(async move { alloc.run(alloc_token).await });
-
-    let (registry, manifest_url) = cdn_schemas;
-    tokio::spawn(async move {
-        run_schemas_refresh_loop(
-            registry,
-            manifest_url,
-            Duration::from_secs(3600),
-            worker_id,
-            shutdown,
-        )
-        .await
-    });
 }
 
 fn build_args(

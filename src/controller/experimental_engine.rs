@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context};
 use reqwest::Url;
 use sqd_network_transport::PeerId;
 use sqd_query_engine::metadata::DatasetDescription;
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tower::retry::backoff::{Backoff, MakeBackoff};
@@ -27,7 +28,83 @@ struct Manifest {
     schemas: HashMap<String, String>,
 }
 
-pub async fn run_schemas_refresh_loop(
+/// Owns the CDN task. Assignment application stops it under split and starts it under legacy.
+/// Dropping the owner aborts any remaining task, including during unwinding.
+pub struct SchemaRefresh {
+    registry: Arc<SchemaRegistry>,
+    manifest_url: String,
+    refresh_interval: Duration,
+    peer_id: PeerId,
+    shutdown: CancellationToken,
+    running: Option<CancellationToken>,
+    tasks: JoinSet<()>,
+}
+
+impl SchemaRefresh {
+    pub fn new(
+        registry: Arc<SchemaRegistry>,
+        manifest_url: String,
+        refresh_interval: Duration,
+        peer_id: PeerId,
+        shutdown: CancellationToken,
+    ) -> Self {
+        let mut refresh = Self {
+            registry,
+            manifest_url,
+            refresh_interval,
+            peer_id,
+            shutdown,
+            running: None,
+            tasks: JoinSet::new(),
+        };
+        refresh.start();
+        refresh
+    }
+
+    pub fn start(&mut self) {
+        if self.running.is_some() || self.shutdown.is_cancelled() {
+            return;
+        }
+        let token = self.shutdown.child_token();
+        self.tasks.spawn(run_schemas_refresh_loop(
+            Arc::clone(&self.registry),
+            self.manifest_url.clone(),
+            self.refresh_interval,
+            self.peer_id,
+            token.clone(),
+        ));
+        self.running = Some(token);
+    }
+
+    /// Cancellation interrupts HTTP requests and retry waits; returning guarantees the task exited.
+    pub async fn stop(&mut self) {
+        if let Some(token) = self.running.take() {
+            token.cancel();
+        }
+        while let Some(result) = self.tasks.join_next().await {
+            result.expect("query schemas refresh task panicked");
+        }
+    }
+
+    /// Keep task failures in the assignment subsystem's fail-fast supervision tree.
+    pub async fn wait_until_stopped(&mut self) {
+        if self.tasks.is_empty() {
+            std::future::pending::<()>().await;
+        }
+        self.tasks
+            .join_next()
+            .await
+            .expect("query schemas refresh task exists")
+            .expect("query schemas refresh task panicked");
+        assert!(
+            self.shutdown.is_cancelled(),
+            "query schemas refresh task exited unexpectedly"
+        );
+    }
+}
+
+/// Refreshes immediately, then periodically. Failed attempts retain loaded schemas and retry.
+async fn run_schemas_refresh_loop(
     registry: Arc<SchemaRegistry>,
     manifest_url: String,
     refresh_interval: Duration,
@@ -40,32 +117,26 @@ pub async fn run_schemas_refresh_loop(
     let mut last_manifest: Option<String> = None;
     let mut retry = backoff::exponential(Duration::from_secs(1), refresh_interval);
 
-    loop {
-        tokio::select! {
-            _ = timer.tick() => {}
-            _ = cancellation_token.cancelled() => break,
-        }
-        let mut backoff = retry.make_backoff();
+    // Dropping this future cancels the whole refresh, including the current HTTP request.
+    cancellation_token.run_until_cancelled(async {
         loop {
-            match refresh_schemas(&registry, &manifest_url, &client, &mut last_manifest).await {
-                Ok(true) => {
-                    tracing::info!("Loaded query schemas from {manifest_url}");
-                    break;
-                }
-                Ok(false) => break,
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "Failed to refresh query schemas; retrying");
-                    tokio::select! {
-                        _ = backoff.next_backoff() => {}
-                        _ = cancellation_token.cancelled() => break,
+            timer.tick().await;
+            let mut backoff = retry.make_backoff();
+            loop {
+                match refresh_schemas(&registry, &manifest_url, &client, &mut last_manifest).await {
+                    Ok(true) => {
+                        tracing::info!("Loaded query schemas from {manifest_url}");
+                        break;
+                    }
+                    Ok(false) => break,
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "Failed to refresh query schemas; retrying");
+                        backoff.next_backoff().await;
                     }
                 }
             }
         }
-        if cancellation_token.is_cancelled() {
-            break;
-        }
-    }
+    }).await;
     tracing::info!("Query schemas refresh task finished");
 }
 
@@ -534,6 +605,133 @@ tables:
         .await
         .unwrap_err();
         assert!(registry.get_by_type("evm").is_ok());
+    }
+
+    #[tokio::test]
+    async fn stopping_or_shutting_down_interrupts_http_and_preserves_loaded_schemas() {
+        use crate::controller::schema_bundle::test_support::SCHEMA;
+
+        for blocked_path in ["/manifest", "/evm.yaml"] {
+            for shutdown_requested in [false, true] {
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let app = axum::Router::new().fallback(axum::routing::get({
+                    let entered = entered.clone();
+                    move |uri: axum::http::Uri| {
+                        let entered = entered.clone();
+                        async move {
+                            if uri.path() == blocked_path {
+                                entered.notify_one();
+                                std::future::pending::<()>().await;
+                            }
+                            "schemas:\n  evm: /evm.yaml\n"
+                        }
+                    }
+                }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let server = tokio::spawn(axum::serve(listener, app).into_future());
+                let registry = Arc::new(SchemaRegistry::memory());
+                let schema = Arc::new(
+                    sqd_query_engine::metadata::parse_dataset_description(SCHEMA).unwrap(),
+                );
+                registry.replace_legacy(HashMap::from([("evm".to_owned(), schema.clone())]));
+                let shutdown = CancellationToken::new();
+                let mut refresh = SchemaRefresh::new(
+                    registry.clone(),
+                    format!("http://{addr}/manifest"),
+                    Duration::from_secs(3600),
+                    PeerId::random(),
+                    shutdown.clone(),
+                );
+                tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                    .await
+                    .unwrap();
+                if shutdown_requested {
+                    shutdown.cancel();
+                    tokio::time::timeout(Duration::from_secs(2), refresh.wait_until_stopped())
+                        .await
+                        .unwrap();
+                }
+                tokio::time::timeout(Duration::from_secs(2), refresh.stop())
+                    .await
+                    .expect("must not wait for the 60-second HTTP timeout");
+                assert!(refresh.tasks.is_empty());
+                assert!(Arc::ptr_eq(&registry.get_by_type("evm").unwrap(), &schema));
+                if shutdown_requested {
+                    refresh.start();
+                    assert!(refresh.tasks.is_empty(), "shutdown prevents restarting");
+                }
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restarting_refreshes_immediately_and_repeated_start_keeps_one_task() {
+        use crate::controller::test_support::TestServer;
+        let server = TestServer::start().await;
+        let url = server.serve("/manifest", b"schemas: {}\n".to_vec(), 0);
+        let registry = Arc::new(SchemaRegistry::memory());
+        let mut refresh = SchemaRefresh::new(
+            registry.clone(),
+            url,
+            Duration::from_secs(3600),
+            PeerId::random(),
+            CancellationToken::new(),
+        );
+        for expected in [1, 2] {
+            refresh.start();
+            assert_eq!(refresh.tasks.len(), 1);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while server.hits("/manifest") < expected {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .expect("refresh must not wait for the one-hour tick");
+            refresh.stop().await;
+            assert_eq!(server.hits("/manifest"), expected);
+            assert!(refresh.tasks.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_interrupts_retry_backoff() {
+        use crate::controller::test_support::TestServer;
+        let server = TestServer::start().await;
+        let registry = Arc::new(SchemaRegistry::memory());
+        let mut refresh = SchemaRefresh::new(
+            registry,
+            server.url("/unavailable"),
+            Duration::from_secs(3600),
+            PeerId::random(),
+            CancellationToken::new(),
+        );
+        // A second request establishes that the retry path has been exercised.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.hits("/unavailable") < 2 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_millis(200), refresh.stop())
+            .await
+            .expect("stop must not wait out the backoff");
+        assert!(refresh.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "query schemas refresh task panicked")]
+    async fn refresh_panics_are_observed_by_the_owner() {
+        let mut refresh = SchemaRefresh::new(
+            Arc::new(SchemaRegistry::memory()),
+            "unused".to_owned(),
+            Duration::ZERO,
+            PeerId::random(),
+            CancellationToken::new(),
+        );
+        refresh.wait_until_stopped().await;
     }
 
     #[test]

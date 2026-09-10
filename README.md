@@ -86,14 +86,18 @@ alertable rather than silent. This changes five things:
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
   `<schema_id>.yaml`, verified against its `sha256:` hash) rather than from
   `--query-schemas-url`, which the assignment's own chunks no longer consult. That manifest is
-  still polled under every assignment type: it answers for chunks the assignment in force does
-  not pin — held from an earlier one, or held before any applies — and unlike the bundle it is
-  never stored, so it is empty after a restart until the first fetch lands. Bundles are *merged*
-  into
+  polled only while the assignment in force resolves chunks by type — from startup until a split
+  assignment applies, and again whenever a legacy one does — and paused while a split one is in
+  force. The assignment applier owns the refresh task: switching to split cancels and waits for
+  any in-flight refresh; switching back to legacy starts a new task and refreshes immediately.
+  What it loaded stays available across a pause. Unlike the bundle it is never stored, so
+  it is empty after a restart until the first fetch lands. Bundles are *merged* into
   `<data-dir>/schemas/<id>.yaml` rather than replacing what is there: chunks on disk outlive the
   bundle that described them, only the current bundle is published, and no schema can be fetched
-  by id, so a schema dropped locally would strand data permanently. The store is read back at
-  startup, so a restart answers for the chunks it already holds without waiting for a download.
+  by id, so a schema dropped locally would strand data permanently. An id a bundle republishes
+  with different contents does replace the stored copy: the bundle in force is what its ids mean.
+  The store is read back at startup, so a restart answers for the chunks it already holds without
+  waiting for a download.
 - **An assignment is validated against its bundle.** The assignment is applied only if its
   accompanying bundle was fetched *and* carries every schema the assignment references; failing
   either, the previous assignment stays in force and no schemas from an invalid pair are installed. Schemas accumulated
