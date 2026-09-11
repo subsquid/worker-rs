@@ -14,6 +14,7 @@ use parquet::arrow::ArrowWriter;
 /// dynamic-engine queries. A cut-down `evm`: enough tables to exercise selection, field
 /// projection, weights (and so the RP-13 budget) and boundary emission.
 pub const SCHEMA_YAML: &str = r#"
+version: v2
 name: evm
 tables:
   blocks:

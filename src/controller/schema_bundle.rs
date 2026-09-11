@@ -800,6 +800,7 @@ async fn classify_cached(
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) const SCHEMA: &str = r#"
+version: v2
 name: evm
 tables:
   blocks:
@@ -1004,7 +1005,7 @@ mod tests {
             .unwrap_err();
 
         assert!(fault.is_permanent(), "{fault:#?}");
-        assert!(format!("{:#}", fault.into_error()).contains("field_name"));
+        assert!(format!("{:#}", fault.into_error()).contains("missing field `columns`"));
         assert!(stored(&dir).is_empty());
     }
 
