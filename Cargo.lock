@@ -7189,6 +7189,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqd-metadata"
+version = "0.1.0"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=419b99d#419b99d68eca9f6604b626140db3ec1c0d18e674"
+dependencies = [
+ "anyhow",
+ "indexmap 2.6.0",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "sqd-network-transport"
 version = "3.1.0"
 source = "git+https://github.com/subsquid/sqd-network.git?rev=f38fb09#f38fb093f0a7dc81798f7998b8942c953bb8cf5d"
@@ -7266,7 +7277,7 @@ dependencies = [
 [[package]]
 name = "sqd-query-engine"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=6df565a#6df565a5c31a30ac2edb1c2c4799ee85d7c08c5b"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=419b99d#419b99d68eca9f6604b626140db3ec1c0d18e674"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7282,13 +7293,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sqd-metadata",
  "tikv-jemallocator",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "sqd-worker"
-version = "2.16.0-rc.1"
+version = "2.16.0-rc.2"
 dependencies = [
  "anyhow",
  "arc-swap",

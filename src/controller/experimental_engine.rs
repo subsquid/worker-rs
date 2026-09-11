@@ -292,6 +292,7 @@ mod tests {
     use tempfile::TempDir;
 
     const TEST_SCHEMA: &str = r#"
+version: v2
 name: evm
 tables:
   blocks:
@@ -547,6 +548,7 @@ tables:
     #[tokio::test]
     async fn fetches_schemas_from_http_server() {
         const SCHEMA: &str = r#"
+version: v2
 name: evm
 tables:
   blocks:
