@@ -175,11 +175,13 @@ impl Args {
             match self.transport.rpc.network {
                 sqd_contract_client::Network::Mainnet => {
                     self.query_schemas_url =
-                        "https://cdn.subsquid.io/sqd-network/mainnet/query-schemas.yml".to_owned();
+                        "https://cdn.subsquid.io/sqd-network/mainnet/query-schemas-v2.yml"
+                            .to_owned();
                 }
                 sqd_contract_client::Network::Tethys => {
                     self.query_schemas_url =
-                        "https://cdn.subsquid.io/sqd-network/testnet/query-schemas.yml".to_owned();
+                        "https://cdn.subsquid.io/sqd-network/testnet/query-schemas-v2.yml"
+                            .to_owned();
                 }
             }
         }
