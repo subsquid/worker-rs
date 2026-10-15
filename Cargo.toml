@@ -76,7 +76,7 @@ sqd-network-transport = { git = "https://github.com/subsquid/sqd-network.git", r
 
 sqd-query = { git = "https://github.com/subsquid/data.git", rev = "aa62e79", features = ["parquet"] }
 sqd-polars = { git = "https://github.com/subsquid/data.git", rev = "aa62e79" }
-sqd-query-engine = { git = "https://github.com/subsquid/sqd-query-engine.git", rev = "419b99d" }
+sqd-query-engine = { git = "https://github.com/subsquid/sqd-query-engine.git", rev = "906f561" }
 
 sql_query_plan = {git = "https://github.com/subsquid/qplan.git", rev = "658f88f" }
 
