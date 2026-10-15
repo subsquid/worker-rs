@@ -70,8 +70,8 @@ pub struct Args {
     pub query_schemas_refresh_interval: Duration,
 
     /// Share of legacy-engine queries, in percent, that the new query engine
-    /// shadows: the chunk is answered again by both engines in the background
-    /// and the answers and timings compared. 0 starts no shadow threads.
+    /// shadows: a separate process answers the chunk again with both engines
+    /// and the answers and timings are compared. 0 turns the shadow off.
     #[clap(long, env, hide(true), default_value_t = 0.0, value_parser = parse_percent)]
     pub shadow_percent: f64,
 
@@ -84,10 +84,18 @@ pub struct Args {
     #[clap(long, env = "SHADOW_SLOW_MARGIN_MS", hide(true), value_parser = parse_millis, default_value = "50")]
     pub shadow_slow_margin: Duration,
 
-    /// Shadow runs at once, each on its own thread. A query that finds every
+    /// Shadow runs at once, each in its own process. A query that finds every
     /// one taken is not shadowed.
     #[clap(long, env, hide(true), default_value_t = 2)]
     pub shadow_max_in_flight: usize,
+
+    /// Threads of each shadow run, shared by both engines.
+    #[clap(long, env, hide(true), default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..))]
+    pub shadow_threads: u16,
+
+    /// A shadow run still going after this is killed and counted as crashed.
+    #[clap(long, env = "SHADOW_TIMEOUT_SEC", hide(true), value_parser = parse_seconds, default_value = "300")]
+    pub shadow_timeout: Duration,
 
     /// Shadow log lines for differences, failures and slow runs per 5 minutes,
     /// at most one per query shape; 0 turns them off.

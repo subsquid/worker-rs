@@ -1,9 +1,10 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 
 const EXCERPT_CHARS: usize = 300;
 
 /// Where two JSON-lines responses first disagree.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Difference {
     /// Zero-based line, which is one block.
     pub line: usize,

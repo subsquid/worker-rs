@@ -32,7 +32,7 @@ use sqd_worker::controller::schema_bundle::SchemaManager;
 use sqd_worker::controller::worker::Worker;
 use sqd_worker::http_server::Server as HttpServer;
 use sqd_worker::metrics;
-use sqd_worker::shadow::{Shadow, ShadowSettings};
+use sqd_worker::shadow::{self, Runner, Shadow, ShadowSettings};
 use sqd_worker::storage::manager::StateManager;
 
 #[global_allocator]
@@ -131,7 +131,10 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
             slow_ratio: args.shadow_slow_ratio,
             slow_margin: args.shadow_slow_margin,
             max_in_flight: args.shadow_max_in_flight,
+            threads: args.shadow_threads.into(),
+            timeout: args.shadow_timeout,
             log_limit: args.shadow_log_limit,
+            runner: Runner::current_exe()?,
         })?;
         tracing::info!(
             percent = args.shadow_percent,
@@ -167,6 +170,13 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == shadow::RUNNER_ARG)
+    {
+        return shadow::serve_runner();
+    }
+
     dotenv::dotenv().ok();
     let args = Args::parse();
 

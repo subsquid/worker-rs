@@ -57,6 +57,7 @@ pub enum ShadowOutcome {
     LegacyError,
     NewError,
     BothError,
+    Crashed,
     Skipped,
 }
 
@@ -68,6 +69,7 @@ impl ShadowOutcome {
             Self::LegacyError => "legacy_error",
             Self::NewError => "new_error",
             Self::BothError => "both_error",
+            Self::Crashed => "crashed",
             Self::Skipped => "skipped",
         }
     }
@@ -350,8 +352,8 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
     registry.register(
         "shadow_runs",
         "Shadowed queries run by both engines, by outcome: match, mismatch (values differ), \
-         legacy_error or new_error (only that engine failed), both_error, or skipped \
-         (every shadow slot was taken)",
+         legacy_error or new_error (only that engine failed), both_error, crashed (the \
+         runner process aborted or timed out), or skipped (every shadow slot was taken)",
         SHADOW_RUNS.clone(),
     );
     registry.register(
