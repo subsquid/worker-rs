@@ -7333,6 +7333,7 @@ dependencies = [
  "proptest",
  "prost 0.13.5",
  "rand 0.9.2",
+ "rayon",
  "regex",
  "reqwest 0.12.8",
  "scopeguard",

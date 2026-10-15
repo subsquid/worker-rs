@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -31,6 +32,7 @@ use sqd_worker::controller::schema_bundle::SchemaManager;
 use sqd_worker::controller::worker::Worker;
 use sqd_worker::http_server::Server as HttpServer;
 use sqd_worker::metrics;
+use sqd_worker::shadow::{Shadow, ShadowSettings};
 use sqd_worker::storage::manager::StateManager;
 
 #[global_allocator]
@@ -122,7 +124,21 @@ async fn run(mut args: Args) -> anyhow::Result<()> {
 
     // Both faces of one registry: the schemas a pair installs are the ones its chunks are
     // then queried against (ADR-21).
-    let worker = Worker::new(state_manager, schemas.registry(), args.parallel_queries);
+    let mut worker = Worker::new(state_manager, schemas.registry(), args.parallel_queries);
+    if args.shadow_percent > 0.0 {
+        let shadow = Shadow::new(ShadowSettings {
+            percent: args.shadow_percent,
+            slow_ratio: args.shadow_slow_ratio,
+            slow_margin: args.shadow_slow_margin,
+            max_in_flight: args.shadow_max_in_flight,
+            log_limit: args.shadow_log_limit,
+        })?;
+        tracing::info!(
+            percent = args.shadow_percent,
+            "Shadowing legacy-engine queries with the new query engine"
+        );
+        worker = worker.with_shadow(Arc::new(shadow));
+    }
 
     let controller = create_p2p_controller(worker, schemas, transport_builder, args_clone).await?;
     // Leaked to give the subsystem tasks `&'static` access; lives until process exit anyway

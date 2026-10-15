@@ -32,6 +32,7 @@ pub mod http_server;
 pub mod logs_storage;
 pub mod metrics;
 pub mod query;
+pub mod shadow;
 pub mod storage;
 pub mod types;
 pub mod util;

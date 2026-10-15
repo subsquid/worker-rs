@@ -69,6 +69,31 @@ pub struct Args {
     #[clap(long, env = "QUERY_SCHEMAS_REFRESH_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "3600")]
     pub query_schemas_refresh_interval: Duration,
 
+    /// Share of legacy-engine queries, in percent, that the new query engine
+    /// shadows: the chunk is answered again by both engines in the background
+    /// and the answers and timings compared. 0 starts no shadow threads.
+    #[clap(long, env, hide(true), default_value_t = 0.0, value_parser = parse_percent)]
+    pub shadow_percent: f64,
+
+    /// A shadow run is slow, and logged, when the new engine takes more than
+    /// this many times the legacy engine's time...
+    #[clap(long, env, hide(true), default_value_t = 2.0)]
+    pub shadow_slow_ratio: f64,
+
+    /// ...and at least this many milliseconds longer.
+    #[clap(long, env = "SHADOW_SLOW_MARGIN_MS", hide(true), value_parser = parse_millis, default_value = "50")]
+    pub shadow_slow_margin: Duration,
+
+    /// Shadow runs at once, each on its own thread. A query that finds every
+    /// one taken is not shadowed.
+    #[clap(long, env, hide(true), default_value_t = 2)]
+    pub shadow_max_in_flight: usize,
+
+    /// Shadow log lines for differences, failures and slow runs per 5 minutes,
+    /// at most one per query shape; 0 turns them off.
+    #[clap(long, env, hide(true), default_value_t = 20)]
+    pub shadow_log_limit: usize,
+
     #[clap(long, env = "NETWORK_POLLING_INTERVAL_SEC", hide(true), value_parser=parse_seconds, default_value = "30"
     )]
     pub network_polling_interval: Duration,
@@ -103,6 +128,19 @@ pub struct Args {
 
 fn parse_seconds(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(s.parse()?))
+}
+
+fn parse_millis(s: &str) -> Result<Duration> {
+    Ok(Duration::from_millis(s.parse()?))
+}
+
+fn parse_percent(value: &str) -> Result<f64> {
+    let percent: f64 = value.parse()?;
+    anyhow::ensure!(
+        (0.0..=100.0).contains(&percent),
+        "{percent} is not between 0 and 100"
+    );
+    Ok(percent)
 }
 
 fn parse_assignment_type(value: &str) -> Result<AssignmentType> {
@@ -225,6 +263,21 @@ mod tests {
         for refused in ["worker", "Legacy", ""] {
             assert!(
                 parse(&["--assignment-source", refused]).is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shadow_is_off_unless_a_share_between_0_and_100_is_given() {
+        assert_eq!(parse(&[]).unwrap().shadow_percent, 0.0);
+        assert_eq!(
+            parse(&["--shadow-percent", "2.5"]).unwrap().shadow_percent,
+            2.5
+        );
+        for refused in ["-1", "100.5", "NaN", "half"] {
+            assert!(
+                parse(&["--shadow-percent", refused]).is_err(),
                 "{refused:?}"
             );
         }
