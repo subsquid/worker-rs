@@ -7191,7 +7191,7 @@ dependencies = [
 [[package]]
 name = "sqd-metadata"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=ff955c0#ff955c0121bf1944a4241353aec6af98768d7a1d"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=f961125#f961125fd43fc3176e08d5ad88dc58406245747f"
 dependencies = [
  "anyhow",
  "indexmap 2.6.0",
@@ -7277,7 +7277,7 @@ dependencies = [
 [[package]]
 name = "sqd-query-engine"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=ff955c0#ff955c0121bf1944a4241353aec6af98768d7a1d"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=f961125#f961125fd43fc3176e08d5ad88dc58406245747f"
 dependencies = [
  "anyhow",
  "arrow",
