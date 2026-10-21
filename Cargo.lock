@@ -7191,7 +7191,7 @@ dependencies = [
 [[package]]
 name = "sqd-metadata"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=419b99d#419b99d68eca9f6604b626140db3ec1c0d18e674"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=155460e#155460e0e74f6699c9bc856d4526bab027cc5591"
 dependencies = [
  "anyhow",
  "indexmap 2.6.0",
@@ -7277,7 +7277,7 @@ dependencies = [
 [[package]]
 name = "sqd-query-engine"
 version = "0.1.0"
-source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=419b99d#419b99d68eca9f6604b626140db3ec1c0d18e674"
+source = "git+https://github.com/subsquid/sqd-query-engine.git?rev=155460e#155460e0e74f6699c9bc856d4526bab027cc5591"
 dependencies = [
  "anyhow",
  "arrow",
@@ -7323,6 +7323,7 @@ dependencies = [
  "hmac",
  "itertools 0.12.1",
  "lazy_static",
+ "libc",
  "mimalloc",
  "num-rational",
  "parking_lot",

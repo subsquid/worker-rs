@@ -1,7 +1,10 @@
 use std::fmt::Write;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use prometheus_client::encoding::{EncodeLabelSet, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::histogram::exponential_buckets;
 use prometheus_client::metrics::{family::Family, gauge::Gauge, histogram::Histogram};
 use prometheus_client::registry::{Registry, Unit};
 
@@ -47,6 +50,50 @@ struct UnresolvedLabels {
     reason: &'static str,
 }
 
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum ShadowOutcome {
+    Match,
+    Mismatch,
+    LegacyError,
+    NewError,
+    BothError,
+    Crashed,
+    Skipped,
+}
+
+impl ShadowOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Mismatch => "mismatch",
+            Self::LegacyError => "legacy_error",
+            Self::NewError => "new_error",
+            Self::BothError => "both_error",
+            Self::Crashed => "crashed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ShadowKindLabels {
+    kind: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ShadowRunLabels {
+    kind: String,
+    outcome: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ShadowEngineLabels {
+    kind: String,
+    engine: &'static str,
+}
+
+type HistogramFamily<L> = Family<L, Histogram, fn() -> Histogram>;
+
 lazy_static::lazy_static! {
     // Worker info metric (kept as worker_info_info for backward compatibility)
     pub static ref WORKER_INFO: Family<WorkerInfoLabels, Gauge> = Default::default();
@@ -75,6 +122,14 @@ lazy_static::lazy_static! {
     static ref QUERY_RESULT_SIZE: Histogram = Histogram::new(std::iter::empty());
     static ref READ_CHUNKS: Histogram = Histogram::new(std::iter::empty());
     pub static ref RUNNING_QUERIES: Gauge = Default::default();
+
+    static ref SHADOW_QUERIES: Family<ShadowKindLabels, Counter> = Default::default();
+    static ref SHADOW_RUNS: Family<ShadowRunLabels, Counter> = Default::default();
+    static ref SHADOW_SLOW_RUNS: Family<ShadowKindLabels, Counter> = Default::default();
+    static ref SHADOW_RUN_DURATION: HistogramFamily<ShadowEngineLabels> =
+        Family::new_with_constructor(|| Histogram::new(exponential_buckets(0.0001, 2.0, 24)));
+    static ref SHADOW_PERCENT: Gauge<f64, AtomicU64> = Default::default();
+    static ref SHADOW_IN_FLIGHT: Gauge = Default::default();
 }
 
 pub fn set_status(status: WorkerStatus) {
@@ -117,6 +172,64 @@ pub fn query_executed(result: &QueryResult) {
         QUERY_RESULT_SIZE.observe(result.data.len() as f64);
         READ_CHUNKS.observe(result.num_read_chunks as f64);
     }
+}
+
+pub fn report_shadow_query(kind: &str) {
+    SHADOW_QUERIES
+        .get_or_create(&ShadowKindLabels {
+            kind: kind.to_owned(),
+        })
+        .inc();
+}
+
+pub fn report_shadow_run(kind: &str, outcome: ShadowOutcome) {
+    SHADOW_RUNS
+        .get_or_create(&ShadowRunLabels {
+            kind: kind.to_owned(),
+            outcome: outcome.as_str(),
+        })
+        .inc();
+}
+
+pub fn report_shadow_timing(kind: &str, legacy: Duration, new: Duration, slow: bool) {
+    for (engine, duration) in [("legacy", legacy), ("new", new)] {
+        let labels = ShadowEngineLabels {
+            kind: kind.to_owned(),
+            engine,
+        };
+        SHADOW_RUN_DURATION
+            .get_or_create(&labels)
+            .observe(duration.as_secs_f64());
+    }
+    if slow {
+        SHADOW_SLOW_RUNS
+            .get_or_create(&ShadowKindLabels {
+                kind: kind.to_owned(),
+            })
+            .inc();
+    }
+}
+
+pub fn set_shadow_percent(percent: f64) {
+    SHADOW_PERCENT.set(percent);
+}
+
+pub fn report_shadow_run_started() {
+    SHADOW_IN_FLIGHT.inc();
+}
+
+pub fn report_shadow_run_finished() {
+    SHADOW_IN_FLIGHT.dec();
+}
+
+#[cfg(test)]
+pub fn shadow_run_count(kind: &str, outcome: ShadowOutcome) -> u64 {
+    SHADOW_RUNS
+        .get_or_create(&ShadowRunLabels {
+            kind: kind.to_owned(),
+            outcome: outcome.as_str(),
+        })
+        .get()
 }
 
 pub fn register_metrics(registry: &mut Registry, version: String) {
@@ -230,6 +343,39 @@ pub fn register_metrics(registry: &mut Registry, version: String) {
         "network_state_unresolved",
         "Polls whose network state named no assignment this worker could read, by reason",
         NETWORK_STATE_UNRESOLVED.clone(),
+    );
+    registry.register(
+        "shadow_queries",
+        "Legacy-engine queries sampled for the new query engine's shadow comparison, by dataset type",
+        SHADOW_QUERIES.clone(),
+    );
+    registry.register(
+        "shadow_runs",
+        "Shadowed queries run by both engines, by outcome: match, mismatch (values differ), \
+         legacy_error or new_error (only that engine failed), both_error, crashed (the \
+         runner process aborted or timed out), or skipped (every shadow slot was taken)",
+        SHADOW_RUNS.clone(),
+    );
+    registry.register(
+        "shadow_slow_runs",
+        "Shadow runs where the new engine exceeded the slow ratio and margin",
+        SHADOW_SLOW_RUNS.clone(),
+    );
+    registry.register_with_unit(
+        "shadow_run_duration",
+        "Time each engine took to answer one shadowed query",
+        Unit::Seconds,
+        SHADOW_RUN_DURATION.clone(),
+    );
+    registry.register(
+        "shadow_percent",
+        "Share of legacy-engine queries sampled for the shadow comparison, in percent",
+        SHADOW_PERCENT.clone(),
+    );
+    registry.register(
+        "shadow_in_flight",
+        "Shadow runs started and not yet counted in shadow_runs",
+        SHADOW_IN_FLIGHT.clone(),
     );
     registry.register("worker_status", "Status of the worker", STATUS.clone());
     set_status(WorkerStatus::Starting);

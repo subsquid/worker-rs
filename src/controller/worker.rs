@@ -16,6 +16,7 @@ use substrait::proto::Plan;
 use tokio_util::sync::CancellationToken;
 
 use sqd_network_transport::PeerId;
+use sqd_query_engine::metadata::DatasetDescription;
 use tracing::instrument;
 
 use crate::{
@@ -25,6 +26,7 @@ use crate::{
     },
     metrics,
     query::result::{QueryError, QueryOk, QueryResult},
+    shadow::{ShadowQuery, ShadowRef},
     storage::manager::{self, StateManager},
     types::state::ChunkRef,
 };
@@ -50,6 +52,7 @@ pub struct Worker {
     query_schemas: Arc<SchemaRegistry>,
     queries_running: AtomicUsize,
     max_parallel_queries: usize,
+    shadow: Option<ShadowRef>,
 }
 
 impl Worker {
@@ -63,7 +66,14 @@ impl Worker {
             query_schemas,
             queries_running: 0.into(),
             max_parallel_queries: parallel_queries,
+            shadow: None,
         }
+    }
+
+    /// Shadow a share of legacy-engine queries with the new engine.
+    pub fn with_shadow(mut self, shadow: ShadowRef) -> Self {
+        self.shadow = Some(shadow);
+        self
     }
 
     pub fn query_schemas(&self) -> Arc<SchemaRegistry> {
@@ -168,11 +178,11 @@ impl Worker {
         query.set_first_block(from_block);
         query.set_last_block(Some(to_block));
 
-        let Some(chunk_guard) = self.state_manager.clone().get_chunk(chunk) else {
+        let Some(chunk_guard) = self.state_manager.clone().get_chunk(chunk.clone()) else {
             return Err(QueryError::NotFound);
         };
 
-        run_in_pool(move || {
+        let result = run_in_pool(move || {
             let data_chunk = ParquetChunk::new(chunk_guard.as_str());
             let parse_timer = std::time::Instant::now();
             let plan = query.compile();
@@ -210,7 +220,67 @@ impl Worker {
                 serialization_duration,
             ))
         })
-        .await
+        .await;
+
+        // After the answer, so that the shadow never delays it.
+        if let Some(shadow) = &self.shadow {
+            if shadow.sample() {
+                self.submit_shadow(shadow, query_str, chunk, block_range);
+            }
+        }
+        result
+    }
+
+    /// A query the new engine has no schema for, or whose chunk is gone by now,
+    /// is not shadowed.
+    fn submit_shadow(
+        &self,
+        shadow: &ShadowRef,
+        query_str: &str,
+        chunk: ChunkRef,
+        block_range: (u64, u64),
+    ) {
+        let Ok(dataset_type) = experimental_engine::extract_dataset_type(query_str) else {
+            return;
+        };
+        let Some(query_chunk) = self.state_manager.clone().get_query_chunk(chunk.clone()) else {
+            return;
+        };
+        let Ok(schema) = self.resolve_schema(query_chunk.schema, &dataset_type) else {
+            return;
+        };
+
+        let query = ShadowQuery {
+            dataset: chunk.dataset,
+            chunk_id: chunk.chunk,
+            query: query_str.to_owned(),
+            block_range,
+            schema,
+        };
+        shadow.submit(query, query_chunk.path);
+    }
+
+    /// Prefer the assignment's pinned write schema; legacy assignments resolve
+    /// through the type registry.
+    fn resolve_schema(
+        &self,
+        chunk_schema: ChunkSchema,
+        dataset_type: &str,
+    ) -> Result<Arc<DatasetDescription>, QueryError> {
+        match chunk_schema {
+            ChunkSchema::Pinned(schema_id) => {
+                let schema = self.query_schemas.get_by_id(schema_id)?;
+                if schema.name != dataset_type {
+                    return Err(QueryError::BadRequest(format!(
+                        "chunk was written with dataset type '{}' (schema {schema_id}), \
+                         but the query asks for '{dataset_type}'",
+                        schema.name
+                    )));
+                }
+                Ok(schema)
+            }
+            ChunkSchema::ByType => self.query_schemas.get_by_type(dataset_type),
+        }
     }
 
     #[instrument(skip_all)]
@@ -227,22 +297,7 @@ impl Worker {
             return Err(QueryError::NotFound);
         };
 
-        // Prefer the assignment's pinned write schema.
-        let schema = match chunk.schema {
-            ChunkSchema::Pinned(schema_id) => {
-                let schema = self.query_schemas.get_by_id(schema_id)?;
-                if schema.name != dataset_type {
-                    return Err(QueryError::BadRequest(format!(
-                        "chunk was written with dataset type '{}' (schema {schema_id}), \
-                         but the query asks for '{dataset_type}'",
-                        schema.name
-                    )));
-                }
-                schema
-            }
-            // Legacy assignments resolve through the type registry.
-            ChunkSchema::ByType => self.query_schemas.get_by_type(&dataset_type)?,
-        };
+        let schema = self.resolve_schema(chunk.schema, &dataset_type)?;
 
         let query_str = query_str.to_owned();
         run_in_pool(move || {
