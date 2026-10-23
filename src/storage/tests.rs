@@ -28,15 +28,16 @@ fn test_chunks_with_same_block_range() {
     use sqd_network_transport::Keypair;
 
     use super::datasets_index::{AssignmentBlob, DatasetsIndex};
+    use crate::util::tests::chunk;
 
     let chunk_a_id = "0000000000/0000000000-0000001000-abcdef12";
-    let chunk_b_id = "0000000000/0000000000-0000001000-abcdef12-fork";
+    let chunk_b_id = "0000000000/0000000000-0000001000-abcdef34";
 
     let mut builder = AssignmentBuilder::new("test-secret").check_continuity(false);
 
     builder
         .new_chunk()
-        .id(chunk_a_id)
+        .id(chunk(chunk_a_id))
         .dataset_id("test-dataset")
         .dataset_base_url("https://example.com/")
         .block_range(0..=1000)
@@ -46,12 +47,12 @@ fn test_chunks_with_same_block_range() {
         .finish()
         .unwrap();
 
-    // Same block range as the first chunk, distinguished only by the trailing
-    // suffix. `add_chunk` returns Err on duplicate range, but with
+    // Same block range as the first chunk, distinguished only by the hash.
+    // `add_chunk` returns Err on duplicate range, but with
     // `check_continuity(false)` the chunk is still added to the buffer.
     let _ = builder
         .new_chunk()
-        .id(chunk_b_id)
+        .id(chunk(chunk_b_id))
         .dataset_id("test-dataset")
         .dataset_base_url("https://example.com/")
         .block_range(0..=1000)
@@ -80,7 +81,7 @@ fn test_chunks_with_same_block_range() {
     assert_eq!(
         index.chunks().len(),
         2,
-        "both suffix-distinguished chunks should be present in the index"
+        "both hash-distinguished chunks should be present in the index"
     );
 
     let chunk_a = index
@@ -113,7 +114,7 @@ fn test_chunks_with_same_block_range() {
     );
     assert_eq!(
         files_b[0].url.as_str(),
-        "https://example.com/0000000000/0000000000-0000001000-abcdef12-fork/blocks.parquet"
+        "https://example.com/0000000000/0000000000-0000001000-abcdef34/blocks.parquet"
     );
 }
 
@@ -128,6 +129,7 @@ mod worker_assignment {
     };
     use crate::types::schema::SchemaId;
     use crate::types::state::ChunkRef;
+    use crate::util::tests::chunk;
 
     fn all_schemas_available(_: SchemaId) -> bool {
         true
@@ -150,7 +152,7 @@ mod worker_assignment {
         let mut dataset = builder.new_dataset(DATASET, BASE_URL);
         let mut chunk = dataset
             .new_chunk()
-            .id(CHUNK_ID)
+            .id(chunk(CHUNK_ID))
             .block_range(221000000..=221000649)
             .size(1000000)
             .write_schema_id(schema_id);
@@ -198,7 +200,7 @@ mod worker_assignment {
         }
         dataset
             .new_chunk()
-            .id(CHUNK_ID)
+            .id(chunk(CHUNK_ID))
             .block_range(221000000..=221000649)
             .size(1000000)
             .version(generation.map_or(0, |(version, _)| version))
@@ -216,7 +218,7 @@ mod worker_assignment {
             sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
         builder
             .new_chunk()
-            .id(CHUNK_ID)
+            .id(chunk(CHUNK_ID))
             .dataset_id(DATASET)
             .dataset_base_url(base_url)
             .block_range(0..=1000)
