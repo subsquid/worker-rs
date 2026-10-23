@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use sha2::{Digest, Sha256};
-use sqd_assignments::{AssignmentBuilder, AssignmentType, WorkerAssignmentBuilder, WorkerStatus};
+use sqd_assignments::{
+    AssignmentBuilder, AssignmentType, DataChunk, WorkerAssignmentBuilder, WorkerStatus,
+};
 use sqd_network_transport::PeerId;
 
 use super::corpus::Chunk;
@@ -233,7 +235,7 @@ impl Scheduler {
             let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
             builder
                 .new_chunk()
-                .id(&placement.chunk_id)
+                .id(chunk(&placement.chunk_id))
                 .dataset_id(&placement.dataset_id)
                 .dataset_base_url(base_url)
                 .block_range(placement.first_block..=placement.last_block)
@@ -298,7 +300,7 @@ impl Scheduler {
                 let assigned = placement.assigned && fault != AssignmentFault::NoChunksForWorker;
                 dataset
                     .new_chunk()
-                    .id(&placement.chunk_id)
+                    .id(chunk(&placement.chunk_id))
                     .block_range(placement.first_block..=placement.last_block)
                     .size(placement.size)
                     .version(placement.version)
@@ -338,4 +340,8 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(bytes).expect("gzip write");
     encoder.finish().expect("gzip finish")
+}
+
+fn chunk(id: &str) -> DataChunk {
+    id.parse().expect("valid chunk id")
 }

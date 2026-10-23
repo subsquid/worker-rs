@@ -1,5 +1,6 @@
 use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
+use sqd_assignments::DataChunk;
 use tracing_subscriber::EnvFilter;
 
 pub fn tests_data() -> PathBuf {
@@ -12,4 +13,8 @@ pub fn _setup_tracing() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     Ok(())
+}
+
+pub fn chunk(id: &str) -> DataChunk {
+    id.parse().expect("valid chunk id")
 }
