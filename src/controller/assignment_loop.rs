@@ -469,6 +469,7 @@ mod tests {
     use crate::storage::downloader::DownloadConfig;
     use crate::storage::manager::StateManager;
     use crate::types::schema::SchemaId;
+    use crate::util::tests::chunk;
 
     #[path = "assignment_loop_pbt.rs"]
     mod pbt;
@@ -538,7 +539,7 @@ mod tests {
         let mut dataset = builder.new_dataset("s3://test", "https://example.com/");
         dataset
             .new_chunk()
-            .id("0000000000/0000000000-0000000010-aaaaaaaa")
+            .id(chunk("0000000000/0000000000-0000000010-aaaaaaaa"))
             .block_range(0..=10)
             .size(1)
             .write_schema_id(7)

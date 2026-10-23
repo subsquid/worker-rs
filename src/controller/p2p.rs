@@ -801,6 +801,7 @@ pub async fn build_delivery(
             sqd_messages::QueryOk {
                 data: data.into(),
                 last_block,
+                uncompressed_data_size: Some(uncompressed_size),
             },
         )),
         retry_after_ms,
@@ -1148,6 +1149,23 @@ mod tests {
                 assert!(!summary.data_hash.is_empty());
             }
             other => panic!("expected an Ok summary, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn response_carries_the_size_before_compression() {
+        let keypair = Keypair::generate_ed25519();
+        for compression in [Compression::None, Compression::Gzip, Compression::Zstd] {
+            let (message, _logged) =
+                build_delivery(&keypair, QUERY_ID, ok_result(), None, compression).await;
+
+            assert!(message.verify_signature(keypair.public().to_peer_id()));
+            match message.result {
+                Some(query_result::Result::Ok(ok)) => {
+                    assert_eq!(ok.uncompressed_data_size, Some(5), "{compression:?}");
+                }
+                other => panic!("expected an Ok result, got {other:?}"),
+            }
         }
     }
 

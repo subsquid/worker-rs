@@ -544,6 +544,7 @@ mod tests {
     use super::{DatasetsIndex, DownloadConfig, StateManager};
     use crate::storage::datasets_index::AssignmentBlob;
     use crate::types::dataset::encode_dataset;
+    use crate::util::tests::chunk;
 
     /// A legacy document, admitted: it references no write schemas, so none can be missing.
     fn prepared(assignment: sqd_assignments::Assignment, id: &str, key: &Keypair) -> DatasetsIndex {
@@ -683,7 +684,7 @@ mod tests {
             sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
         builder
             .new_chunk()
-            .id("0000000000/0000000000-0000000010-aaaaaaaa")
+            .id(chunk("0000000000/0000000000-0000000010-aaaaaaaa"))
             .dataset_id("s3://test")
             .dataset_base_url(origin)
             .block_range(0..=10)
