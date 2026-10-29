@@ -86,9 +86,9 @@ every retry, so without the distinction a scheduler publishing bad addresses rea
 like a flaky origin. Scalar signal only (OB-14). Bound in IB-31.
 
 **OB-19 — Network-state resolution.** [MUST] A reason-coded counter of polls whose network
-state named no assignment this worker could read: the blob the resolved type wanted, or
-`assignment_type` when the picker itself will not read (FM-53d/53e). Counted per poll while it
-persists, like OB-18 — absence is a legal shape mid-migration, so what marks a fault is that it
+state named no assignment this worker could read: the `split` blob it wanted, or
+`assignment_type` when the state names another type or a type that will not decode (FM-53d/53e).
+Counted per poll while it persists, like OB-18 — absence is a legal shape mid-publication, so what marks a fault is that it
 lasts, not that it happened once, and an alert reads persistence rather than an edge. Without it
 nothing moves at all: the previous assignment stays in force, the chunk gauges hold, and a
 scheduler that declares `split` and never publishes the portal half — which the worker requires
@@ -105,7 +105,7 @@ to one that cannot reach the network. For a split assignment a bundle that never
 installs blocks every assignment (FM-53b) while no other signal moves — the chunk gauges
 simply freeze, which reads exactly like a quiet network — so this is the only witness
 that separates the two. A bundle that verifies but cannot be used is both a failed load
-and a refused pair, and counts as each (FM-53b, OB-18). Scalar signals only (OB-14). Bound in IB-31; the legacy
+and a refused pair, and counts as each (FM-53b, OB-18). Scalar signals only (OB-14). Bound in IB-31; the type
 manifest's fetch failures (FM-53) have no signal yet.
 
 ## Property → observable mapping

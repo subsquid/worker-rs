@@ -240,7 +240,7 @@ impl Worker {
                 }
                 schema
             }
-            // Legacy assignments resolve through the type registry.
+            // Held outside the assignment in force, or before one applies (IB-44).
             ChunkSchema::ByType => self.query_schemas.get_by_type(&dataset_type)?,
         };
 

@@ -87,6 +87,12 @@ impl TestServer {
     pub(crate) fn hits(&self, path: &str) -> usize {
         self.hits.lock().unwrap().get(path).copied().unwrap_or(0)
     }
+
+    /// [`Self::hits`] for a task that outlives the borrow of the server.
+    pub(crate) fn hit_counter(&self, path: &str) -> impl Fn() -> usize + Send + 'static {
+        let (hits, path) = (Arc::clone(&self.hits), path.to_owned());
+        move || hits.lock().unwrap().get(&path).copied().unwrap_or(0)
+    }
 }
 
 pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {

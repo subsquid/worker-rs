@@ -48,8 +48,8 @@ GAP-8; OQ-6.]
 **LIV-4 — Eviction convergence.**
 *Pre:* `c ∈ A`, `c ∉ N`, last pin released; process alive.
 *Bound:* store namespace removal within P-EVICT-BOUND ⚠ of the pin release — without
-requiring any further input event. [Currently violated: eviction waits for the next
-loop wake-up, potentially forever — GAP-6.]
+requiring any further input event. [At risk: the last unpin wakes the reconciler, but its
+pass starts with a full store walk, which can exceed the bound at scale — GAP-15.]
 *Witness:* evicted-chunks counter advances (OB-4); stored-bytes gauge falls (OB-5).
 *Check:* CT-1, CT-3.
 

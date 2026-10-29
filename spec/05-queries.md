@@ -65,8 +65,7 @@ of the effective range: `covered = [range.begin, last_block]`. Rules:
 - Boundary emission: when at least one block is evaluated, the result includes a record
   for the first and last evaluated block — header-only when the query selects nothing
   from them — so the coverage cursor is recoverable from the data alone; portal-side
-  client resumption load-bears on this. [MUST — intent; provided today by the legacy
-  engine's weight-0 boundary pinning, dynamic-engine conformance unverified: GAP-32.]
+  client resumption load-bears on this.
 - Empty result: a range that evaluates zero blocks (disjoint from the chunk's content,
   RP-10) yields empty data with `last_block = range.end`; an evaluated range never
   yields zero records (boundary emission above).
@@ -120,7 +119,7 @@ class exists; message strings are advisory and unstable; classes are stable surf
 | `too_many_requests` | operator bucket empty or no allocation | 0 | no | yes after hint; without allocation, only after on-chain change |
 | `server_overloaded` | capacity exhausted (queue or concurrency) | pre-admission: 0 · post-admission: 1 (ADR-6) | post only | yes after P-RETRY-HINT |
 | `server_error` | execution failure, downgrade (RP-14), signing failure, internal fault, freshness rejection (pre-admission — verdict below) | 1·chip (freshness: 0) | yes (freshness: no) | unknown; safe to retry (idempotent reads; freshness: with a fresh timestamp) |
-| *(no response)* | undecodable request, reject fan-out exhausted, transport limits | 0 | no | yes (treat as transient) |
+| *(no response)* | undecodable request, reject fan-out exhausted, transport limits (OQ-9) | 0 | no | yes (treat as transient) |
 
 Errors never carry result data (INV-20). A `not_found` does not distinguish its three
 causes (GAP-19 tracks adding machine-readable subcodes); the availability map (RP-21) is
@@ -140,8 +139,8 @@ staleness verdict awaits the OQ-7 surface revision.
 body carries a continuation anchor (the expected parent hash of the first selected
 block) that the chunk's data contradicts MUST fail with a machine-distinguishable
 verdict carrying the canonical block reference at the anchor height; portals convert it
-into their fork-recovery conflict response. Today the verdict exists only as the legacy
-engine's `server_error` message text; until a stable surface lands (OQ-7), the exact
+into their fork-recovery conflict response. Today the verdict exists only as `server_error`
+message text, the same in both engines; until a stable surface lands (OQ-7), the exact
 strings are a de-facto frozen contract (IB-13).
 
 **RP-21 — Status read.** [MUST] On request, the worker returns its status report:

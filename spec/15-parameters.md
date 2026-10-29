@@ -1,6 +1,6 @@
 # 15 — Parameter registry
 
-**Mutable doc #2.** As of: 2026-08-19, baseline `6689f75`. Every `P-*` symbol used
+**Mutable doc #2.** As of: 2026-10-29, baseline `123dab7`. Every `P-*` symbol used
 anywhere in the suite has a row. **Observed** = what the implementation does today
 (configuration default where operator-settable). **Target** = the intended bound; ⚠ =
 proposed, unratified — ratification lands via the ADR named in the row (ADR-19 for the
@@ -67,14 +67,14 @@ batch unless stated).
 | P-LOGS-RESP-MAX | log response page budget (RP-22) | 10 MiB − 100 KiB (margin unexplained — OQ-2) | derive from P-LOGS-RESP-CEIL ⚠ |
 | P-LOGS-RESP-CEIL | transport ceiling for log/status responses (IB-2) | 10 MiB | same |
 | P-LOGS-QUEUE | log-read queue depth (RP-22) | 4 | same |
-| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44); polled while the assignment in force resolves by type, paused under `split`, refreshed at once on return to `legacy` (ADR-23, revised) | 3 600 s | same |
+| P-SCHEMA-REFRESH | schema-manifest refresh period (IB-44); polled from startup until an assignment applies, then stopped (ADR-24) | 3 600 s | same |
 
 ## Lifecycle and reconciliation bounds
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
 | P-START-ACCEPT | start → accepting queries (LIV-5) | unmeasured; recovery scan + residue sweep dominate | 120 s at W-CHUNKS ⚠ |
-| P-EVICT-BOUND | pin-release → reclamation (LIV-4) | **unbounded** — GAP-6 | 60 s ⚠ |
+| P-EVICT-BOUND | pin-release → reclamation (LIV-4) | one reconciler pass, store walk first — GAP-15 | 60 s ⚠ |
 | P-STALL-MAX | zero-progress-with-work alarm bound (LIV-9/13) | no alarm exists — GAP-17 | 600 s ⚠ |
 | P-DEL-FLOOR | max store fraction deletable per application without override (REQ-25) | no floor — GAP-3 | 50 % ⚠ (ADR-17) |
 | P-CONVERGE-SLACK | scheduling slack in convergence bounds (LIV-1/12) | — | 60 s ⚠ |

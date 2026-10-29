@@ -22,9 +22,8 @@ GAP-13).
 
 **DEF-4 — Chunk ref.** The triple ⟨dataset, chunk id, version⟩ — the global key of a
 chunk. The **version** says which copy: 0 is what ingest wrote, anything else a batch
-job's rewrite of it, published under its own storage prefix (IB-41b, ADR-22). Legacy assignments
-carry no versions, so every chunk of one is version 0, and a query naming no version asks
-for 0. All state sets (DEF-10) contain chunk refs. The worker orders chunk refs
+job's rewrite of it, published under its own storage prefix (IB-41b, ADR-22). A query
+naming no version asks for 0. All state sets (DEF-10) contain chunk refs. The worker orders chunk refs
 lexicographically by ⟨dataset, chunk id, version⟩ — version last, so a rewrite sorts
 beside the copy it replaces rather than after every chunk in its dataset; this ordering
 defines the availability map (DEF-13).
@@ -140,7 +139,7 @@ execution outcome (ADR-8). A **downgrade** replaces a success that cannot be shi
 | logs-request | cursor | request/response | RP-22 read |
 | status-request | — | request/response | RP-21 read |
 | epoch-tick | epoch number + allocations | polled every P-EPOCH-POLL | refreshes DEF-23 buckets |
-| schema-refresh | schema manifest (legacy) or schema bundle (split) | polled every P-SCHEMA-REFRESH / carried by the network state | updates dynamic-engine registry |
+| schema-refresh | schema manifest (fallback, IB-44) or schema bundle (IB-44b) | polled every P-SCHEMA-REFRESH until an assignment applies / carried by the network state | updates dynamic-engine registry |
 | clock-tick | time | — | drives WP-17 log pruning, bucket refill |
 | process-crash / restart | — | — | WP-15 recovery |
 

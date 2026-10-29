@@ -44,7 +44,8 @@ sanctioned reader-free mode; the store always assumes live readers.
 eviction remnants — is deleted by the abort path when the process survives, and by the
 next recovery sweep otherwise (WP-15). Residue never: becomes adoptable state
 (INV-40), blocks a future commit of the same chunk [violated today — a residual
-committed-name collision wedges the chunk forever: GAP-20], or accumulates across crash
+committed-name collision fails each commit of the chunk, assignment after assignment:
+GAP-20], or accumulates across crash
 loops (INV-41). Foreign entries are not residue and are never swept (CN-10).
 
 **RS-7 — Log-store reclamation.** [MUST] Pruned log records' space is reclaimable and

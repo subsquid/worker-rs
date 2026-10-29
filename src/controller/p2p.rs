@@ -4,7 +4,6 @@ use anyhow::Result;
 use camino::Utf8PathBuf as PathBuf;
 use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::RwLock;
-use sqd_assignments::AssignmentType;
 use sqd_messages::{
     query_error, query_executed, BitString, LogsRequest, ProstMsg, Query, QueryExecuted,
     TimeReport, WorkerStatus,
@@ -93,7 +92,6 @@ pub struct P2PController<EventStream> {
     worker_id: PeerId,
     keypair: Keypair,
     assignment_url: String,
-    assignment_type: Option<AssignmentType>,
     schemas: SchemaManager,
     query_schemas_url: String,
     query_schemas_refresh_interval: Duration,
@@ -148,7 +146,6 @@ pub async fn create_p2p_controller(
         worker_id,
         keypair,
         assignment_url: args.assignment_url,
-        assignment_type: args.assignment_source,
         schemas,
         query_schemas_url: args.query_schemas_url,
         query_schemas_refresh_interval: args.query_schemas_refresh_interval,
@@ -275,7 +272,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             self.assignment_fetch_timeout,
             self.assignment_fetch_max_delay,
             self.worker_id,
-            self.assignment_type,
         );
         let type_schemas = SchemaRefresh::new(
             self.worker.query_schemas(),

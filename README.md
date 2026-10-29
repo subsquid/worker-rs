@@ -55,26 +55,21 @@ The worker is configured through command-line flags or the equivalent environmen
 | `--concurrent-downloads` | `CONCURRENT_DOWNLOADS` | `3` | Maximum number of concurrent chunk downloads |
 | `--query-threads` | `QUERY_THREADS` | (CPU count) | Threads used by the query engine |
 | `--assignment-url` | `ASSIGNMENT_URL` | network-dependent | URL of the chunk assignment / network state |
-| `--assignment-source` | `ASSIGNMENT_SOURCE` | (the network's) | Pins which assignment the worker reads: `legacy` or `split` (see below) |
 
 Network selection and boot nodes come from the transport arguments (see `--help`). When the network is set to `mainnet` or `tethys`, default boot nodes and the assignment URL are filled in automatically.
 
-### Split assignments
+### Assignments
 
-The network state names an `assignment_type` — `legacy` or `split` — and the worker reads the
-assignments it names, re-reading it on every poll. `--assignment-source` overrides that, which
-is how a single worker is switched over ahead of the network, or held back during the migration;
-left unset, the network decides and no worker has to be reconfigured to follow it.
-
-Under `split` the worker reads the state's `worker_assignment` pointer and its `schema_bundle`
-instead of the legacy shared `assignment`, and never falls back to the legacy one. The state
-must also publish a `portal_assignment`: the worker does not read it, but a state that declares
-`split` without it is one the network has not finished publishing, and the worker waits — each
-such poll counting under `network_state_unresolved{reason}`, so a network stuck that way is
-alertable rather than silent. This changes five things:
+The worker reads split assignments only: the network state's `worker_assignment` pointer and its
+`schema_bundle`. The legacy shared `assignment` is never read. The state must name
+`assignment_type: split` — a state that names `legacy`, or no type at all, is one this worker
+cannot follow, so it keeps the assignment in force and waits. The state must also publish a
+`portal_assignment`: the worker does not read it, but a state that declares `split` without it is
+one the network has not finished publishing. Every poll that ends in such a wait counts under
+`network_state_unresolved{reason}`, so a network stuck that way is alertable rather than silent.
 
 - **Chunk contents** come from the assignment's inline write-schema rosters, narrowed by each
-  chunk's `tables_present` bitmap, rather than from a per-chunk file list.
+  chunk's `tables_present` bitmap.
 - **A chunk may be republished.** Each chunk carries a `version`: 0 is the copy ingest wrote,
   anything else a batch job's rewrite, stored by the network under that generation's own prefix.
   The version is part of the chunk's identity, so a rewrite is downloaded rather than assumed to
@@ -84,14 +79,12 @@ alertable rather than silent. This changes five things:
   ingested one — so a portal reads a rewrite by naming its version, and a version this worker
   does not hold answers `not_found`.
 - **Query schemas** come from the network state's `schema_bundle` (a gzipped tar of
-  `<schema_id>.yaml`, verified against its `sha256:` hash) rather than from
-  `--query-schemas-url`, which the assignment's own chunks no longer consult. That manifest is
-  polled only while the assignment in force resolves chunks by type — from startup until a split
-  assignment applies, and again whenever a legacy one does — and paused while a split one is in
-  force. The assignment applier owns the refresh task: switching to split cancels and waits for
-  any in-flight refresh; switching back to legacy starts a new task and refreshes immediately.
-  What it loaded stays available across a pause. Unlike the bundle it is never stored, so
-  it is empty after a restart until the first fetch lands. Bundles are *merged* into
+  `<schema_id>.yaml`, verified against its `sha256:` hash), keyed by the `write_schema_id` each
+  chunk names. `--query-schemas-url` is a fallback by dataset type for chunks the assignment in
+  force does not pin — held from an earlier assignment, or held before one applies. That manifest
+  is polled from startup until an assignment applies, and not after; what it loaded stays
+  available. Unlike the bundle it is never stored, so it is empty after a restart until the first
+  fetch lands. Bundles are *merged* into
   `<data-dir>/schemas/<id>.yaml` rather than replacing what is there: chunks on disk outlive the
   bundle that described them, only the current bundle is published, and no schema can be fetched
   by id, so a schema dropped locally would strand data permanently. An id a bundle republishes
@@ -107,8 +100,7 @@ alertable rather than silent. This changes five things:
   `schema_bundle_mismatches`. Correcting the bundle is enough to recover: the worker reads the
   assignment pointer and the bundle as one announcement, so a new bundle hash re-offers the
   assignment with it and the scheduler need not publish a new assignment id.
-- **Assignments are applied strictly in order**, each waiting for the previous one to settle,
-  instead of immediately on arrival.
+- **Assignments are applied strictly in order**, each waiting for the previous one to settle.
 
 Run `sqd-worker --help` for the full list of options.
 

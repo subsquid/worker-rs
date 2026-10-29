@@ -1,6 +1,6 @@
 # ADR-3 — Skip assignment document verification
 
-Status: Accepted (historical)
+Status: Superseded by ADR-24
 
 ## Context
 

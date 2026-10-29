@@ -24,11 +24,11 @@ produces a log record that collectors pull as evidence of work performed.
 | Actor | Direction | Role | Verified how |
 |---|---|---|---|
 | Portal | inbound | sends queries, receives signed results | per-query signature bound to sender identity and this worker (RP-2) |
-| Scheduler | inbound (polled) | publishes network-state and assignment documents | transport security only; document contents trusted (ADR-3) |
+| Scheduler | inbound (polled) | publishes network-state and assignment documents | transport security; the worker verifies each document before use, but its size is unbounded (ADR-24, GAP-4) |
 | Data origin | inbound (polled) | serves chunk files named by the assignment | credentials from the assignment; payload unverified (GAP-5) |
 | Logs collector | inbound | pulls query-execution log records | network membership only; no per-request auth (GAP-22) |
 | Chain registry | inbound (polled) | epoch number, CU allocations, peer membership | trusted read |
-| Schema registry | inbound (polled) | dataset schemas for the dynamic engine: a CDN manifest, or the network state's schema bundle for a split assignment | transport security only; the bundle is content-hash verified |
+| Schema registry | inbound (polled) | dataset schemas for the dynamic engine: the network state's schema bundle, and a CDN manifest as the fallback for unpinned chunks | transport security only; the bundle is content-hash verified |
 | Operator (human) | config | runs the process, sets configuration, watches metrics | — |
 
 ## Design goals

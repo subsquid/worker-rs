@@ -542,22 +542,24 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{DatasetsIndex, DownloadConfig, StateManager};
-    use crate::storage::datasets_index::AssignmentBlob;
     use crate::types::dataset::encode_dataset;
     use crate::util::tests::chunk;
 
-    /// A legacy document, admitted: it references no write schemas, so none can be missing.
-    fn prepared(assignment: sqd_assignments::Assignment, id: &str, key: &Keypair) -> DatasetsIndex {
-        DatasetsIndex::new(AssignmentBlob::Legacy(assignment), id, key, |_| {
-            unreachable!("a legacy assignment references no write schemas")
-        })
-        .expect("the document lists this worker")
+    /// A document admitted against a bundle that carries every schema it names.
+    fn prepared(
+        assignment: sqd_assignments::WorkerAssignment,
+        id: &str,
+        key: &Keypair,
+    ) -> DatasetsIndex {
+        DatasetsIndex::new(assignment, id, key, |_| true).expect("the document lists this worker")
     }
 
-    fn empty_assignment_for(peer_id: sqd_contract_client::PeerId) -> sqd_assignments::Assignment {
-        let mut builder = sqd_assignments::AssignmentBuilder::new("test-secret");
-        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[]);
-        sqd_assignments::Assignment::from_owned(builder.finish()).unwrap()
+    fn empty_assignment_for(
+        peer_id: sqd_contract_client::PeerId,
+    ) -> sqd_assignments::WorkerAssignment {
+        let mut builder = sqd_assignments::WorkerAssignmentBuilder::new("test-secret");
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        sqd_assignments::WorkerAssignment::from_owned(builder.finish()).unwrap()
     }
 
     async fn test_manager(
@@ -588,7 +590,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Stored chunks without a pinned schema resolve through the legacy type registry.
+    /// Stored chunks the assignment in force does not pin resolve through the type registry.
     #[tokio::test]
     async fn a_chunk_outside_the_assignment_still_resolves_by_type() {
         use std::sync::Arc;
@@ -659,7 +661,11 @@ mod tests {
         let manager = test_manager(workdir.clone(), worker_id).await;
         let ingested = manager.chunk_path(&versioned(0));
         let rewritten = manager.chunk_path(&versioned(4));
-        assert_eq!(ingested, dataset_dir.join(id), "where a legacy chunk is");
+        assert_eq!(
+            ingested,
+            dataset_dir.join(id),
+            "where chunks were before versions"
+        );
         assert_eq!(rewritten, dataset_dir.join("_v4").join(id));
         drop(manager);
         std::fs::create_dir_all(&ingested).unwrap();
@@ -679,23 +685,23 @@ mod tests {
     fn unfetchable_assignment_for(
         peer_id: sqd_contract_client::PeerId,
         origin: &str,
-    ) -> sqd_assignments::Assignment {
+    ) -> sqd_assignments::WorkerAssignment {
         let mut builder =
-            sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
-        builder
+            sqd_assignments::WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+        builder.register_write_schema(7, &["blocks"]).unwrap();
+        let mut dataset = builder.new_dataset("s3://test", origin);
+        dataset
             .new_chunk()
             .id(chunk("0000000000/0000000000-0000000010-aaaaaaaa"))
-            .dataset_id("s3://test")
-            .dataset_base_url(origin)
             .block_range(0..=10)
             .size(1)
+            .write_schema_id(7)
             .worker_indexes(&[0])
-            .files(&["blocks.parquet".to_owned()])
             .finish()
             .unwrap();
-        builder.finish_dataset();
-        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0]);
-        sqd_assignments::Assignment::from_owned(builder.finish()).unwrap()
+        dataset.finish().unwrap();
+        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
+        sqd_assignments::WorkerAssignment::from_owned(builder.finish()).unwrap()
     }
 
     /// A successor that changes nothing about the slice still restores the budget of chunks

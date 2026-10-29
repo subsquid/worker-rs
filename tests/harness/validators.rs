@@ -148,7 +148,7 @@ fn jsonl_body(v: &mut Violations, data: &[u8], begin: u64, last_block: u64, end:
     // RP-11 boundary emission. Only `last_block < end` is structurally decidable: the result
     // claims early stop, so it evaluated something and owes boundary records. At
     // `last_block == end` an empty body is legal (disjoint range) — separating that from a
-    // missing boundary record needs HC-4 (GAP-32).
+    // missing boundary record needs HC-4.
     v.check(count > 0 || last_block >= end, "RP-11", || {
         format!(
             "result stopped early at {last_block} (range end {end}) \
