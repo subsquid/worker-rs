@@ -150,7 +150,7 @@ and `declared_gaps_cite_the_spec` keeps those lists pointing at identifiers here
 | REQ-12 | CT-5 | P | ordering/pagination/cleanup unit-tested in memory; smoke adds a file-backed write-then-read with the RP-22 lag observed; durability across restart untested (HC-7) |
 | REQ-13 | CT-5 | P⊘ | the running-query gauge is now CT-6-checked (rises under load, bounded by the cap, returns to zero); the GAP-17 liars remain |
 | REQ-20 | CT-5 | P | RP-1 step 1 covered: an unverifiable signature is rejected with no CU and no log record. Freshness, envelope and replay untested |
-| REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams |
+| REQ-21 | CT-1/5 | P | charge/refund/overload-keep unit-tested via mock seams; the no-allocation rejection is driven end-to-end under both P-CU-ENFORCE settings, as is serving a spent budget with it off |
 | REQ-22 | CT-6 | P | cap enforcement and its overload rejection covered by `query_concurrency`; queue-depth and reject-fan-out shedding still untested (needs the transport) |
 | REQ-23 | CT-2 | U | no crash-recovery test exists |
 | REQ-24 | CT-4/9 | P⊘ | one malformed input is now survivable and asserted (FM-11's unusable address); the rest of GAP-2 and GAP-4 stand |

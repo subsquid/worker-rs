@@ -7,7 +7,28 @@ use sqd_network_transport::PeerId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::cli;
+
 use super::{rate_limiter::RateLimiter, RateLimitStatus};
+
+/// The subset of [`cli::Args`] metering needs. Kept separate so tests can construct it
+/// without going through clap.
+#[derive(Debug, Clone, Copy)]
+pub struct MeteringConfig {
+    /// False drops the pacing only — see [`RateLimiter::new`]. Everything around it stands:
+    /// epochs and allocations are polled as usual, and the buckets refreshed with them.
+    pub enforce: bool,
+    pub polling_interval: Duration,
+}
+
+impl From<&cli::Args> for MeteringConfig {
+    fn from(args: &cli::Args) -> Self {
+        Self {
+            enforce: !args.disable_rate_limiting,
+            polling_interval: args.network_polling_interval,
+        }
+    }
+}
 
 pub struct AllocationsChecker {
     client: Box<dyn sqd_contract_client::Client>,
@@ -21,14 +42,18 @@ impl AllocationsChecker {
     pub async fn new(
         client: Box<dyn sqd_contract_client::Client>,
         peer_id: PeerId,
-        polling_interval: Duration,
+        config: MeteringConfig,
     ) -> Result<Self> {
+        if !config.enforce {
+            warn!("Rate limiting is off: an allocated portal is served past its epoch budget");
+        }
+
         let own_id = client.worker_id(peer_id).await?;
         Ok(Self {
             client,
             own_id,
-            rate_limiter: Default::default(),
-            polling_interval,
+            rate_limiter: Mutex::new(RateLimiter::new(config.enforce)),
+            polling_interval: config.polling_interval,
             current_epoch: AtomicU32::new(0),
         })
     }
