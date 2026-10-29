@@ -65,12 +65,13 @@ existing field. This file and the CT-5 conformance corpus change in the same com
 | `output_format` | enum `JSONL(0) / ARROW_IPC(1)` | ARROW_IPC legal only with DYNAMIC; signature-covered |
 | `request_id` | string | echoed into the log record; otherwise ignored |
 
-**IB-11 — `QueryResult`.** `query_id`, oneof `ok {data, last_block}` /
+**IB-11 — `QueryResult`.** `query_id`, oneof `ok {data, last_block, uncompressed_data_size}` /
 `err {bad_request | not_found | server_error | too_many_requests | server_overloaded}`,
 optional `retry_after_ms`, `signature`. `retry_after_ms` appears on overload/bucket
 rejections; the admission-time slow-down advisory MAY additionally ride on any
 post-admission response — success or error (RP-4, test-pinned). Downgraded results
-carry none.
+carry none. `uncompressed_data_size` is the size of `data` before response compression. The
+signature does not cover it, so it is advisory and no audit can rest on it (GAP-14).
 
 **IB-12 — Output formats.** `JSONL`: one JSON object per line, ascending block order.
 `ARROW_IPC`: per-table Arrow IPC streams, raw binary columns, no Arrow-level
@@ -111,7 +112,7 @@ client-signed query.
 
 **IB-21 — `QueryExecuted` record.** Client id, the full original `Query` (signature
 included), `exec_time_micros`, a stage-timing report (parse/exec/serialize/compress/
-sign), receipt-side `timestamp_ms`, `worker_version`, and oneof
+sign), receipt-side `timestamp_ms` (taken after execution today, GAP-35), `worker_version`, and oneof
 `ok {uncompressed_data_size, sha3-256(uncompressed data), last_block}` / the RP-20
 error. Note the hash-basis asymmetry with IB-13's success signature (OQ-5).
 
@@ -155,7 +156,6 @@ missing OB-4/7 breakdowns have no binding yet — GAP-17/GAP-23 track the additi
 | (positional) | `ASSIGNMENT_CHECK_INTERVAL_SEC` / `ASSIGNMENT_FETCH_TIMEOUT_SEC` / `ASSIGNMENT_CHECK_MAX_DELAY_SEC` | P-ASSIGN-POLL / P-ASSIGN-FETCH-TIMEOUT / P-ASSIGN-RETRY-MAX |
 | (positional) | `NETWORK_POLLING_INTERVAL_SEC` | P-EPOCH-POLL |
 | `--query-schemas-url` (+ refresh env) | `QUERY_SCHEMAS_URL` | schema registry address / P-SCHEMA-REFRESH (IB-44) |
-| `--assignment-source` | `ASSIGNMENT_SOURCE` | `legacy` \| `split`, overriding the type the network state names itself (IB-40); unset, the state decides |
 | `--rpc-url`, `--l1-rpc-url`, `--network`, contract addresses | `RPC_URL` … | chain registry |
 | (positional) | `SENTRY_DSN` / `SENTRY_IS_ENABLED` | crash telemetry (on by default) |
 
@@ -164,36 +164,22 @@ Duration settings parse as whole seconds. Misconfiguration behavior is FM-50.
 ## Input-side binding (what simulators/stubs implement)
 
 **IB-40 — Network-state document.** HTTPS GET at the assignment URL returning JSON
-`{network, assignment_type, assignment, worker_assignment, portal_assignment,
-schema_bundle}`. `assignment_type` — `legacy` or `split`, absent meaning `legacy` — names
-which of the assignments below a consumer is to read; migrating publishes both sets at once,
-so which are present says nothing about which are authoritative. `--assignment-source`
-overrides it, which is how a worker is switched over ahead of the network, or held back
-during the migration (ADR-23). A type the worker cannot read is not applicable unless one
-is pinned: without it the state has nothing to pick with.
+`{network, assignment_type, worker_assignment, portal_assignment, schema_bundle, …}`.
+`assignment_type` names which assignments a consumer is to read: `legacy` or `split`, and
+an absent type means `legacy`. The worker reads only a `split` state (ADR-24). A state that
+names another type, names no type, or names a type that will not decode is not applicable.
 
-The worker reads only the assignments its resolved type names, so the shape of the others
-cannot make the state unreadable; only a body that is not a JSON object is a read failure. A
-state that names assignments it does not publish yields no update rather than an error — one
-set arriving before the other is a network mid-migration, not a fault.
+The worker reads only the keys that IB-40b names, so the shape of the others cannot make
+the state unreadable. That includes the legacy `assignment` key, which the worker never
+reads. Only a body that is not a JSON object is a read failure. Everything not applicable
+is re-read at the poll cadence (WP-1). HC-1 serves this.
 
-Under `legacy` the worker reads `assignment: {id, fb_url_v1, effective_from, …}`;
-`effective_from` is currently ignored by the worker (OQ-8). An `assignment` that will not
-decode or has no `fb_url_v1` is a refused assignment (OB-18). Everything not applicable is
-re-read at the poll cadence (WP-1). HC-1 serves this. Under `split` the state is read as
-IB-40b instead.
+**IB-41 — Legacy assignment document.** Retired by ADR-24. A `legacy` state named this
+document at `fb_url_v1`. The worker no longer reads it, and IB-41b is the only assignment
+document.
 
-**IB-41 — Assignment document.** HTTPS GET at `fb_url_v1`: a gzip-compressed
-FlatBuffers document — dataset table (ids, base addresses), per-dataset chunk tables
-(id, base address, file name→address map, declared size, summaries, per-chunk
-worker-index lists — the live chunk→worker mapping), worker roster (peer ids, assessed
-state, encrypted HTTP headers per worker; the roster-side chunk list is deprecated;
-encryption is crypto-box against the worker's identity key). HC-1 must be able to emit
-well-formed and deliberately malformed instances (FM-11/12 corpus). Under a resolved type
-of `split` this binding is replaced by IB-41b.
-
-**IB-42 — Data origin.** Plain HTTPS GET per file at
-`join(dataset_base, chunk_base, file_url)` with the decrypted headers attached;
+**IB-42 — Data origin.** Plain HTTPS GET per file at the address that IB-41b composes,
+with the decrypted headers attached;
 redirects disabled; per-request timeout P-DL-FILE-TIMEOUT, read stall bound
 P-DL-STALL-TIMEOUT. HC-2 serves these and ledgers every byte.
 
@@ -202,28 +188,23 @@ and per-operator CU allocations polled every P-EPOCH-POLL. HC-8 stubs these.
 
 **IB-44 — Schema registry.** HTTPS GET YAML manifest mapping dataset types to schema
 documents, refreshed every P-SCHEMA-REFRESH with unchanged-body short-circuit; fetch
-failure keeps previous schemas (FM-53). Polled while the assignment in force resolves chunks
-by type: from startup, since which type the network names is not yet known, and under
-`legacy`. Paused while a `split` assignment is in force — every chunk of one reads its schema by
-id instead (IB-44b) — and resumed, with an immediate refresh rather than a wait for the next
-period, when a `legacy` one applies again (ADR-23, revised). What was loaded before a pause
-stays in the registry, so a chunk held from an earlier assignment still resolves by type under
-`split` if its type had loaded by then. The assignment applier owns the refresh task: a successful
-split application cancels and joins it, including any in-flight HTTP request or retry wait; a
-successful legacy application starts it if absent. Refused or failed applications leave it alone.
-The manifest is read into memory and never stored
+failure keeps previous schemas (FM-53). It is the fallback for chunks that the assignment
+in force does not pin: a chunk held from an earlier assignment, or held before any
+assignment applies. The worker polls it from startup until an assignment applies, and
+then stops it for the life of the process (ADR-24), because every chunk of an applied
+assignment reads its schema by id (IB-44b). What it loaded before the stop stays in the
+registry. The assignment applier owns the refresh task: a successful application cancels
+and joins it, including any in-flight HTTP request or retry wait. Refused or failed
+applications leave it alone. The manifest is read into memory and never stored
 (ADR-22), so it is empty after every restart until the first fetch lands, and dynamic-engine
 queries against unpinned chunks are `server_error` until then (FM-53).
 
 ### Split input bindings (`assignment_type: split`)
 
-These replace IB-40's legacy reading and IB-41/44 one-for-one; nothing consumes both. Which
-set is in force is decided per poll (IB-40), so a network that switches type switches the
-bindings a running worker reads. IB-42/43 are unchanged.
+A `split` state names these bindings (ADR-24). IB-42/43 apply to them unchanged.
 
-**IB-40b — Network-state document, split.** The same document as IB-40 at the same address,
-but a resolved type of `split` reads `worker_assignment: {id, fb_url, version}`,
-`portal_assignment` and `schema_bundle: {hash, url}`. All three are mandatory: the portal's
+**IB-40b — Network-state document, split.** In a `split` state (IB-40) the worker reads
+`worker_assignment: {id, fb_url, version}`, `portal_assignment` and `schema_bundle: {hash, url}`. All three are mandatory: the portal's
 half is read no further than its presence, but a state declaring `split` without it names
 assignments it does not publish. `version` names the document's format, not the pointer's, and
 is unread — a document the worker cannot read is a malformed document (FM-12), not a state it
@@ -231,13 +212,12 @@ declines.
 
 A state missing any of the three, or whose `schema_bundle` will not decode or names a hash the
 worker cannot parse, is not applicable, and is re-read at the poll cadence rather than on the
-fetch-retry ladder — an incomplete state is a legal condition of a rolling migration, not a
-failure to read one. Only the shape that names an assignment without a usable bundle alarms
-(FM-53d); a bundle published ahead of its assignment, and a portal half yet to appear, are the
-same uncounted wait as a network that has not migrated (FM-53e), and a `worker_assignment`
+fetch-retry ladder — an incomplete state is a legal moment of publication, not a failure to
+read one. Only the shape that names an assignment without a usable bundle alarms (FM-53d); a
+bundle published ahead of its assignment, and a portal half yet to appear, are the same wait as
+a state of another type, counted only by reason (FM-53e, OB-19), and a `worker_assignment`
 that will not decode or has no `fb_url` is a refused assignment (FM-12, OB-18) that waits the
-same way. The legacy `assignment` key is ignored and never falls back to, and its shape cannot
-make the state unreadable (IB-40). The assignment and bundle
+same way. The assignment and bundle
 references move independently on the wire — either can change without the other — but the worker
 reads them as one announcement: a change to either half re-announces the **pair**, deduplicated
 against what was last *read*, not against what it applied. A change of *location* — `fb_url`
@@ -261,7 +241,7 @@ document for all time, which ADR-16 does not guarantee — ids are opaque, not c
 a scheduler republishing different content under one id would leave the worker on the old index.
 
 **IB-41b — Worker assignment document.** HTTPS GET at `fb_url`: a gzip-compressed
-FlatBuffers document, *validated* rather than trusted (unlike IB-41). Carries no file
+FlatBuffers document, *validated* rather than trusted (ADR-24). Carries no file
 list — each chunk names a `write_schema_id`, and the document's inline `schemas` roster
 maps that id to a sorted table list which the chunk's `tables_present` bitmap narrows.
 Files are then `base_url + generation prefix + chunk id + <table>.parquet`, where
@@ -291,8 +271,7 @@ chunk state can never be paired across an assignment change. The query's own dat
 type is then only a cross-check — a disagreement is a typed `bad_request`. A pinned id the
 schema store doesn't carry is a `server_error` instead: nothing in the query names that
 id, so the fault is the worker's own (INV-26, ADR-20), and FM-53c means it should not be
-reachable at all. Under IB-41 (legacy) there is no per-chunk schema and the query's
-dataset type selects it, which is sound only while one schema exists per type.
+reachable at all.
 
 What the worker may answer for is decided by the store, not by the assignment: the layout
 scan recovers every chunk it holds and the version each sits under, so a chunk that locks
@@ -302,11 +281,11 @@ before any assignment applies, are both answered from — the engines that need 
 read them directly, and the dynamic engine falls back to the query's dataset type.
 
 That fallback cannot return a wrong version of a type, which is what would make it
-dangerous: only the legacy manifest (IB-44) ever fills the type-keyed registry, and it
-carries one schema per type, while a bundle installs by id alone (IB-44b). What the fallback
-does trust is the query: under IB-41 nothing on the worker relates a chunk to a type, so the
-type the query names is the one it is read with, checked against nothing. Under IB-41b that
-demotes to a cross-check against the pinned schema's name, which is the point of pinning.
+dangerous: only the manifest (IB-44) fills the type-keyed registry, and it carries one
+schema per type, while a bundle installs by id alone (IB-44b). What the fallback does trust
+is the query. Nothing on the worker relates an unpinned chunk to a type, so the type the
+query names is the one it is read with, checked against nothing. For a pinned chunk the
+type is only a cross-check against the pinned schema's name, which is the point of pinning.
 
 **IB-44b — Schema bundle.** HTTPS GET at `schema_bundle.url`: a gzipped tar of
 `<schema_id>.yaml` query-engine schemas at the archive root, verified against

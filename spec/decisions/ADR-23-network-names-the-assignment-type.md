@@ -1,6 +1,6 @@
 # ADR-23 — The network state names the assignment type; the CLI only pins it
 
-Status: Accepted
+Status: Superseded by ADR-24
 
 ## Context
 

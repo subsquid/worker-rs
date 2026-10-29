@@ -38,7 +38,7 @@ WP-2 is not retried at all — the verdict is a property of the document, not of
 ⚠ Application timing relative to the document's declared effective time is OQ-8
 (applied immediately today).
 
-**WP-2 — Intake validation.** [MUST — intent, currently violated: GAP-4] Before
+**WP-2 — Intake validation.** [MUST — intent, currently violated: GAP-4, GAP-34] Before
 application, the assignment document is structurally validated and its decompressed size
 bounded by P-ASSIGN-SIZE-MAX ⚠ (ADR-18). A document that fails validation, lacks an
 entry for this worker, or fails credential decryption is rejected whole: the applied
@@ -134,8 +134,9 @@ eviction.
 assignment is a no-op. Re-fetching an already available chunk is never scheduled
 (`P = N \ A \ D` guarantees it); a commit colliding with an existing committed chunk of
 the same ref MUST NOT corrupt the existing chunk — the incumbent wins and the incoming
-copy is discarded as residue. [Incumbent-wins is intent; today the collision wedges into
-an eternal retry: GAP-20.]
+copy is discarded as residue. [Incumbent-wins is intent; today the collision fails every
+commit of the chunk until its retry budget runs out, and each new assignment restarts the
+cycle: GAP-20.]
 
 **WP-22 — Error classification.** [MUST] Mutation-path errors are **transient**
 (retried under backoff: fetch failures, origin unavailability, assignment fetch

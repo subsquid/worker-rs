@@ -72,7 +72,7 @@ retention/space lifecycle (10).
 |---|---|---|
 | [ADR-1](decisions/ADR-1-pull-based-assignment-distribution.md) | Pull-based assignment distribution | Accepted (historical) |
 | [ADR-2](decisions/ADR-2-binary-assignment-format.md) | Binary assignment format over JSON | Accepted (historical) |
-| [ADR-3](decisions/ADR-3-skip-assignment-verification.md) | Skip assignment document verification | Accepted (historical) |
+| [ADR-3](decisions/ADR-3-skip-assignment-verification.md) | Skip assignment document verification | Superseded by ADR-24 |
 | [ADR-4](decisions/ADR-4-opaque-chunk-identity.md) | Opaque chunk identity, suffix forks | Accepted (historical) |
 | [ADR-5](decisions/ADR-5-panic-containment-at-engine-boundary.md) | Panic containment at the engine boundary | Accepted (historical) |
 | [ADR-6](decisions/ADR-6-fractional-compute-units.md) | Fractional compute units: charge then refund | Accepted (historical) |
@@ -92,7 +92,8 @@ retention/space lifecycle (10).
 | [ADR-20](decisions/ADR-20-freshness-rejection-attribution.md) | Freshness rejections are worker-fault outcomes | Proposed |
 | [ADR-21](decisions/ADR-21-assignment-and-bundle-apply-as-one-snapshot.md) | Validate a worker assignment against its schema bundle | Accepted |
 | [ADR-22](decisions/ADR-22-on-disk-layout-chunk-versions-and-schema-store.md) | On-disk layout: chunk versions and the schema store | Accepted |
-| [ADR-23](decisions/ADR-23-network-names-the-assignment-type.md) | The network state names the assignment type; the CLI only pins it | Accepted |
+| [ADR-23](decisions/ADR-23-network-names-the-assignment-type.md) | The network state names the assignment type; the CLI only pins it | Superseded by ADR-24 |
+| [ADR-24](decisions/ADR-24-split-assignments-only.md) | Read split assignments only | Accepted |
 
 ## How to use this suite
 
