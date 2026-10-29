@@ -210,7 +210,7 @@ impl std::fmt::LowerHex for BundleHash {
 
 #[derive(Default)]
 pub(crate) struct SchemaSnapshot {
-    pub(crate) legacy_loaded: bool,
+    pub(crate) by_type_loaded: bool,
     pub(crate) by_type: HashMap<String, Arc<DatasetDescription>>,
     pub(crate) by_id: HashMap<SchemaId, Arc<DatasetDescription>>,
     pub(crate) bundle_hash: Option<BundleHash>,
@@ -319,7 +319,7 @@ impl SchemaRegistry {
     /// Missing type schemas are server errors because worker-mode bundles populate only IDs.
     pub fn get_by_type(&self, dataset_type: &str) -> Result<Arc<DatasetDescription>, QueryError> {
         let snapshot = self.snapshot();
-        if !snapshot.legacy_loaded {
+        if !snapshot.by_type_loaded {
             return Err(QueryError::Other(
                 "query schemas for the experimental engine have not been loaded yet".to_owned(),
             ));
@@ -343,11 +343,11 @@ impl SchemaRegistry {
             })
     }
 
-    pub(crate) fn replace_legacy(&self, by_type: HashMap<String, Arc<DatasetDescription>>) {
+    pub(crate) fn replace_by_type(&self, by_type: HashMap<String, Arc<DatasetDescription>>) {
         let _publishing = self.publish_lock.lock();
         let current = self.snapshot.load_full();
         self.snapshot.store(Arc::new(SchemaSnapshot {
-            legacy_loaded: true,
+            by_type_loaded: true,
             by_type,
             by_id: current.by_id.clone(),
             bundle_hash: current.bundle_hash,
@@ -491,7 +491,7 @@ impl SchemaRegistry {
         let mut by_id = current.by_id.clone();
         by_id.extend(bundle.schemas);
         self.snapshot.store(Arc::new(SchemaSnapshot {
-            legacy_loaded: current.legacy_loaded,
+            by_type_loaded: current.by_type_loaded,
             by_type: current.by_type.clone(),
             by_id,
             bundle_hash: Some(bundle.hash),
@@ -1218,7 +1218,7 @@ mod tests {
 
     /// Adopted schemas answer queries but belong to no bundle this process merged (ADR-21).
     #[tokio::test]
-    async fn a_restart_adopts_stored_schemas_without_a_bundle_or_legacy_set() {
+    async fn a_restart_adopts_stored_schemas_without_a_bundle_or_type_manifest() {
         let dir = tempfile::tempdir().unwrap();
         {
             let store = store(&dir);

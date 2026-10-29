@@ -28,8 +28,8 @@ struct Manifest {
     schemas: HashMap<String, String>,
 }
 
-/// Owns the CDN task. Assignment application stops it under split and starts it under legacy.
-/// Dropping the owner aborts any remaining task, including during unwinding.
+/// Owns the CDN task, which runs from startup until an assignment applies (IB-44). Dropping the
+/// owner aborts any remaining task, including during unwinding.
 pub struct SchemaRefresh {
     registry: Arc<SchemaRegistry>,
     manifest_url: String,
@@ -61,7 +61,7 @@ impl SchemaRefresh {
         refresh
     }
 
-    pub fn start(&mut self) {
+    fn start(&mut self) {
         if self.running.is_some() || self.shutdown.is_cancelled() {
             return;
         }
@@ -74,6 +74,11 @@ impl SchemaRefresh {
             token.clone(),
         ));
         self.running = Some(token);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.is_some()
     }
 
     /// Cancellation interrupts HTTP requests and retry waits; returning guarantees the task exited.
@@ -189,7 +194,7 @@ async fn refresh_schemas(
         schemas.insert(dataset_type, Arc::new(desc));
     }
 
-    registry.replace_legacy(schemas);
+    registry.replace_by_type(schemas);
     *last_manifest = Some(manifest_body);
     Ok(true)
 }
@@ -636,7 +641,7 @@ tables:
                 let schema = Arc::new(
                     sqd_query_engine::metadata::parse_dataset_description(SCHEMA).unwrap(),
                 );
-                registry.replace_legacy(HashMap::from([("evm".to_owned(), schema.clone())]));
+                registry.replace_by_type(HashMap::from([("evm".to_owned(), schema.clone())]));
                 let shutdown = CancellationToken::new();
                 let mut refresh = SchemaRefresh::new(
                     registry.clone(),
@@ -751,7 +756,7 @@ tables:
         ));
 
         registry.merge_bundle(HashMap::from([(id(7), description("evm"))]), hash(0xaa));
-        registry.replace_legacy(HashMap::new());
+        registry.replace_by_type(HashMap::new());
 
         let wire = WireErr::from;
 

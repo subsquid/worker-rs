@@ -1,7 +1,7 @@
 //! Conformance harness (spec/13 §harness architecture), Phase 0 skeleton.
 //!
 //! ```text
-//!  HC-1 scheduler sim ──(network state IB-40, assignment IB-41)──▶ ┌─────────┐
+//!  HC-1 scheduler sim ──(network state IB-40b, assignment IB-41b)▶ ┌─────────┐
 //!  HC-2 origin stub ────(chunk files IB-42; byte ledger)─────────▶ │   SUT   │
 //!  HC-8 registry stub ──(epoch, allocations IB-43)───────────────▶ │         │
 //!  HC-3 portal driver ──(signed queries IB-10)───────────────────▶ └────┬────┘
@@ -22,7 +22,6 @@ use sqd_messages::{query_error, Query, QueryExecuted, QueryLogs};
 use sqd_network_transport::{protocol, Keypair, PeerId};
 use tokio_util::sync::CancellationToken;
 
-use sqd_assignments::AssignmentType;
 use sqd_worker::cli::Args;
 use sqd_worker::compute_units::{allocations_checker::AllocationsChecker, RateLimitStatus};
 use sqd_worker::controller::assignment_loop::{ApplyOutcome, AssignmentApplier};
@@ -133,8 +132,6 @@ pub struct Config {
     pub compute_units: u64,
     pub download_backoff_max: Duration,
     pub file_timeout: Duration,
-    /// What the scheduler publishes. The worker pins nothing, so it is what resolves too.
-    pub assignment_type: AssignmentType,
 }
 
 impl Default for Config {
@@ -147,7 +144,6 @@ impl Default for Config {
             // Shipped defaults are 300 s / 60 s — too long to wait on a provoked failure.
             download_backoff_max: Duration::from_millis(200),
             file_timeout: Duration::from_secs(5),
-            assignment_type: AssignmentType::Legacy,
         }
     }
 }
@@ -168,8 +164,7 @@ impl Harness {
         let mut portal_rng = seed.stream("portal-identity");
         let portal = Portal::new(&mut portal_rng);
 
-        let scheduler =
-            Scheduler::start(seed.stream("assignment-builder"), config.assignment_type).await;
+        let scheduler = Scheduler::start(seed.stream("assignment-builder")).await;
         let origin = Origin::start().await;
         let registry = Registry::new(&[portal.peer_id()], config.compute_units);
 
@@ -246,8 +241,6 @@ impl Harness {
             args.assignment_fetch_timeout,
             Duration::from_millis(200),
             worker_id,
-            // Unpinned: what the state names is what the worker reads.
-            None,
         ));
         let harness = Self {
             seed,
@@ -294,7 +287,7 @@ impl Harness {
     }
 
     /// Publishes an assignment on HC-1 and drives the worker's real intake path
-    /// (IB-40 poll → IB-41 fetch → WP-2 application). Returns what was published.
+    /// (IB-40b poll → IB-44b bundle → IB-41b fetch → WP-2 application). Returns what was published.
     pub async fn publish_and_apply(
         &mut self,
         id: &str,

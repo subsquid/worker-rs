@@ -14,13 +14,8 @@ use crate::types::schema::SchemaId;
 use crate::types::state::{ChunkRef, DatasetId};
 use sqd_assignments::ChunkRef as ChunkAssignmentRef;
 
-pub enum AssignmentBlob {
-    Legacy(sqd_assignments::Assignment),
-    Worker(sqd_assignments::WorkerAssignment),
-}
-
 pub struct DatasetsIndex {
-    assignment: AssignmentBlob,
+    assignment: sqd_assignments::WorkerAssignment,
     assignment_id: String,
     status: sqd_assignments::WorkerStatus,
     http_headers: HeaderMap,
@@ -32,7 +27,8 @@ pub struct DatasetsIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSchema {
     Pinned(SchemaId),
-    /// Resolve through the legacy type registry.
+    /// Not pinned by the assignment in force, or held before one applies: resolve through the
+    /// type registry (IB-44).
     ByType,
 }
 
@@ -63,63 +59,40 @@ impl DatasetsIndex {
     /// can fetch it from.
     pub fn list_files(&self, chunk: &ChunkRef) -> Result<Vec<RemoteFile>, UnresolvedChunk> {
         let chunk_ref = *self.chunks.get(chunk).ok_or(UnresolvedChunk::NotAssigned)?;
-        match &self.assignment {
-            AssignmentBlob::Legacy(assignment) => {
-                let chunk = assignment
-                    .get_chunk(chunk_ref)
-                    .ok_or(UnresolvedChunk::NotAssigned)?;
-                let base_url = chunk_base_url(
-                    chunk.dataset_id(),
-                    chunk.dataset_base_url(),
-                    chunk.base_url(),
-                )?;
-                chunk
-                    .files()
-                    .iter()
-                    .map(|file| {
-                        Ok(RemoteFile {
-                            url: join_file(&base_url, file.url())?,
-                            name: file.filename().to_owned(),
-                        })
-                    })
-                    .collect()
-            }
-            AssignmentBlob::Worker(assignment) => {
-                let chunk = assignment
-                    .get_chunk(chunk_ref)
-                    .ok_or(UnresolvedChunk::NotAssigned)?;
-                let chunk_url = chunk.url().ok_or_else(|| {
-                    UnresolvedChunk::NoAddress(format!(
-                        "chunk {} of dataset '{}' is at version {}, which the assignment gives no \
-                         address for",
-                        chunk.index(),
-                        chunk.dataset().id(),
-                        chunk.version()
-                    ))
-                })?;
-                let base_url = directory_url(&chunk_url)?;
-                // Admission refuses a document whose own roster table doesn't define a schema its
-                // chunks name (FM-12), so no chunk in this index reaches here — the arm exists
-                // because the reader's signature allows it, not because it is a live verdict.
-                let tables = assignment.chunk_tables(chunk).ok_or_else(|| {
-                    UnresolvedChunk::NoAddress(format!(
-                        "write schema {} has no roster in the assignment",
-                        chunk.write_schema_id()
-                    ))
-                })?;
-                tables
-                    .map(|table| {
-                        let name = format!("{table}{TABLE_FILE_SUFFIX}");
-                        let url = join_file(&base_url, &name)?;
-                        Ok(RemoteFile { url, name })
-                    })
-                    .collect()
-            }
-        }
+        let chunk = self
+            .assignment
+            .get_chunk(chunk_ref)
+            .ok_or(UnresolvedChunk::NotAssigned)?;
+        let chunk_url = chunk.url().ok_or_else(|| {
+            UnresolvedChunk::NoAddress(format!(
+                "chunk {} of dataset '{}' is at version {}, which the assignment gives no \
+                 address for",
+                chunk.index(),
+                chunk.dataset().id(),
+                chunk.version()
+            ))
+        })?;
+        let base_url = directory_url(&chunk_url)?;
+        // Admission refuses a document whose own roster table doesn't define a schema its
+        // chunks name (FM-12), so no chunk in this index reaches here — the arm exists because
+        // the reader's signature allows it, not because it is a live verdict.
+        let tables = self.assignment.chunk_tables(chunk).ok_or_else(|| {
+            UnresolvedChunk::NoAddress(format!(
+                "write schema {} has no roster in the assignment",
+                chunk.write_schema_id()
+            ))
+        })?;
+        tables
+            .map(|table| {
+                let name = format!("{table}{TABLE_FILE_SUFFIX}");
+                let url = join_file(&base_url, &name)?;
+                Ok(RemoteFile { url, name })
+            })
+            .collect()
     }
 
     pub fn new(
-        assignment: AssignmentBlob,
+        assignment: sqd_assignments::WorkerAssignment,
         id: impl Into<String>,
         key: &Keypair,
         schema_available: impl Fn(SchemaId) -> bool,
@@ -128,86 +101,70 @@ impl DatasetsIndex {
         let no_worker = || anyhow::anyhow!("no assignment for this worker");
         let mut datasets = HashMap::new();
 
-        let (status, headers, chunks) = match &assignment {
-            AssignmentBlob::Legacy(assignment) => {
-                let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
-                let mut chunks = HashMap::new();
-                for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-                    // A base url that won't parse leaves the whole dataset unaddressable — the
-                    // document contradicting itself, so it is inapplicable whole (FM-12).
-                    let dataset = pool(&mut datasets, chunk.dataset_id(), || {
-                        dataset_base(chunk.dataset_id(), chunk.dataset_base_url())
-                    })?;
-                    // Legacy assignments have no versions: every chunk is the ingested copy.
-                    chunks.insert(ChunkRef::new(dataset, Arc::from(chunk.id())), chunk_ref);
-                }
-                (worker.status(), worker.decrypt_headers(key)?, chunks)
-            }
-            AssignmentBlob::Worker(assignment) => {
-                let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
-                let mut chunks = HashMap::new();
-                let mut generations = HashSet::new();
-                let mut checked = HashSet::new();
-                for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
-                    let dataset = chunk.dataset();
-                    let Some(id) = chunk.id() else {
-                        anyhow::bail!(
-                            "chunk {} of dataset '{}' has a hash that isn't UTF-8",
-                            chunk.index(),
-                            dataset.id()
-                        );
-                    };
-                    // A base url that won't parse, or a version with no generation, leaves every
-                    // chunk sharing it unaddressable — inapplicable whole (FM-12).
-                    let dataset_id = pool(&mut datasets, dataset.id(), || {
-                        dataset_base(dataset.id(), dataset.base_url())
-                    })?;
-                    if chunk.version() != 0
-                        && generations.insert((dataset.id(), chunk.version()))
-                        && dataset.get_generation(chunk.version()).is_none()
-                    {
-                        anyhow::bail!(
-                            "chunk '{id}' of dataset '{}' is at version {}, which the dataset registers no generation for",
-                            dataset.id(),
-                            chunk.version()
-                        );
-                    }
-                    // A chunk naming a schema the document's own roster table doesn't define
-                    // is the document disagreeing with itself in the same way.
-                    if assignment.chunk_tables(chunk).is_none() {
-                        anyhow::bail!(
-                            "chunk '{id}' references write schema {} which has no roster in the assignment",
-                            chunk.write_schema_id()
-                        );
-                    }
-                    let schema_id = SchemaId::from(chunk.write_schema_id());
-                    // Once per schema, not per chunk: both of these are properties of the roster.
-                    if checked.insert(schema_id) {
-                        if !schema_available(schema_id) {
-                            crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
-                            anyhow::bail!(
-                                "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
-                            );
-                        }
-                        admit_roster(
-                            schema_id,
-                            assignment
-                                .get_write_schema(chunk.write_schema_id())
-                                .into_iter()
-                                .flat_map(|roster| roster.tables().iter()),
-                        )?;
-                    }
-                    chunks.insert(
-                        ChunkRef {
-                            dataset: dataset_id,
-                            chunk: Arc::from(id),
-                            version: chunk.version(),
-                        },
-                        chunk_ref,
+        let (status, headers, chunks) = {
+            let worker = assignment.get_worker(&peer_id).ok_or_else(no_worker)?;
+            let mut chunks = HashMap::new();
+            let mut generations = HashSet::new();
+            let mut checked = HashSet::new();
+            for (chunk_ref, chunk) in worker.iter_chunks_with_ref() {
+                let dataset = chunk.dataset();
+                let Some(id) = chunk.id() else {
+                    anyhow::bail!(
+                        "chunk {} of dataset '{}' has a hash that isn't UTF-8",
+                        chunk.index(),
+                        dataset.id()
+                    );
+                };
+                // A base url that won't parse, or a version with no generation, leaves every
+                // chunk sharing it unaddressable — inapplicable whole (FM-12).
+                let dataset_id = pool(&mut datasets, dataset.id(), || {
+                    dataset_base(dataset.id(), dataset.base_url())
+                })?;
+                if chunk.version() != 0
+                    && generations.insert((dataset.id(), chunk.version()))
+                    && dataset.get_generation(chunk.version()).is_none()
+                {
+                    anyhow::bail!(
+                        "chunk '{id}' of dataset '{}' is at version {}, which the dataset registers no generation for",
+                        dataset.id(),
+                        chunk.version()
                     );
                 }
-                (worker.status(), worker.decrypt_headers(key)?, chunks)
+                // A chunk naming a schema the document's own roster table doesn't define
+                // is the document disagreeing with itself in the same way.
+                if assignment.chunk_tables(chunk).is_none() {
+                    anyhow::bail!(
+                        "chunk '{id}' references write schema {} which has no roster in the assignment",
+                        chunk.write_schema_id()
+                    );
+                }
+                let schema_id = SchemaId::from(chunk.write_schema_id());
+                // Once per schema, not per chunk: both of these are properties of the roster.
+                if checked.insert(schema_id) {
+                    if !schema_available(schema_id) {
+                        crate::metrics::SCHEMA_BUNDLE_MISMATCHES.inc();
+                        anyhow::bail!(
+                            "chunk '{id}' references write schema {schema_id}, which its schema bundle doesn't carry",
+                        );
+                    }
+                    admit_roster(
+                        schema_id,
+                        assignment
+                            .get_write_schema(chunk.write_schema_id())
+                            .into_iter()
+                            .flat_map(|roster| roster.tables().iter()),
+                    )?;
+                }
+                chunks.insert(
+                    ChunkRef {
+                        dataset: dataset_id,
+                        chunk: Arc::from(id),
+                        version: chunk.version(),
+                    },
+                    chunk_ref,
+                );
             }
+            (worker.status(), worker.decrypt_headers(key)?, chunks)
         };
 
         Ok(Self {
@@ -220,14 +177,12 @@ impl DatasetsIndex {
     }
 
     pub fn chunk_schema(&self, chunk: &ChunkRef) -> ChunkSchema {
-        match (&self.assignment, self.chunks.get(chunk)) {
-            (AssignmentBlob::Worker(assignment), Some(chunk_ref)) => assignment
-                .get_chunk(*chunk_ref)
-                .map_or(ChunkSchema::ByType, |chunk| {
-                    ChunkSchema::Pinned(SchemaId::from(chunk.write_schema_id()))
-                }),
-            _ => ChunkSchema::ByType,
-        }
+        self.chunks
+            .get(chunk)
+            .and_then(|chunk_ref| self.assignment.get_chunk(*chunk_ref))
+            .map_or(ChunkSchema::ByType, |chunk| {
+                ChunkSchema::Pinned(SchemaId::from(chunk.write_schema_id()))
+            })
     }
 
     pub fn status(&self) -> sqd_assignments::WorkerStatus {
@@ -302,20 +257,6 @@ fn header_map(headers: impl IntoIterator<Item = (String, String)>) -> HeaderMap 
 fn dataset_base(dataset: &str, base_url: &str) -> anyhow::Result<Url> {
     Url::from_str(base_url).map_err(|e| {
         anyhow::anyhow!("dataset '{dataset}' base url '{base_url}' doesn't parse: {e}")
-    })
-}
-
-fn chunk_base_url(
-    dataset: &str,
-    dataset_base_url: &str,
-    chunk_prefix: &str,
-) -> Result<Url, UnresolvedChunk> {
-    let base = dataset_base(dataset, dataset_base_url)
-        .map_err(|e| UnresolvedChunk::NoAddress(e.to_string()))?;
-    base.join(&format!("{chunk_prefix}/")).map_err(|e| {
-        UnresolvedChunk::NoAddress(format!(
-            "chunk base url '{chunk_prefix}' doesn't parse: {e}"
-        ))
     })
 }
 

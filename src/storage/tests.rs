@@ -24,59 +24,50 @@ impl Filesystem for TestFilesystem {
 
 #[test]
 fn test_chunks_with_same_block_range() {
-    use sqd_assignments::AssignmentBuilder;
+    use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
     use sqd_network_transport::Keypair;
 
-    use super::datasets_index::{AssignmentBlob, DatasetsIndex};
+    use super::datasets_index::DatasetsIndex;
     use crate::util::tests::chunk;
 
     let chunk_a_id = "0000000000/0000000000-0000001000-abcdef12";
     let chunk_b_id = "0000000000/0000000000-0000001000-abcdef34";
 
-    let mut builder = AssignmentBuilder::new("test-secret").check_continuity(false);
+    let mut builder = WorkerAssignmentBuilder::new("test-secret").check_continuity(false);
+    builder.register_write_schema(7, &["blocks"]).unwrap();
+    let mut dataset = builder.new_dataset("test-dataset", "https://example.com");
 
-    builder
+    dataset
         .new_chunk()
         .id(chunk(chunk_a_id))
-        .dataset_id("test-dataset")
-        .dataset_base_url("https://example.com/")
         .block_range(0..=1000)
         .size(1)
+        .write_schema_id(7)
         .worker_indexes(&[0])
-        .files(&["blocks.parquet".to_owned()])
         .finish()
         .unwrap();
 
     // Same block range as the first chunk, distinguished only by the hash.
-    // `add_chunk` returns Err on duplicate range, but with
+    // `finish` returns Err on a duplicate range, but with
     // `check_continuity(false)` the chunk is still added to the buffer.
-    let _ = builder
+    let _ = dataset
         .new_chunk()
         .id(chunk(chunk_b_id))
-        .dataset_id("test-dataset")
-        .dataset_base_url("https://example.com/")
         .block_range(0..=1000)
         .size(1)
+        .write_schema_id(7)
         .worker_indexes(&[0])
-        .files(&["blocks.parquet".to_owned()])
         .finish();
 
-    builder.finish_dataset();
+    let _ = dataset.finish();
 
     let keypair = Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
-    builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0, 1]);
+    builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok);
 
-    let bytes = builder.finish();
-    let assignment = sqd_assignments::Assignment::from_owned(bytes).unwrap();
+    let assignment = WorkerAssignment::from_owned(builder.finish()).unwrap();
 
-    let index = DatasetsIndex::new(
-        AssignmentBlob::Legacy(assignment),
-        "test-asgn",
-        &keypair,
-        |_| unreachable!("a legacy assignment references no write schemas"),
-    )
-    .unwrap();
+    let index = DatasetsIndex::new(assignment, "test-asgn", &keypair, |_| true).unwrap();
 
     assert_eq!(
         index.chunks().len(),
@@ -124,9 +115,7 @@ mod worker_assignment {
     use sqd_assignments::{WorkerAssignment, WorkerAssignmentBuilder};
     use sqd_network_transport::Keypair;
 
-    use crate::storage::datasets_index::{
-        AssignmentBlob, ChunkSchema, DatasetsIndex, RemoteFile, UnresolvedChunk,
-    };
+    use crate::storage::datasets_index::{ChunkSchema, DatasetsIndex, RemoteFile, UnresolvedChunk};
     use crate::types::schema::SchemaId;
     use crate::types::state::ChunkRef;
     use crate::util::tests::chunk;
@@ -175,11 +164,11 @@ mod worker_assignment {
     }
 
     fn rejection(
-        blob: AssignmentBlob,
+        assignment: WorkerAssignment,
         keypair: &Keypair,
         schema_available: fn(SchemaId) -> bool,
     ) -> String {
-        match DatasetsIndex::new(blob, "test-asgn", keypair, schema_available) {
+        match DatasetsIndex::new(assignment, "test-asgn", keypair, schema_available) {
             Err(e) => format!("{e:#}"),
             Ok(_) => panic!("assignment should have been rejected"),
         }
@@ -213,30 +202,11 @@ mod worker_assignment {
         builder.finish()
     }
 
-    fn legacy_document(peer_id: sqd_network_transport::PeerId, base_url: &str) -> Vec<u8> {
-        let mut builder =
-            sqd_assignments::AssignmentBuilder::new("test-secret").check_continuity(false);
-        builder
-            .new_chunk()
-            .id(chunk(CHUNK_ID))
-            .dataset_id(DATASET)
-            .dataset_base_url(base_url)
-            .block_range(0..=1000)
-            .size(1)
-            .worker_indexes(&[0])
-            .files(&["blocks.parquet".to_owned()])
-            .finish()
-            .unwrap();
-        builder.finish_dataset();
-        builder.add_worker(peer_id, sqd_assignments::WorkerStatus::Ok, &[0]);
-        builder.finish()
-    }
-
     fn files_of(schema_id: u32, tables_present: Option<&[&str]>) -> Vec<RemoteFile> {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let index = DatasetsIndex::new(
-            AssignmentBlob::Worker(assignment(peer_id, schema_id, tables_present)),
+            assignment(peer_id, schema_id, tables_present),
             "test-asgn",
             &keypair,
             all_schemas_available,
@@ -283,7 +253,7 @@ mod worker_assignment {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let index = DatasetsIndex::new(
-            AssignmentBlob::Worker(assignment(peer_id, 7, None)),
+            assignment(peer_id, 7, None),
             "test-asgn",
             &keypair,
             all_schemas_available,
@@ -300,7 +270,7 @@ mod worker_assignment {
 
         assert!(
             index.chunks().contains_key(&chunk),
-            "keyed as the legacy format keys it: dataset, id, version 0"
+            "keyed by dataset, id and version 0"
         );
         assert_eq!(index.assignment_id(), "test-asgn");
         assert_eq!(index.status(), sqd_assignments::WorkerStatus::Ok);
@@ -331,13 +301,8 @@ mod worker_assignment {
         ))
         .unwrap();
 
-        let index = DatasetsIndex::new(
-            AssignmentBlob::Worker(assignment),
-            "test-asgn",
-            &keypair,
-            all_schemas_available,
-        )
-        .expect("assignment is well-formed");
+        let index = DatasetsIndex::new(assignment, "test-asgn", &keypair, all_schemas_available)
+            .expect("assignment is well-formed");
 
         let chunk = index
             .chunks()
@@ -368,16 +333,11 @@ mod worker_assignment {
         fn none_available(_: SchemaId) -> bool {
             false
         }
-        fn not_consulted(_: SchemaId) -> bool {
-            unreachable!("a legacy assignment references no write schemas")
-        }
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let stranger = Keypair::generate_ed25519().public().to_peer_id();
         let long = "b".repeat(250);
-        let worker = |bytes: Vec<u8>| {
-            AssignmentBlob::Worker(WorkerAssignment::from_owned(bytes).expect("well-formed"))
-        };
+        let worker = |bytes: Vec<u8>| WorkerAssignment::from_owned(bytes).expect("well-formed");
         let mut unregistered_version = document(
             peer_id,
             BASE_URL,
@@ -395,10 +355,10 @@ mod worker_assignment {
         assert_eq!(at.len(), 1, "the versions column is the one such vector");
         unregistered_version[at[0] + 4] = 4;
 
-        let faults: Vec<(&str, AssignmentBlob, fn(SchemaId) -> bool, Vec<&str>)> = vec![
+        let faults: Vec<(&str, WorkerAssignment, fn(SchemaId) -> bool, Vec<&str>)> = vec![
             (
                 "assigned to another worker",
-                AssignmentBlob::Worker(assignment(stranger, 7, None)),
+                assignment(stranger, 7, None),
                 all_schemas_available,
                 vec!["no assignment for this worker"],
             ),
@@ -428,23 +388,14 @@ mod worker_assignment {
             ),
             (
                 "write schema its bundle does not carry",
-                AssignmentBlob::Worker(assignment(peer_id, 7, None)),
+                assignment(peer_id, 7, None),
                 none_available,
                 vec!["write schema 7", "schema bundle"],
             ),
-            (
-                "legacy dataset base url that will not parse",
-                AssignmentBlob::Legacy(
-                    sqd_assignments::Assignment::from_owned(legacy_document(peer_id, "not a url"))
-                        .unwrap(),
-                ),
-                not_consulted,
-                vec!["not a url"],
-            ),
         ];
 
-        for (fault, blob, schema_available, fragments) in faults {
-            let message = rejection(blob, &keypair, schema_available);
+        for (fault, assignment, schema_available, fragments) in faults {
+            let message = rejection(assignment, &keypair, schema_available);
             for fragment in fragments {
                 assert!(message.contains(fragment), "{fault}: {message}");
             }
