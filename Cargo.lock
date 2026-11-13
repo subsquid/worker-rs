@@ -7424,7 +7424,7 @@ dependencies = [
 
 [[package]]
 name = "sqd-worker"
-version = "2.17.1-rc.1"
+version = "2.17.1"
 dependencies = [
  "anyhow",
  "arc-swap",
