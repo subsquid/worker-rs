@@ -95,8 +95,8 @@ impl QueryError {
         use tracing::Level;
         match self {
             // The client asked for something invalid or beyond its allocation; every worker
-            // refuses it the same way.
-            Self::BadRequest(_) | Self::NoAllocation => Level::DEBUG,
+            // refuses it the same way. Visible, so an operator can tell it is not a fault.
+            Self::BadRequest(_) | Self::NoAllocation => Level::INFO,
             // The worker lacks the chunk, e.g. while its assignment is catching up.
             Self::NotFound => Level::INFO,
             // The worker is at capacity.
@@ -180,8 +180,8 @@ mod tests {
     #[test]
     fn failed_query_log_level_follows_fault() {
         for (err, level) in [
-            (QueryError::BadRequest("x".into()), Level::DEBUG),
-            (QueryError::NoAllocation, Level::DEBUG),
+            (QueryError::BadRequest("x".into()), Level::INFO),
+            (QueryError::NoAllocation, Level::INFO),
             (QueryError::NotFound, Level::INFO),
             (QueryError::ServiceOverloaded, Level::WARN),
             (QueryError::Other("x".into()), Level::ERROR),

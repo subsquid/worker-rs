@@ -574,7 +574,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         )
         .await;
         if let Err(e) = &outcome {
-            log_failed_query(e);
+            log_failed_query(&query.query_id, peer_id, e);
         }
         metrics::query_executed(&outcome);
 
@@ -700,14 +700,20 @@ pub fn validate_query(
     Ok(())
 }
 
-/// One line per failed query, at the level of whose fault it is. The span supplies the query id,
-/// peer and dataset.
-fn log_failed_query(err: &QueryError) {
+/// One line per failed query, at the level of whose fault it is. The span supplies the dataset;
+/// the id and peer stay in the message so the line is traceable under a filter that hides the span.
+/// An internal error also gets its detail on a second WARN line, kept off the ERROR line that
+/// Sentry captures as an event.
+fn log_failed_query(query_id: &str, peer_id: PeerId, err: &QueryError) {
     match err.log_level() {
-        Level::ERROR => tracing::error!("Query failed: {err:?}"),
-        Level::WARN => tracing::warn!("Query failed: {err:?}"),
-        Level::INFO => tracing::info!("Query failed: {err:?}"),
-        _ => tracing::debug!("Query failed: {err:?}"),
+        Level::ERROR => {
+            tracing::error!("Query {query_id} by {peer_id} failed: {err}");
+            if let QueryError::Other(detail) = err {
+                warn!("Query {query_id} by {peer_id} internal error: {detail}");
+            }
+        }
+        Level::WARN => warn!("Query {query_id} by {peer_id} failed: {err}"),
+        _ => info!("Query {query_id} by {peer_id} failed: {err}"),
     }
 }
 
