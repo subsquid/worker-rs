@@ -20,7 +20,7 @@ use tokio::{
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument, warn, Level};
 
 use crate::{
     cli::Args,
@@ -574,10 +574,7 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
         )
         .await;
         if let Err(e) = &outcome {
-            warn!(
-                "Query {} by {peer_id} execution failed: {e:?}",
-                query.query_id
-            );
+            log_failed_query(e);
         }
         metrics::query_executed(&outcome);
 
@@ -703,6 +700,17 @@ pub fn validate_query(
     Ok(())
 }
 
+/// One line per failed query, at the level of whose fault it is. The span supplies the query id,
+/// peer and dataset.
+fn log_failed_query(err: &QueryError) {
+    match err.log_level() {
+        Level::ERROR => tracing::error!("Query failed: {err:?}"),
+        Level::WARN => tracing::warn!("Query failed: {err:?}"),
+        Level::INFO => tracing::info!("Query failed: {err:?}"),
+        _ => tracing::debug!("Query failed: {err:?}"),
+    }
+}
+
 /// Run an admitted query and refund the unused chunk fraction. The unit was spent at admission, so
 /// malformed params here are still charged and logged. Generic over the engine and rate limiter for
 /// mock-based tests (see [`super::query_deps`]).
@@ -751,8 +759,7 @@ pub async fn execute<W: QueryRunner, A: CuChecker>(
     };
     let result = worker
         .run_query(&query.query, chunk, block_range, Some(peer_id), query_type)
-        .await
-        .inspect_err(|err| tracing::error!("error processing query: {err}"));
+        .await;
 
     if allocation_chip < 1. {
         allocations_checker.refund(peer_id, 1. - allocation_chip);

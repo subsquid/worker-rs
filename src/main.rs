@@ -52,9 +52,14 @@ fn init_single_threaded(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+// The query engine logs a missing column at ERROR, but the worker reports it once per query at
+// the level of the client's fault, so the engine's line is muted by default.
+const DEFAULT_LOG_FILTER: &str = "info,sqd_query::scan::parquet::file=off";
+
 fn setup_tracing(args: &Args) -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::builder().parse_lossy(
-        std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).unwrap_or("info".to_string()),
+        std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV)
+            .unwrap_or(DEFAULT_LOG_FILTER.to_string()),
     );
     let fmt = tracing_subscriber::fmt::layer()
         .compact()
