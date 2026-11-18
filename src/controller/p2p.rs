@@ -20,7 +20,7 @@ use tokio::{
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn, Level};
+use tracing::{info, instrument, warn};
 
 use crate::{
     cli::Args,
@@ -573,9 +573,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             query_type,
         )
         .await;
-        if let Err(e) = &outcome {
-            log_failed_query(&query.query_id, peer_id, e);
-        }
         metrics::query_executed(&outcome);
 
         // Overload is transient, so hint a retry; otherwise keep the admission hint.
@@ -594,6 +591,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             compression,
         )
         .await;
+        if let Logged::Err(err) = &logged {
+            log_failed_query(&query, peer_id, err);
+        }
 
         // Send before logging: the unit was spent at admission so the log happens regardless, and
         // the SQLite write stays off the response path.
@@ -700,20 +700,33 @@ pub fn validate_query(
     Ok(())
 }
 
-/// One line per failed query, at the level of whose fault it is. The span supplies the dataset;
-/// the id and peer stay in the message so the line is traceable under a filter that hides the span.
-/// An internal error also gets its detail on a second WARN line, kept off the ERROR line that
-/// Sentry captures as an event.
-fn log_failed_query(query_id: &str, peer_id: PeerId, err: &QueryError) {
-    match err.log_level() {
-        Level::ERROR => {
-            tracing::error!("Query {query_id} by {peer_id} failed: {err}");
-            if let QueryError::Other(detail) = err {
-                warn!("Query {query_id} by {peer_id} internal error: {detail:?}");
-            }
-        }
-        Level::WARN => warn!("Query {query_id} by {peer_id} failed: {err:?}"),
-        _ => info!("Query {query_id} by {peer_id} failed: {err:?}"),
+/// One line per failed query, at a level set by the class it was answered with: INFO for an
+/// answer that blames the client, WARN or ERROR for one that counts against the worker. It takes
+/// the delivered error, so a result downgraded to `server_error` is logged like any other.
+/// A WARN or ERROR line repeats the span's fields, because a filter above INFO hides the span;
+/// a filter that shows an INFO line shows the span with it.
+fn log_failed_query(query: &Query, peer_id: PeerId, err: &query_error::Err) {
+    use query_error::Err;
+    let (query_id, dataset) = (&query.query_id, &query.dataset);
+    let (chunk, version) = (&query.chunk_id, query.chunk_version);
+    match err {
+        // Sentry makes an issue of this event and groups by its message, so the message is
+        // constant and what varies is in the fields.
+        Err::ServerError(detail) => tracing::error!(
+            query_id, %peer_id, dataset, chunk, version, detail,
+            "error processing query: Internal error"
+        ),
+        // The portal counts a missing chunk against the worker's health and routes away from it.
+        Err::NotFound(_) => warn!(
+            query_id, %peer_id, dataset, chunk, version,
+            "Query failed: chunk not available"
+        ),
+        Err::ServerOverloaded(()) => warn!(
+            query_id, %peer_id, dataset, chunk, version,
+            "Query failed: worker at capacity"
+        ),
+        Err::BadRequest(reason) => info!(chunk, version, reason, "Query failed: bad request"),
+        Err::TooManyRequests(()) => info!(chunk, version, "Query failed: out of allocation"),
     }
 }
 

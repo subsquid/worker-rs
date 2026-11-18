@@ -88,23 +88,6 @@ pub enum QueryError {
     Other(String),
 }
 
-impl QueryError {
-    /// Log level for a failed query, by whose fault it is: the client's mistakes stay out of the
-    /// operator's way, the worker's own trouble does not.
-    pub fn log_level(&self) -> tracing::Level {
-        use tracing::Level;
-        match self {
-            // The client asked for something invalid or beyond its allocation; every worker
-            // refuses it the same way. Visible, so an operator can tell it is not a fault.
-            Self::BadRequest(_) | Self::NoAllocation => Level::INFO,
-            // The worker lacks the chunk. The portal counts this against the worker's health and
-            // routes away from it, so the operator should see it. Overload is the worker's capacity.
-            Self::NotFound | Self::ServiceOverloaded => Level::WARN,
-            Self::Other(_) => Level::ERROR,
-        }
-    }
-}
-
 impl From<std::io::Error> for QueryError {
     fn from(value: std::io::Error) -> Self {
         Self::Other(value.to_string())
@@ -166,26 +149,6 @@ impl From<QueryError> for sqd_messages::query_error::Err {
             QueryError::ServiceOverloaded => Err::ServerOverloaded(()),
             QueryError::NoAllocation => Err::TooManyRequests(()),
             QueryError::Other(e) => Err::ServerError(e.to_string()),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tracing::Level;
-
-    use super::QueryError;
-
-    #[test]
-    fn failed_query_log_level_follows_fault() {
-        for (err, level) in [
-            (QueryError::BadRequest("x".into()), Level::INFO),
-            (QueryError::NoAllocation, Level::INFO),
-            (QueryError::NotFound, Level::WARN),
-            (QueryError::ServiceOverloaded, Level::WARN),
-            (QueryError::Other("x".into()), Level::ERROR),
-        ] {
-            assert_eq!(err.log_level(), level, "{err:?}");
         }
     }
 }
