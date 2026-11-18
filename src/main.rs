@@ -53,7 +53,9 @@ fn init_single_threaded(args: &Args) -> anyhow::Result<()> {
 }
 
 // The query engine logs a missing column at ERROR, but the worker reports it once per query at
-// the level of the client's fault, so the engine's line is muted by default.
+// the level of the client's fault, so the engine's line is muted on the console by default and
+// never sent to Sentry. That target logs nothing else above TRACE.
+const MUTED_ENGINE_TARGET: &str = "sqd_query::scan::parquet::file";
 const DEFAULT_LOG_FILTER: &str = "info,sqd_query::scan::parquet::file=off";
 
 fn setup_tracing(args: &Args) -> Result<()> {
@@ -71,7 +73,9 @@ fn setup_tracing(args: &Args) -> Result<()> {
         .with_filter(env_filter);
     tracing_subscriber::registry()
         .with(fmt)
-        .with(sentry::integrations::tracing::layer())
+        .with(sentry::integrations::tracing::layer().with_filter(
+            tracing_subscriber::filter::filter_fn(|meta| meta.target() != MUTED_ENGINE_TARGET),
+        ))
         .try_init()?;
     Ok(())
 }

@@ -97,10 +97,9 @@ impl QueryError {
             // The client asked for something invalid or beyond its allocation; every worker
             // refuses it the same way. Visible, so an operator can tell it is not a fault.
             Self::BadRequest(_) | Self::NoAllocation => Level::INFO,
-            // The worker lacks the chunk, e.g. while its assignment is catching up.
-            Self::NotFound => Level::INFO,
-            // The worker is at capacity.
-            Self::ServiceOverloaded => Level::WARN,
+            // The worker lacks the chunk. The portal counts this against the worker's health and
+            // routes away from it, so the operator should see it. Overload is the worker's capacity.
+            Self::NotFound | Self::ServiceOverloaded => Level::WARN,
             Self::Other(_) => Level::ERROR,
         }
     }
@@ -182,7 +181,7 @@ mod tests {
         for (err, level) in [
             (QueryError::BadRequest("x".into()), Level::INFO),
             (QueryError::NoAllocation, Level::INFO),
-            (QueryError::NotFound, Level::INFO),
+            (QueryError::NotFound, Level::WARN),
             (QueryError::ServiceOverloaded, Level::WARN),
             (QueryError::Other("x".into()), Level::ERROR),
         ] {
