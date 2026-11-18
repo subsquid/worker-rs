@@ -725,7 +725,9 @@ fn log_failed_query(query: &Query, peer_id: PeerId, err: &query_error::Err) {
             query_id, %peer_id, dataset, chunk, version,
             "Query failed: worker at capacity"
         ),
-        Err::BadRequest(reason) => info!(chunk, version, reason, "Query failed: bad request"),
+        // The reason can quote the client's whole query, which belongs in neither the operator's
+        // log nor Sentry. The response and the query log carry it.
+        Err::BadRequest(_) => info!(chunk, version, "Query failed: bad request"),
         Err::TooManyRequests(()) => info!(chunk, version, "Query failed: out of allocation"),
     }
 }
@@ -1212,5 +1214,43 @@ mod tests {
             }
             other => panic!("expected an Err result, got {other:?}"),
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct LoggedText(Arc<std::sync::Mutex<String>>);
+
+    impl tracing::field::Visit for LoggedText {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            write!(self.0.lock().unwrap(), "{}={value:?} ", field.name()).unwrap();
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LoggedText {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(&mut self.clone());
+        }
+    }
+
+    // A bad request's reason can quote the client's whole query, so the line leaves it out.
+    #[test]
+    fn bad_request_line_leaves_out_the_reason() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let logged = LoggedText::default();
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+        let err = query_error::Err::BadRequest("Can't decode plan 'CLIENT-QUERY'".to_owned());
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(logged.clone()),
+            || log_failed_query(&query, PeerId::random(), &err),
+        );
+
+        let line = logged.0.lock().unwrap().clone();
+        assert!(line.contains("Query failed: bad request"), "{line}");
+        assert!(!line.contains("CLIENT-QUERY"), "{line}");
     }
 }
