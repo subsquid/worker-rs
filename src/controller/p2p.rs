@@ -709,11 +709,11 @@ fn log_failed_query(query_id: &str, peer_id: PeerId, err: &QueryError) {
         Level::ERROR => {
             tracing::error!("Query {query_id} by {peer_id} failed: {err}");
             if let QueryError::Other(detail) = err {
-                warn!("Query {query_id} by {peer_id} internal error: {detail}");
+                warn!("Query {query_id} by {peer_id} internal error: {detail:?}");
             }
         }
-        Level::WARN => warn!("Query {query_id} by {peer_id} failed: {err}"),
-        _ => info!("Query {query_id} by {peer_id} failed: {err}"),
+        Level::WARN => warn!("Query {query_id} by {peer_id} failed: {err:?}"),
+        _ => info!("Query {query_id} by {peer_id} failed: {err:?}"),
     }
 }
 
