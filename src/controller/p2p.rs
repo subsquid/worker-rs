@@ -573,12 +573,6 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             query_type,
         )
         .await;
-        if let Err(e) = &outcome {
-            warn!(
-                "Query {} by {peer_id} execution failed: {e:?}",
-                query.query_id
-            );
-        }
         metrics::query_executed(&outcome);
 
         // Overload is transient, so hint a retry; otherwise keep the admission hint.
@@ -597,6 +591,9 @@ impl<EventStream: Stream<Item = WorkerEvent> + Send + 'static> P2PController<Eve
             compression,
         )
         .await;
+        if let Logged::Err(err) = &logged {
+            log_failed_query(&query, peer_id, err);
+        }
 
         // Send before logging: the unit was spent at admission so the log happens regardless, and
         // the SQLite write stays off the response path.
@@ -703,6 +700,38 @@ pub fn validate_query(
     Ok(())
 }
 
+/// One line per failed query, at a level set by the class it was answered with: INFO for an
+/// answer that blames the client, WARN or ERROR for one that counts against the worker. It takes
+/// the delivered error, so a result downgraded to `server_error` is logged like any other.
+/// A WARN or ERROR line repeats the span's fields, because a filter above INFO hides the span;
+/// a filter that shows an INFO line shows the span with it.
+fn log_failed_query(query: &Query, peer_id: PeerId, err: &query_error::Err) {
+    use query_error::Err;
+    let (query_id, dataset) = (&query.query_id, &query.dataset);
+    let (chunk, version) = (&query.chunk_id, query.chunk_version);
+    match err {
+        // Sentry makes an issue of this event and groups by its message, so the message is
+        // constant and what varies is in the fields.
+        Err::ServerError(detail) => tracing::error!(
+            query_id, %peer_id, dataset, chunk, version, detail,
+            "error processing query: Internal error"
+        ),
+        // The portal counts a missing chunk against the worker's health and routes away from it.
+        Err::NotFound(_) => warn!(
+            query_id, %peer_id, dataset, chunk, version,
+            "Query failed: chunk not available"
+        ),
+        Err::ServerOverloaded(()) => warn!(
+            query_id, %peer_id, dataset, chunk, version,
+            "Query failed: worker at capacity"
+        ),
+        // The reason can quote the client's whole query, which belongs in neither the operator's
+        // log nor Sentry. The response and the query log carry it.
+        Err::BadRequest(_) => info!(chunk, version, "Query failed: bad request"),
+        Err::TooManyRequests(()) => info!(chunk, version, "Query failed: out of allocation"),
+    }
+}
+
 /// Run an admitted query and refund the unused chunk fraction. The unit was spent at admission, so
 /// malformed params here are still charged and logged. Generic over the engine and rate limiter for
 /// mock-based tests (see [`super::query_deps`]).
@@ -751,8 +780,7 @@ pub async fn execute<W: QueryRunner, A: CuChecker>(
     };
     let result = worker
         .run_query(&query.query, chunk, block_range, Some(peer_id), query_type)
-        .await
-        .inspect_err(|err| tracing::error!("error processing query: {err}"));
+        .await;
 
     if allocation_chip < 1. {
         allocations_checker.refund(peer_id, 1. - allocation_chip);
@@ -1186,5 +1214,43 @@ mod tests {
             }
             other => panic!("expected an Err result, got {other:?}"),
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct LoggedText(Arc<std::sync::Mutex<String>>);
+
+    impl tracing::field::Visit for LoggedText {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            write!(self.0.lock().unwrap(), "{}={value:?} ", field.name()).unwrap();
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LoggedText {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(&mut self.clone());
+        }
+    }
+
+    // A bad request's reason can quote the client's whole query, so the line leaves it out.
+    #[test]
+    fn bad_request_line_leaves_out_the_reason() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let logged = LoggedText::default();
+        let query = query_with(Compression::None as i32, Some((100, 200)), CHUNK_ID);
+        let err = query_error::Err::BadRequest("Can't decode plan 'CLIENT-QUERY'".to_owned());
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(logged.clone()),
+            || log_failed_query(&query, PeerId::random(), &err),
+        );
+
+        let line = logged.0.lock().unwrap().clone();
+        assert!(line.contains("Query failed: bad request"), "{line}");
+        assert!(!line.contains("CLIENT-QUERY"), "{line}");
     }
 }

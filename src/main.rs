@@ -52,6 +52,18 @@ fn init_single_threaded(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+// The query engine logs a missing column at ERROR and also returns it as an error, which the
+// worker logs once per failed query, at INFO: the request is at fault, not the worker. So the
+// engine's line is dropped for every layer, whatever RUST_LOG says. Any other ERROR that module
+// logs is dropped with it; today it has none.
+const MUTED_ENGINE_TARGET: &str = "sqd_query::scan::parquet::file";
+
+fn mute_engine_errors<S: tracing::Subscriber>() -> impl Layer<S> {
+    tracing_subscriber::filter::filter_fn(|meta| {
+        !(meta.target() == MUTED_ENGINE_TARGET && *meta.level() == tracing::Level::ERROR)
+    })
+}
+
 fn setup_tracing(args: &Args) -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::builder().parse_lossy(
         std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).unwrap_or("info".to_string()),
@@ -65,6 +77,7 @@ fn setup_tracing(args: &Args) -> Result<()> {
         })
         .with_filter(env_filter);
     tracing_subscriber::registry()
+        .with(mute_engine_errors())
         .with(fmt)
         .with(sentry::integrations::tracing::layer())
         .try_init()?;
@@ -163,4 +176,52 @@ fn main() -> anyhow::Result<()> {
     // Don't let stuck spawn_blocking tasks (unabortable) delay the exit
     runtime.shutdown_timeout(Duration::from_secs(1));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{EnvFilter, Layer};
+
+    use super::{mute_engine_errors, MUTED_ENGINE_TARGET};
+
+    #[derive(Clone, Default)]
+    struct Seen(Arc<Mutex<Vec<(Level, String)>>>);
+
+    impl<S: Subscriber> Layer<S> for Seen {
+        fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+            let meta = event.metadata();
+            self.0
+                .lock()
+                .unwrap()
+                .push((*meta.level(), meta.target().to_owned()));
+        }
+    }
+
+    /// The stack of `setup_tracing`: a console layer under the operators' usual `RUST_LOG=info`,
+    /// and an unfiltered layer standing in for Sentry.
+    #[test]
+    fn engine_missing_column_error_reaches_no_layer() {
+        let (console, sentry) = (Seen::default(), Seen::default());
+        let subscriber = tracing_subscriber::registry()
+            .with(mute_engine_errors())
+            .with(console.clone().with_filter(EnvFilter::new("info")))
+            .with(sentry.clone());
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: MUTED_ENGINE_TARGET, "column 'x' is not found");
+            tracing::warn!(target: MUTED_ENGINE_TARGET, "kept");
+            tracing::error!(target: "sqd_query::scan::parquet", "kept");
+        });
+
+        let kept = vec![
+            (Level::WARN, MUTED_ENGINE_TARGET.to_owned()),
+            (Level::ERROR, "sqd_query::scan::parquet".to_owned()),
+        ];
+        assert_eq!(*console.0.lock().unwrap(), kept);
+        assert_eq!(*sentry.0.lock().unwrap(), kept);
+    }
 }
